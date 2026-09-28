@@ -15,6 +15,14 @@
 #   drm_r1_test.c    tools/test/drm_r1_test.c
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #
+# RDRMNULL_CONF names another .conf to install instead of rdrmnull.conf:
+# the DMA drill variants tools/test/rdrmnull-dma-self.conf and
+# rdrmnull-dma-root-node.conf (see examples/rdrmnull/src/lib.rs). With
+# dma-mode "self" or "root-node" the R1 test expects every object to be
+# bound for DMA. "self" attaches under the root nexus, which leaves the
+# instance in /etc/path_to_inst after rem_drv (the /etc check fails), and
+# "root-node" is expected to panic the machine.
+#
 # The machine needs gcc and the libdrm 2.4.109 library in /usr/lib/xorg/amd64
 # (x11/library/libdrm). The script changes nothing outside this directory
 # except for installing the driver under /usr/kernel/drv, add_drv/rem_drv,
@@ -56,11 +64,24 @@ gemstat() {
 	kstat -p rdrmnull:0:gem
 }
 
+CONF=${RDRMNULL_CONF:-rdrmnull.conf}
+case $(sed -e 's/#.*//' "$CONF" | tr -d ' \t') in
+*'dma-mode="self"'* | *'dma-mode="root-node"'*) RDRMNULL_DMA=1 ;;
+*) RDRMNULL_DMA=0 ;;
+esac
+export RDRMNULL_DMA
+
 fail=0
 had_dri=no
 [ -d /dev/dri ] && had_dri=yes
 
 step uname -a
+# devfs drops the clone@0 nodes of idle drivers (bridge, llc1, ptm, ...) a
+# few seconds after boot, and devfsadm -C at the end recreates them, which
+# made the first run on a freshly booted machine report five new /devices
+# entries that have nothing to do with rdrmnull. Take both snapshots after
+# devfsadm -C.
+step devfsadm -C
 state before
 step digest -a sha256 rdrmnull.a
 step ld -ztype=kmod -z allextract rdrmnull.a -o rdrmnull || exit 1
@@ -89,7 +110,10 @@ step gcc -m64 -Wall -I drm -o drm_r1_test drm_r1_test.c \
 step gcc -m32 -Wall -DPROBE32 -I drm -o drm_r1_probe32 drm_r1_test.c || exit 1
 
 step cp rdrmnull /usr/kernel/drv/amd64/rdrmnull || exit 1
-step cp rdrmnull.conf /usr/kernel/drv/rdrmnull.conf || exit 1
+echo
+echo "\$ driver configuration $CONF (RDRMNULL_DMA=$RDRMNULL_DMA)"
+sed -e '/^#/d' "$CONF"
+step cp "$CONF" /usr/kernel/drv/rdrmnull.conf || exit 1
 step add_drv -m '* 0666 root sys' rdrmnull || fail=1
 if [ $fail -eq 0 ]; then
 	step modinfo -c | grep rdrmnull
@@ -102,7 +126,7 @@ if [ $fail -eq 0 ]; then
 	# at boot (after a panic during an earlier run) keeps the default 0600
 	# root root; set what minor_perm says, and rem_drv -C removes the
 	# attribute nodes again at the end.
-	for n in /devices/pseudo/rdrmnull@0:card0 /devices/pseudo/rdrmnull@0:renderD128; do
+	for n in $(find /devices -name 'rdrmnull@*:card0' -o -name 'rdrmnull@*:renderD128'); do
 		case $(ls -l "$n" | awk '{print $1, $3, $4}') in
 		"crw-rw-rw- root sys") ;;
 		*) step chmod 0666 "$n"; step chown root:sys "$n" ;;

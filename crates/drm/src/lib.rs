@@ -42,8 +42,8 @@
 //! impl ddi::Driver for MyModule {
 //!     type Instance = drm::Device<MyDriver>;
 //!     const LINKINFO: &'static CStr = c"my DRM driver";
-//!     fn attach(dev: DevInfo, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
-//!         drm::Device::attach(dev, MyDriver::new(), ctx)
+//!     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
+//!         drm::Device::attach(node, MyDriver::new(), ctx)
 //!     }
 //!     fn detach(inst: Self::Instance, _dev: DevInfo, ctx: &Sleepable)
 //!         -> Result<(), (Self::Instance, DdiError)> {
@@ -90,4 +90,4 @@ pub mod uaccess;
 pub use device::Device;
 pub use driver::{BusId, Driver, Features, ModeConfig};
 #[cfg(not(test))]
-pub use gem::{GemObject, GemRef, SysMem};
+pub use gem::{GemDma, GemObject, GemRef, SysMem};

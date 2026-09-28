@@ -236,7 +236,7 @@ from `ddi_umem_alloc(9F)` with `DDI_UMEM_SLEEP` (there is no
 `DDI_UMEM_PAGELOCK`; non-pageable is the default), which the function
 zero-fills itself (`vm/seg_dev.c` `bzero`s every non-pageable allocation).
 With `Driver::DMA_ATTR` set, the memory is bound with
-`ddi_dma_addr_bind_handle(9F)` against the device's node and
+`ddi_dma_addr_bind_handle(9F)` against the device's own node and
 `SysMem::sg_iter` yields the cookies as the scatter/gather table; the core
 checks that the cookies cover the object exactly. `rdrmnull` is a pseudo
 device and the pseudo nexus refuses DMA handles, so its objects are not
@@ -244,7 +244,28 @@ bound; a trial run with `rdrmnull` as a child of the root nexus bound every
 object (300 cookies for a 1,228,800-byte buffer, sizes summing up), but
 such a node leaves its instance in `/etc/path_to_inst` after `rem_drv`, and
 binding against `ddi_root_node(9F)` from the pseudo node panicked the test
-machine, so neither is used. Object memory is locked, so a driver sets
+machine, so neither is used. Both can be repeated on purpose with the DMA
+drill, a test aid: `Driver::gem_dma` chooses the binding at attach time,
+and `rdrmnull` reads it from the `dma-mode` property
+(`tools/test/rdrmnull-dma-self.conf` binds against its own node under the
+root nexus, `tools/test/rdrmnull-dma-root-node.conf` reproduces the panic;
+`RDRMNULL_CONF=<file> ./run-r1-test.sh`, only in a disposable VM with a
+dump device).
+
+Since illumos-ddi's own-node rule (its `docs/DESIGN.md` section 5.12), a
+DMA handle can only be allocated from the `ddi::OwnNode` that
+`ddi::Driver::attach` receives. `drm::Device::attach` takes that node and
+hands it to the GEM state, and `SysMem::new` takes `&OwnNode`; a `DevInfo`
+no longer allocates DMA handles, and illumos-ddi refuses the root node and
+nodes of other drivers with `DmaError::NotOwnNode` (`ENXIO`). The
+`root-node` drill therefore goes around illumos-ddi with raw
+`ddi_dma_alloc_handle(9F)` calls through `GemDma::against`, which exists
+only with the test-only cargo feature `panic-drill` of `drm` and
+`rdrmnull`, off by default. A production build of `rdrmnull` cannot name
+another node at all: it refuses `dma-mode="root-node"` at attach with a
+warning, and its module has no reference to `ddi_root_node`. The drill
+module is built with `cargo xtask build rdrmnull --features panic-drill`.
+Object memory is locked, so a driver sets
 limits per object and per device (`MAX_OBJECT_SIZE`, `MAX_MEMORY`; 256 MiB
 and 1 GiB by default, 16 and 64 MiB in `rdrmnull`); requests above them are
 `ENOMEM`. The device budget is charged before the memory is allocated

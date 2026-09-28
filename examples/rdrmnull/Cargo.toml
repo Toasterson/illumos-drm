@@ -10,6 +10,12 @@ publish = false
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+# Test aid, off by default: allows dma-mode="root-node", which panics the
+# system on purpose (see the crate documentation). Without it that mode is
+# refused at attach and the module cannot name another node at all.
+panic-drill = ["drm/panic-drill"]
+
 [dependencies]
 # global-alloc-sleep: the DRM core keeps its handle and name tables in
 # alloc::collections::BTreeMap, whose nodes come from the global allocator;

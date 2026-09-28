@@ -9,6 +9,8 @@
 // * `lint-man` is not vendored: this workspace has no `-sys` crate of its
 //   own, and illumos-ddi runs it on `ddi-sys`.
 // * `uapi-dump` and `uapi-check` are new and belong to this repository.
+// * `build` accepts `--features <list>`, for the test-only `panic-drill`
+//   feature of rdrmnull.
 //
 // Keep build, link, deps and kernel-check in step with upstream when the
 // pinned illumos-ddi revision moves.
@@ -16,7 +18,7 @@
 //! Builds and links the DRM kernel modules and checks their interfaces.
 //!
 //! ```text
-//! cargo xtask build <pkg> [--debug]  # kernel target, pinned nightly, -Zbuild-std
+//! cargo xtask build <pkg> [--debug] [--features <list>]  # kernel target, pinned nightly, -Zbuild-std
 //! cargo xtask link  <pkg>            # on illumos: ld -ztype=kmod
 //! cargo xtask deps  <pkg>            # -N list and mapfiles implied by the crate graph
 //! cargo xtask kernel-check --emit | ssh root@host mdb -k | cargo xtask kernel-check --verify -
@@ -42,8 +44,12 @@ const NIGHTLY: &str = "nightly-2026-04-16";
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let r = match args.as_slice() {
-        [cmd, pkg] if cmd == "build" => build(pkg, true),
-        [cmd, pkg, dbg] if cmd == "build" && dbg == "--debug" => build(pkg, false),
+        [cmd, pkg] if cmd == "build" => build(pkg, true, None),
+        [cmd, pkg, dbg] if cmd == "build" && dbg == "--debug" => build(pkg, false, None),
+        [cmd, pkg, f, list] if cmd == "build" && f == "--features" => build(pkg, true, Some(list)),
+        [cmd, pkg, dbg, f, list] if cmd == "build" && dbg == "--debug" && f == "--features" => {
+            build(pkg, false, Some(list))
+        }
         [cmd, pkg] if cmd == "link" => link(pkg),
         [cmd, pkg] if cmd == "deps" => deps(pkg).map(|d| {
             println!("-N: {:?}", d.needed);
@@ -58,7 +64,8 @@ fn main() -> ExitCode {
             Ok(())
         }
         [cmd, file] if cmd == "uapi-check" => uapi_check(file),
-        _ => Err("usage: cargo xtask (build [--debug]|link|deps) <package> | kernel-check --emit|--verify FILE \
+        _ => Err("usage: cargo xtask (build [--debug] [--features LIST]|link|deps) <package> \
+                  | kernel-check --emit|--verify FILE \
                   | uapi-dump | uapi-check FILE"
             .into()),
     };
@@ -169,7 +176,7 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
     Ok(d)
 }
 
-fn build(pkg: &str, release: bool) -> Result<(), String> {
+fn build(pkg: &str, release: bool, features: Option<&String>) -> Result<(), String> {
     let root = workspace_root();
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&root)
@@ -180,6 +187,9 @@ fn build(pkg: &str, release: bool) -> Result<(), String> {
         .env("RUSTFLAGS", "-C symbol-mangling-version=v0 -C force-frame-pointers=yes");
     if release {
         cmd.arg("--release");
+    }
+    if let Some(f) = features {
+        cmd.args(["--features", f]);
     }
     println!("{cmd:?}");
     let st = cmd.status().map_err(|e| e.to_string())?;

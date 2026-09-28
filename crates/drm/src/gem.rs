@@ -86,7 +86,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ddi::prelude::*;
 use ddi::sys;
-use ddi::{DmaAttr, DmaCookie};
+use ddi::{DmaAttr, DmaCookie, OwnNode};
 
 use crate::defer::{self, Ctx, DeferList, Deferrable};
 use crate::idmap::{IdAlloc, IdMap};
@@ -278,8 +278,50 @@ pub struct SysMem {
 }
 
 struct SgTable {
-    handle: ddi::DmaHandle,
+    handle: SgHandle,
     ncookies: usize,
+}
+
+/// The DMA handle of a binding.
+enum SgHandle {
+    /// Allocated through illumos-ddi against the device's own node.
+    Own(ddi::DmaHandle),
+    /// Allocated with a raw `ddi_dma_alloc_handle(9F)` against a foreign
+    /// node, for the DMA drill only (`GemDma::against`); freed with
+    /// `ddi_dma_free_handle(9F)` when dropped.
+    #[cfg(feature = "panic-drill")]
+    Raw(sys::ddi_dma_handle_t),
+}
+
+impl SgHandle {
+    fn as_raw(&self) -> sys::ddi_dma_handle_t {
+        match self {
+            SgHandle::Own(h) => h.as_raw(),
+            #[cfg(feature = "panic-drill")]
+            SgHandle::Raw(h) => *h,
+        }
+    }
+}
+
+#[cfg(feature = "panic-drill")]
+impl Drop for SgHandle {
+    fn drop(&mut self) {
+        if let SgHandle::Raw(h) = self {
+            // SAFETY: allocated in SysMem::bind, unbound by SysMem's Drop
+            // before the table is dropped, and freed only here.
+            unsafe { sys::ddi_dma_free_handle(h) }
+        }
+    }
+}
+
+/// The node the handles of a binding are allocated against.
+#[derive(Clone, Copy)]
+pub(crate) enum DmaTarget<'a> {
+    /// The device's own node, the only one the DDI allows.
+    Own(&'a OwnNode),
+    /// Another node, for the DMA drill only (`GemDma::against`).
+    #[cfg(feature = "panic-drill")]
+    Foreign(DevInfo),
 }
 
 // SAFETY: kernel memory with no thread affinity; the DMA handle may be used
@@ -289,21 +331,25 @@ unsafe impl Send for SysMem {}
 // SAFETY: as above; &SysMem only reads the fixed fields.
 unsafe impl Sync for SysMem {}
 
-fn dma_errno(e: ddi::DmaError) -> Errno {
-    match e {
-        ddi::DmaError::NoResources | ddi::DmaError::TooBig => Errno::ENOMEM,
-        ddi::DmaError::BadAttr => Errno::EINVAL,
-        _ => Errno::EIO,
-    }
-}
-
 impl SysMem {
     /// Allocates `size` bytes, rounded up to whole pages, and binds them for
-    /// DMA with `dma` if given. Fails with `EINVAL` for a zero size,
-    /// `ENOMEM` if memory or DMA resources are short, and the mapped error
-    /// of the DMA framework otherwise (`EINVAL` for attributes it cannot
-    /// satisfy, `EIO` for the rest).
-    pub fn new(dev: &DevInfo, size: usize, dma: Option<&DmaAttr>, ctx: &Sleepable) -> Result<SysMem, Errno> {
+    /// DMA with `dma` if given, against `node`, the device's own node that
+    /// the driver received in attach (the DMA handle "must only be used by
+    /// the device for which it was allocated", `ddi_dma_alloc_handle(9F)`).
+    /// Fails with `EINVAL` for a zero size, `ENOMEM` if memory or DMA
+    /// resources are short, and the errno of the DMA error otherwise
+    /// (`From<DmaError> for Errno` in illumos-ddi: `EINVAL` for attributes
+    /// the framework cannot satisfy, which is what a pseudo node gets).
+    pub fn new(node: &OwnNode, size: usize, dma: Option<&DmaAttr>, ctx: &Sleepable) -> Result<SysMem, Errno> {
+        Self::alloc(DmaTarget::Own(node), size, dma, ctx)
+    }
+
+    pub(crate) fn alloc(
+        target: DmaTarget<'_>,
+        size: usize,
+        dma: Option<&DmaAttr>,
+        ctx: &Sleepable,
+    ) -> Result<SysMem, Errno> {
         let size = offsets::page_round(size as u64).and_then(|s| usize::try_from(s).ok()).ok_or(Errno::EINVAL)?;
         let mut cookie: sys::ddi_umem_cookie_t = ptr::null_mut();
         // SAFETY: DDI_UMEM_SLEEP from thread context, which the token
@@ -322,22 +368,48 @@ impl SysMem {
         let mut mem = SysMem { cookie, kaddr, size, sg: None };
         if let Some(attr) = dma {
             // On failure `mem` is dropped, which frees the memory.
-            mem.sg = Some(mem.bind(dev, attr, ctx)?);
+            mem.sg = Some(mem.bind(target, attr, ctx)?);
             // The table must describe exactly the object: a binding that
             // covered less (or more) would be a framework bug that a device
             // would turn into memory corruption.
             let n = mem.sg_iter().len();
             let total = mem.sg_iter().try_fold(0usize, |t, c| t.checked_add(c.size));
             if n != mem.sg_len() || total != Some(size) {
-                dev.warn(format_args!("DMA binding of {size} bytes has {n} cookies totalling {total:?}"));
+                target.dev().warn(format_args!("DMA binding of {size} bytes has {n} cookies totalling {total:?}"));
                 return Err(Errno::EIO);
             }
         }
         Ok(mem)
     }
 
-    fn bind(&self, dev: &DevInfo, attr: &DmaAttr, ctx: &Sleepable) -> Result<SgTable, Errno> {
-        let handle = ddi::DmaHandle::new(dev, attr, ctx).map_err(dma_errno)?;
+    fn bind(&self, target: DmaTarget<'_>, attr: &DmaAttr, ctx: &Sleepable) -> Result<SgTable, Errno> {
+        let handle = match target {
+            DmaTarget::Own(node) => SgHandle::Own(ddi::DmaHandle::new(node, attr, ctx).map_err(Errno::from)?),
+            #[cfg(feature = "panic-drill")]
+            DmaTarget::Foreign(dev) => {
+                // The drill bypasses illumos-ddi, whose guard would refuse
+                // the node with DmaError::NotOwnNode before the kernel sees
+                // it.
+                let mut raw: sys::ddi_dma_handle_t = ptr::null_mut();
+                // SAFETY (in the Rust sense only; the DDI forbids this): the
+                // node is live by the contract of GemDma::against, the
+                // attributes are a valid structure the kernel copies,
+                // DDI_DMA_SLEEP from thread context, and `raw` is writable.
+                let r = unsafe {
+                    sys::ddi_dma_alloc_handle(
+                        dev.as_raw(),
+                        attr.as_raw(),
+                        sys::DDI_DMA_SLEEP,
+                        ptr::null_mut(),
+                        &mut raw,
+                    )
+                };
+                if raw.is_null() || r != sys::DDI_SUCCESS {
+                    return Err(if r == sys::DDI_DMA_BADATTR { Errno::EINVAL } else { Errno::EIO });
+                }
+                SgHandle::Raw(raw)
+            }
+        };
         // SAFETY: a fresh handle; the address and length describe memory we
         // own in the kernel address space (NULL `as`); DDI_DMA_SLEEP from
         // thread context; NULL cookie and count pointers as the manual asks
@@ -420,6 +492,61 @@ impl Drop for SysMem {
         // mapping refers to it any more, because every mapping holds a
         // reference to the object that owns this memory.
         unsafe { sys::ddi_umem_free(self.cookie.as_ptr()) }
+    }
+}
+
+/// How the object memory of a device is bound for DMA
+/// ([`Driver::gem_dma`](crate::Driver::gem_dma)): the attributes.
+///
+/// [`GemDma::new`] binds against the device's own node, the
+/// [`OwnNode`] that [`Device::attach`](crate::Device::attach) received and
+/// hands to the GEM state, the only node `ddi_dma_alloc_handle(9F)`
+/// accepts. Only with the `panic-drill` cargo feature, a test aid that is
+/// off by default, does `GemDma::against` exist, which names another node;
+/// it is for the `rdrmnull` DMA drill, which reproduces the kernel panic that
+/// binding against `ddi_root_node(9F)` from a pseudo node caused (see
+/// `tools/test/rdrmnull-dma-root-node.conf`). Without the feature a driver
+/// cannot name another node at all.
+#[derive(Clone, Copy)]
+pub struct GemDma {
+    attr: DmaAttr,
+    #[cfg(feature = "panic-drill")]
+    foreign: Option<DevInfo>,
+}
+
+impl GemDma {
+    /// Binds with `attr` against the device's own node.
+    pub const fn new(attr: DmaAttr) -> GemDma {
+        GemDma {
+            attr,
+            #[cfg(feature = "panic-drill")]
+            foreign: None,
+        }
+    }
+
+    /// Binds with `attr` against `node` instead of the device's own node,
+    /// with raw `ddi_dma_alloc_handle(9F)` calls that bypass illumos-ddi's
+    /// own-node rule and its guard. Only with the `panic-drill` feature.
+    ///
+    /// # Safety
+    /// `ddi_dma_alloc_handle(9F)` requires the driver's own node. Any other
+    /// node is outside the DDI: the caller must keep `node` valid for as long
+    /// as the device exists and accepts whatever the DMA framework does with
+    /// it, up to a panic (for `ddi_root_node(9F)`, a panic at the first
+    /// bind). Only the DMA drill of `rdrmnull` uses this.
+    #[cfg(feature = "panic-drill")]
+    pub const unsafe fn against(attr: DmaAttr, node: DevInfo) -> GemDma {
+        GemDma { attr, foreign: Some(node) }
+    }
+}
+
+impl DmaTarget<'_> {
+    fn dev(self) -> DevInfo {
+        match self {
+            DmaTarget::Own(node) => node.dev(),
+            #[cfg(feature = "panic-drill")]
+            DmaTarget::Foreign(dev) => dev,
+        }
     }
 }
 
@@ -947,7 +1074,12 @@ pub struct GemCore<O: GemObject> {
     // task touches is declared below.
     tq: TaskQueue,
     dev: DevInfo,
+    /// The device's own node, which object memory is bound against for DMA.
+    node: OwnNode,
     dma: Option<DmaAttr>,
+    /// The node the DMA drill binds against instead (`GemDma::against`).
+    #[cfg(feature = "panic-drill")]
+    foreign: Option<DevInfo>,
     max_memory: u64,
     names: Mutex<IdMap<GemRef<O>, KIdSpace>>,
     offsets: Mutex<OffsetMap<ObjPtr<O>, VmemArena>>,
@@ -988,16 +1120,17 @@ unsafe impl<O: GemObject> Send for CorePtr<O> {}
 
 impl<O: GemObject> GemCore<O> {
     /// Creates the GEM state of a device: the deferred-release task
-    /// queue, the name space, the offset arena and the `gem` kstat. `dma`
-    /// are the attributes every object's memory is bound with against
-    /// `dev`, or `None` for devices that do no DMA; `max_memory` limits the
-    /// memory of all objects together.
+    /// queue, the name space, the offset arena and the `gem` kstat. `node`
+    /// is the device's own node from attach. `dma` says how every object's
+    /// memory is bound (against `node`), or is `None` for devices that do no
+    /// DMA; `max_memory` limits the memory of all objects together.
     pub(crate) fn new(
-        dev: DevInfo,
-        dma: Option<DmaAttr>,
+        node: OwnNode,
+        dma: Option<GemDma>,
         max_memory: usize,
         ctx: &Sleepable,
     ) -> Result<KArc<GemCore<O>>, Errno> {
+        let dev = node.dev();
         let drv = dev.driver_name().to_str().map_err(|_| Errno::EINVAL)?;
         let inst = dev.instance().0;
         let tq = TaskQueue::new(dev, c"gemfree", NonZeroU32::MIN, ctx).map_err(|_| Errno::ENOMEM)?;
@@ -1014,7 +1147,10 @@ impl<O: GemObject> GemCore<O> {
             GemCore {
                 tq,
                 dev,
-                dma,
+                node,
+                dma: dma.map(|d| d.attr),
+                #[cfg(feature = "panic-drill")]
+                foreign: dma.and_then(|d| d.foreign),
                 max_memory: max_memory as u64,
                 names: Mutex::new(IdMap::new(names)),
                 offsets: Mutex::new(OffsetMap::new(arena)),
@@ -1042,7 +1178,15 @@ impl<O: GemObject> GemCore<O> {
     /// Allocates system memory for an object of this device, bound for DMA
     /// if the driver asked for it ([`SysMem::new`]).
     pub fn sys_mem(&self, size: usize, ctx: &Sleepable) -> Result<SysMem, Errno> {
-        SysMem::new(&self.dev, size, self.dma.as_ref(), ctx)
+        SysMem::alloc(self.dma_target(), size, self.dma.as_ref(), ctx)
+    }
+
+    fn dma_target(&self) -> DmaTarget<'_> {
+        #[cfg(feature = "panic-drill")]
+        if let Some(dev) = self.foreign {
+            return DmaTarget::Foreign(dev);
+        }
+        DmaTarget::Own(&self.node)
     }
 
     /// Returns a snapshot of the statistics.

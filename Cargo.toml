@@ -13,11 +13,12 @@ rust-version = "1.97"
 [workspace.dependencies]
 drm-uapi = { path = "crates/drm-uapi" }
 drm = { path = "crates/drm" }
-# illumos-ddi at the drm-r0 branch: main (eb18ab93b7) plus clone-open
+# illumos-ddi at the dma-own-node branch: drm-r0 (main plus clone-open
 # support in the CharDevice glue, which the DRM core needs for per-file
-# state, and the devmap(9E) entry point, which it needs for GEM mmap.
-ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "bfc7ff7b2ae520e0c5592ae4e9780e22564bc070" }
-ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "bfc7ff7b2ae520e0c5592ae4e9780e22564bc070", default-features = false }
+# state, and the devmap(9E) entry point, which it needs for GEM mmap), plus
+# OwnNode, the capability that DMA handles are allocated from.
+ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "b24c307298bc6b2c711bbde20a418e7df3605e52" }
+ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "b24c307298bc6b2c711bbde20a418e7df3605e52", default-features = false }
 serde_json = "1"
 
 # Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug

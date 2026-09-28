@@ -166,9 +166,12 @@ pub trait Driver: Send + Sync + Sized + 'static {
     /// The mode-setting properties reported by `GET_CAP`.
     const MODE_CONFIG: ModeConfig = ModeConfig::DEFAULT;
     /// The DMA attributes GEM object memory is bound with, against the
-    /// device's own node, which gives every object a scatter/gather table
+    /// device's own node (the `ddi::OwnNode` that
+    /// [`Device::attach`](crate::Device::attach) received), which gives
+    /// every object a scatter/gather table
     /// ([`SysMem::sg_iter`](crate::gem::SysMem::sg_iter)). `None` for a
     /// device that does no DMA; pseudo devices cannot have DMA handles.
+    /// [`Driver::gem_dma`] can choose at attach time instead.
     const DMA_ATTR: Option<DmaAttr> = None;
     /// The largest GEM object a client may create; larger requests fail
     /// with `ENOMEM`.
@@ -187,6 +190,18 @@ pub trait Driver: Send + Sync + Sized + 'static {
     /// memory converted with `From`.
     #[cfg(not(test))]
     type Object: crate::gem::GemObject + From<crate::gem::SysMem>;
+
+    /// Says how GEM object memory of the device `dev` is bound for DMA,
+    /// once, when the device attaches. The default is
+    /// [`DMA_ATTR`](Driver::DMA_ATTR) against the device's own node; a
+    /// driver whose
+    /// attributes depend on the hardware or on its `.conf` file returns them
+    /// here.
+    #[cfg(not(test))]
+    fn gem_dma(&self, dev: &DevInfo) -> Option<crate::gem::GemDma> {
+        let _ = dev;
+        Self::DMA_ATTR.map(crate::gem::GemDma::new)
+    }
 
     /// Writes the bus ID of the device. The default, for pseudo devices, is
     /// `pseudo:<driver>@<instance>`; PCI drivers write
