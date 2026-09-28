@@ -24,9 +24,10 @@ pub const EOPNOTSUPP: Errno = match Errno::new(ddi::sys::errno::EOPNOTSUPP) {
     None => Errno::EINVAL,
 };
 
-/// Answers `DRM_IOCTL_GET_CAP`. Unknown capabilities fail with `EINVAL`;
-/// mode-setting capabilities of a driver without [`Features::MODESET`] fail
-/// with `EOPNOTSUPP`.
+/// Answers `DRM_IOCTL_GET_CAP`. Apart from the capabilities every driver
+/// answers, a driver without [`Features::MODESET`] refuses all with
+/// `EOPNOTSUPP`, as on Linux; for a mode-setting driver, unknown
+/// capabilities fail with `EINVAL`.
 pub fn get_cap(features: Features, mode: &ModeConfig, cap: u64) -> Result<u64, Errno> {
     let Ok(cap) = u32::try_from(cap) else { return Err(Errno::EINVAL) };
     // Capabilities that make sense for every driver, including render-only
@@ -36,6 +37,11 @@ pub fn get_cap(features: Features, mode: &ModeConfig, cap: u64) -> Result<u64, E
         // PRIME import/export and sync objects are milestone R2.
         uapi::DRM_CAP_PRIME | uapi::DRM_CAP_SYNCOBJ | uapi::DRM_CAP_SYNCOBJ_TIMELINE => return Ok(0),
         _ => {}
+    }
+    // Everything else is about mode setting; Linux answers EOPNOTSUPP for
+    // any other capability of a driver without it, known or not.
+    if !features.contains(Features::MODESET) {
+        return Err(EOPNOTSUPP);
     }
     let known = matches!(
         cap,
@@ -52,9 +58,6 @@ pub fn get_cap(features: Features, mode: &ModeConfig, cap: u64) -> Result<u64, E
     );
     if !known {
         return Err(Errno::EINVAL);
-    }
-    if !features.contains(Features::MODESET) {
-        return Err(EOPNOTSUPP);
     }
     Ok(match cap {
         uapi::DRM_CAP_CURSOR_WIDTH => nonzero_or(mode.cursor_width, 64),
@@ -95,21 +98,28 @@ pub struct ClientCaps {
 impl ClientCaps {
     /// Applies `DRM_IOCTL_SET_CLIENT_CAP`. Every client capability is a
     /// mode-setting one, so a driver without [`Features::MODESET`] refuses
-    /// them all with `EOPNOTSUPP`. Values other than 0 and 1 and unknown
-    /// capabilities fail with `EINVAL`. `ATOMIC` needs
-    /// [`Features::ATOMIC`] and, as on Linux, sets `UNIVERSAL_PLANES` and
-    /// `ASPECT_RATIO` to the same value; `WRITEBACK_CONNECTORS` needs
-    /// `ATOMIC` to be set first. A failed call changes nothing.
+    /// them all with `EOPNOTSUPP`. Unknown capabilities and values other
+    /// than 0 and 1 fail with `EINVAL`, except that `ATOMIC` also accepts 2,
+    /// the value Linux lets an Xorg server use to ask for atomic mode
+    /// setting knowingly. `ATOMIC` needs [`Features::ATOMIC`] and, as on
+    /// Linux, sets `UNIVERSAL_PLANES` and `ASPECT_RATIO` along with it;
+    /// `WRITEBACK_CONNECTORS` needs `ATOMIC` to be set first. A failed call
+    /// changes nothing.
+    ///
+    /// Linux also refuses `ATOMIC` = 1 from processes whose name starts
+    /// with `X`, because the modesetting driver of Xorg misuses it. That
+    /// check needs the process name, which no committed DDI interface
+    /// provides; it belongs with atomic mode setting in milestone R3.
     pub fn set(&mut self, features: Features, cap: u64, value: u64) -> Result<(), Errno> {
         if !features.contains(Features::MODESET) {
             return Err(EOPNOTSUPP);
         }
         let Ok(cap) = u32::try_from(cap) else { return Err(Errno::EINVAL) };
-        let on = match value {
-            0 => false,
-            1 => true,
-            _ => return Err(Errno::EINVAL),
-        };
+        let max = if cap == uapi::DRM_CLIENT_CAP_ATOMIC { 2 } else { 1 };
+        if value > max {
+            return Err(Errno::EINVAL);
+        }
+        let on = value != 0;
         match cap {
             uapi::DRM_CLIENT_CAP_STEREO_3D => self.stereo_3d = on,
             uapi::DRM_CLIENT_CAP_UNIVERSAL_PLANES => self.universal_planes = on,
@@ -157,10 +167,10 @@ mod tests {
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_CURSOR_HEIGHT as u64), Ok(128));
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_ADDFB2_MODIFIERS as u64), Ok(1));
         // Unknown capabilities, including ones that only differ in the high
-        // bits, are EINVAL whatever the features.
-        for f in [Features::NONE, KMS] {
-            assert_eq!(get_cap(f, &m, 0), Err(Errno::EINVAL));
-            assert_eq!(get_cap(f, &m, 0x15), Err(Errno::EINVAL));
+        // bits, are EINVAL for a mode-setting driver and EOPNOTSUPP without.
+        for (f, e) in [(Features::NONE, EOPNOTSUPP), (KMS, Errno::EINVAL)] {
+            assert_eq!(get_cap(f, &m, 0), Err(e));
+            assert_eq!(get_cap(f, &m, 0x15), Err(e));
             assert_eq!(get_cap(f, &m, (1 << 32) | uapi::DRM_CAP_TIMESTAMP_MONOTONIC as u64), Err(Errno::EINVAL));
         }
     }
@@ -172,7 +182,11 @@ mod tests {
         assert_eq!(c.set(Features::MODESET, uapi::DRM_CLIENT_CAP_ATOMIC as u64, 1), Err(EOPNOTSUPP));
         assert_eq!(c.set(KMS, uapi::DRM_CLIENT_CAP_WRITEBACK_CONNECTORS as u64, 1), Err(Errno::EINVAL));
         assert_eq!(c, ClientCaps::default());
-        assert_eq!(c.set(KMS, uapi::DRM_CLIENT_CAP_ATOMIC as u64, 2), Err(Errno::EINVAL));
+        assert_eq!(c.set(KMS, uapi::DRM_CLIENT_CAP_ATOMIC as u64, 3), Err(Errno::EINVAL));
+        assert_eq!(c.set(KMS, uapi::DRM_CLIENT_CAP_UNIVERSAL_PLANES as u64, 2), Err(Errno::EINVAL));
+        assert_eq!(c, ClientCaps::default());
+        assert_eq!(c.set(KMS, uapi::DRM_CLIENT_CAP_ATOMIC as u64, 2), Ok(()));
+        assert!(c.atomic && c.universal_planes && c.aspect_ratio);
         assert_eq!(c.set(KMS, uapi::DRM_CLIENT_CAP_ATOMIC as u64, 1), Ok(()));
         assert!(c.atomic && c.universal_planes && c.aspect_ratio);
         assert_eq!(c.set(KMS, uapi::DRM_CLIENT_CAP_WRITEBACK_CONNECTORS as u64, 1), Ok(()));

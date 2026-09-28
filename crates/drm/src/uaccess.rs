@@ -15,8 +15,9 @@
 //!
 //! Padding bytes are never invented by the kernel: an argument is either
 //! copied in completely or starts zeroed, handlers change it only through
-//! field assignments, and it is copied out byte for byte. No uninitialised
-//! kernel memory can therefore reach the caller.
+//! field assignments (the contract of the `unsafe` [`UserArg::get_mut`]),
+//! and it is copied out byte for byte. No uninitialised kernel memory can
+//! therefore reach the caller.
 
 use core::ffi::c_void;
 use core::mem::{MaybeUninit, size_of};
@@ -80,10 +81,17 @@ impl<T: Plain> UserArg<T> {
         unsafe { self.buf.assume_init_ref() }
     }
 
-    /// Returns the argument for modification. Change it through field
-    /// assignments only, so that its padding keeps the caller's bytes.
-    pub fn get_mut(&mut self) -> &mut T {
-        // SAFETY: as in get.
+    /// Returns the argument for modification.
+    ///
+    /// # Safety
+    /// The caller may change the argument through assignments to its
+    /// fields only, never by assigning or copying a whole `T` into it. A
+    /// whole-value assignment may leave the padding bytes uninitialised, and
+    /// [`UserArg::write`] would then copy kernel stack contents out to the
+    /// caller.
+    pub unsafe fn get_mut(&mut self) -> &mut T {
+        // SAFETY: every byte is initialised and every bit pattern is a valid
+        // T, as in get; the caller keeps the padding initialised.
         unsafe { self.buf.assume_init_mut() }
     }
 

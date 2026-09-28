@@ -10,8 +10,8 @@
 //! answers the core ioctls that libdrm uses to find and open a device:
 //! `VERSION`, `GET_CAP`, `SET_CLIENT_CAP`, `GET_UNIQUE`, `SET_UNIQUE`,
 //! `SET_VERSION`, `GET_MAGIC`, `AUTH_MAGIC`, `GET_CLIENT`, `SET_MASTER` and
-//! `DROP_MASTER`. Unknown commands fail with `ENOTTY`, and every command
-//! from a 32-bit process fails with `ENOTSUP`, because only the LP64 ABI is
+//! `DROP_MASTER`. Unknown commands fail with `ENOTTY`, and core commands
+//! from a 32-bit process fail with `ENOTSUP`, because only the LP64 ABI is
 //! supported.
 //!
 //! The crate is a `no_std` library on top of the `ddi` crate and is linked

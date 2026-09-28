@@ -28,9 +28,10 @@ NULL)` finds and opens `/dev/dri/card0`, `drmGetVersion`, `drmGetCap`,
 `drmGetMagic` with `drmAuthMagic` between an unprivileged client and a root
 master, `drmGetClient`, `drmSetMaster`/`drmDropMaster`, and
 `drmOpenRender(128)` as root and as `nobody` all behave as on Linux. Eight
-threads opening, querying and closing concurrently, the 511-file limit, a
-32-bit caller (refused with `ENOTSUP`) and the error paths were tested too,
-and the module unloaded cleanly with `rem_drv`. Every size, offset and
+unprivileged threads opening, authenticating and closing concurrently while
+the root master drops and retakes master, the 511-file limit, a 32-bit
+caller (refused with `ENOTSUP`) and the error paths were tested too, and
+the module unloaded cleanly with `rem_drv`. Every size, offset and
 ioctl number of the Rust uAPI matches what gcc computes on illumos from the
 same headers.
 
@@ -66,8 +67,9 @@ links, loads, tests and unloads `rdrmnull` on an illumos machine.
 **Dependency on illumos-ddi.** `ddi-sys` and `ddi` are a git dependency on
 <https://code.aopc.cloud/illumos/illumos-ddi.git>, pinned by revision in
 the workspace `Cargo.toml`. The pinned revision is the `drm-r0` branch:
-illumos-ddi `main` (`eb18ab93b7`) plus one commit that adds clone-open
-support to the `CharDevice` glue (`CharDevice::clone_open`). Per-file DRM
+illumos-ddi `main` (`eb18ab93b7`) plus clone-open support in the
+`CharDevice` glue (`CharDevice::clone_open`, commits `8463d9da92` and
+`f36d47958e`). Per-file DRM
 state is impossible without clone opens, because a character device
 otherwise sees only the last `close(9E)` of a device number, and the
 change belongs in the framework glue rather than in a copy of it. Anything
@@ -142,14 +144,14 @@ up to 63.
 | Ioctl | Allowed for | Notes |
 | --- | --- | --- |
 | `VERSION` | all files, render too | strings copied up to the caller's lengths, full lengths returned |
-| `GET_CAP` | all files, render too | `TIMESTAMP_MONOTONIC` 1; `PRIME`, `SYNCOBJ`, `SYNCOBJ_TIMELINE` 0 until R2; `DUMB_BUFFER` 0 until R1; vblank and page-flip capabilities 0 until R3; `CURSOR_WIDTH/HEIGHT` and `ADDFB2_MODIFIERS` from the driver's `ModeConfig`; `EOPNOTSUPP` for mode-setting capabilities of a driver without `MODESET`; unknown `EINVAL` |
-| `SET_CLIENT_CAP` | primary | `STEREO_3D`, `UNIVERSAL_PLANES`, `ATOMIC` (needs `Features::ATOMIC`, also sets universal planes and aspect ratio), `ASPECT_RATIO`, `WRITEBACK_CONNECTORS` (needs `ATOMIC` first), values 0 or 1 |
+| `GET_CAP` | all files, render too | `TIMESTAMP_MONOTONIC` 1; `PRIME`, `SYNCOBJ`, `SYNCOBJ_TIMELINE` 0 until R2; `DUMB_BUFFER` 0 until R1; vblank and page-flip capabilities 0 until R3; `CURSOR_WIDTH/HEIGHT` and `ADDFB2_MODIFIERS` from the driver's `ModeConfig`; everything else `EOPNOTSUPP` for a driver without `MODESET`, unknown `EINVAL` otherwise |
+| `SET_CLIENT_CAP` | primary | `STEREO_3D`, `UNIVERSAL_PLANES`, `ATOMIC` (needs `Features::ATOMIC`, also sets universal planes and aspect ratio, values 0 to 2), `ASPECT_RATIO`, `WRITEBACK_CONNECTORS` (needs `ATOMIC` first), values 0 or 1; Linux's refusal of `ATOMIC` = 1 to processes named `X*` needs the process name and comes with R3 |
 | `GET_UNIQUE` | primary | empty until the master sets interface 1.1 or later or calls `SET_UNIQUE`, as `drmOpenByName` expects |
 | `SET_UNIQUE` | authenticated master with `PRIV_SYS_DEVICES` | only the device's own bus ID, once (`EBUSY` after) |
 | `SET_VERSION` | master | interface 1.0 to 1.4, driver version checked; versions reported back in every case |
 | `GET_MAGIC` | primary | per-master namespace; the number stays with the file |
 | `AUTH_MAGIC` | authenticated master | consumes the magic; unknown or consumed magic `EINVAL` |
-| `GET_CLIENT` | primary | index 0 only (the caller), for the authentication state |
+| `GET_CLIENT` | primary | index 0 only (the caller): authentication state, the caller's pid, the anonymous uid, as on Linux |
 | `SET_MASTER` | primary | needs `PRIV_SYS_DEVICES`, or a former master used by its opening process |
 | `DROP_MASTER` | primary | same permission, only by the current master |
 
@@ -159,16 +161,18 @@ counterpart of `CAP_SYS_ADMIN`) are authenticated from the start. Render
 nodes never need authentication and cannot use the primary-only ioctls
 (`EACCES`). Commands are matched on their complete 32-bit value, because
 the illumos encoding keeps only eight bits of the argument size; any other
-command is `ENOTTY`. Every command from a 32-bit process is `ENOTSUP`: only
-the LP64 ABI exists.
+command is `ENOTTY`. A core command from a 32-bit process (recognised by
+group and number, whatever its size) is `ENOTSUP`, because only the LP64
+ABI exists; other commands from 32-bit processes are `ENOTTY` as usual.
 
 **Concurrency.** All mutable device state is one `DeviceState` behind one
 `ddi::Mutex`. Each entry point performs its permission check and its state
 change in one critical section; copies from and to user memory happen
 outside it. `crates/drm/src/device.rs` gives the full argument. The state
 machine is tested on the host from eight threads with an invariant check
-after every step, and the kernel side with eight concurrent threads by
-`tools/test/drm_r0_test.c`.
+after every step, and the kernel side by `tools/test/drm_r0_test.c`, whose
+eight unprivileged threads open, authenticate and close files while the
+root master drops and retakes master in another process.
 
 ## Building
 

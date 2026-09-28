@@ -13,6 +13,7 @@
 //! rather than being guessed at.
 
 use drm_uapi as uapi;
+use drm_uapi::ioc;
 
 use crate::state::Perm;
 
@@ -82,10 +83,16 @@ pub fn lookup(cmd: u32) -> Option<&'static Entry> {
     TABLE.iter().find(|e| e.cmd == cmd)
 }
 
+/// Reports whether a command has the group and number of a core ioctl,
+/// whatever its size and direction bits. Used to tell a 32-bit caller's
+/// core command (`ENOTSUP`) from an unrelated command (`ENOTTY`).
+pub fn is_core_nr(cmd: u32) -> bool {
+    ioc::ioc_group(cmd) == ioc::DRM_IOCTL_BASE && TABLE.iter().any(|e| ioc::ioc_nr(e.cmd) == ioc::ioc_nr(cmd))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drm_uapi::ioc;
 
     #[test]
     fn exact_match_only() {
@@ -100,6 +107,17 @@ mod tests {
         // Ioctls of later milestones are not in the table yet.
         assert_eq!(lookup(uapi::DRM_IOCTL_GEM_CLOSE), None);
         assert_eq!(lookup(uapi::DRM_IOCTL_MODE_ATOMIC), None);
+    }
+
+    #[test]
+    fn core_numbers_for_32_bit_callers() {
+        // The ILP32 drm_version is 36 bytes: another command value, but a
+        // core ioctl all the same.
+        assert!(is_core_nr(ioc::drm_iowr::<[u8; 36]>(0x00)));
+        assert!(is_core_nr(uapi::DRM_IOCTL_SET_MASTER));
+        assert!(!is_core_nr(uapi::DRM_IOCTL_GEM_CLOSE));
+        // TCGETA ('T' << 8 | 1), which isatty(3C) issues.
+        assert!(!is_core_nr(0x5401));
     }
 
     #[test]

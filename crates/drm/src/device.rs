@@ -131,7 +131,8 @@ impl<D: Driver> Device<D> {
     fn version(&self, c: CloneId, perm: crate::state::Perm, privileged: bool, arg: &IoctlArg<'_>) -> Result<(), Errno> {
         let mut v = UserArg::<uapi::drm_version>::read(arg)?;
         self.state.lock().permit(c, perm, privileged)?;
-        let a = v.get_mut();
+        // SAFETY: only field assignments below.
+        let a = unsafe { v.get_mut() };
         a.version_major = D::MAJOR;
         a.version_minor = D::MINOR;
         a.version_patchlevel = D::PATCHLEVEL;
@@ -155,7 +156,8 @@ impl<D: Driver> Device<D> {
             s.unique_set(c)
         };
         let value: &[u8] = if set { self.bus_id.as_bytes() } else { &[] };
-        let a = u.get_mut();
+        // SAFETY: only a field assignment below.
+        let a = unsafe { u.get_mut() };
         // As on Linux, a buffer that is too small receives nothing; the
         // caller learns the length and asks again.
         if a.unique_len >= value.len() {
@@ -205,6 +207,9 @@ fn copy_field(arg: &IoctlArg<'_>, len: &mut usize, addr: usize, value: &[u8]) ->
     Ok(())
 }
 
+/// The anonymous user ID reported by `GET_CLIENT` (`UID_NOBODY`).
+const UID_NOBODY: u64 = 60001;
+
 fn caller_pid() -> i32 {
     // SAFETY: ddi_get_pid(9F) may be called from user context, which every
     // cb_ops entry point runs in.
@@ -239,7 +244,7 @@ impl<D: Driver> CharDevice for Device<D> {
         if d.index != self.index || d.clone.is_some() || (d.kind == NodeKind::Render && !self.has_render) {
             return Err(Errno::ENXIO);
         }
-        let who = Opener { kind: d.kind, privileged: cred.has_sys_devices_priv(), pid: caller_pid(), uid: cred.uid() };
+        let who = Opener { kind: d.kind, privileged: cred.has_sys_devices_priv(), pid: caller_pid() };
         let mut s = self.state.lock();
         let clone = s.open(who, ctx)?;
         match minor::file_minor(d.kind, self.index, clone) {
@@ -269,10 +274,12 @@ impl<D: Driver> CharDevice for Device<D> {
     }
 
     fn ioctl(&self, minor: Minor, cmd: IoctlCmd, arg: IoctlArg<'_>, cred: &Cred<'_>, ctx: &Sleepable) -> Result<i32> {
-        // Only the LP64 ABI exists; 32-bit callers get ENOTSUP for every
-        // command, known or not, instead of a misread structure.
+        // Only the LP64 ABI exists. A 32-bit caller gets ENOTSUP for every
+        // core command (recognised by group and number, since its structure
+        // sizes differ) instead of a misread structure, and ENOTTY for
+        // anything else, as any caller would.
         if arg.model() == DataModel::Ilp32 {
-            return Err(Errno::ENOTSUP);
+            return Err(if ioctl::is_core_nr(cmd.0 as u32) { Errno::ENOTSUP } else { Errno::ENOTTY });
         }
         let entry = ioctl::lookup(cmd.0 as u32).ok_or(Errno::ENOTTY)?;
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
@@ -289,7 +296,8 @@ impl<D: Driver> CharDevice for Device<D> {
                     s.get_magic(c, ctx)?
                 };
                 let mut a = UserArg::<uapi::drm_auth>::zeroed();
-                a.get_mut().magic = magic;
+                // SAFETY: a field assignment.
+                unsafe { a.get_mut() }.magic = magic;
                 a.write(&arg)?;
             }
             Op::AuthMagic => {
@@ -300,21 +308,23 @@ impl<D: Driver> CharDevice for Device<D> {
             }
             Op::GetClient => {
                 let mut cl = UserArg::<uapi::drm_client>::read(&arg)?;
-                let (auth, pid, uid) = {
+                let auth = {
                     let s = self.state.lock();
                     s.permit(c, perm, privileged)?;
-                    let f = s.file(c).ok_or(Errno::ENXIO)?;
-                    (f.authenticated, f.pid, f.uid)
+                    s.file(c).ok_or(Errno::ENXIO)?.authenticated
                 };
                 // Index 0 is the caller itself, the only client current Linux
-                // reports; the opener's pid and uid are given.
+                // reports. As there, the pid is the caller's and the uid is
+                // the anonymous one, so that a process that received the file
+                // learns nothing about who opened it.
                 if cl.get().idx != 0 {
                     return Err(Errno::EINVAL);
                 }
-                let a = cl.get_mut();
+                // SAFETY: only field assignments below.
+                let a = unsafe { cl.get_mut() };
                 a.auth = i32::from(auth);
-                a.pid = pid as u64;
-                a.uid = u64::from(uid);
+                a.pid = u64::try_from(caller_pid()).unwrap_or(0);
+                a.uid = UID_NOBODY;
                 a.magic = 0;
                 a.iocs = 0;
                 cl.write(&arg)?;
@@ -337,7 +347,8 @@ impl<D: Driver> CharDevice for Device<D> {
                 };
                 // The versions go back to the caller whether or not the
                 // request was acceptable; libdrm reads them in both cases.
-                let a = v.get_mut();
+                // SAFETY: only field assignments below.
+                let a = unsafe { v.get_mut() };
                 a.drm_di_major = IF_MAJOR;
                 a.drm_di_minor = IF_MINOR;
                 a.drm_dd_major = D::MAJOR;
@@ -349,7 +360,8 @@ impl<D: Driver> CharDevice for Device<D> {
                 let mut g = UserArg::<uapi::drm_get_cap>::read(&arg)?;
                 self.state.lock().permit(c, perm, privileged)?;
                 let value = caps::get_cap(D::FEATURES, &D::MODE_CONFIG, g.get().capability)?;
-                g.get_mut().value = value;
+                // SAFETY: a field assignment.
+                unsafe { g.get_mut() }.value = value;
                 g.write(&arg)?;
             }
             Op::SetClientCap => {

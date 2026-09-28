@@ -60,8 +60,6 @@ pub struct DrmFile {
     pub caps: ClientCaps,
     /// The process that opened the file.
     pub pid: i32,
-    /// The effective user ID of the opener.
-    pub uid: u32,
     master: Option<MasterId>,
     owns_master: bool,
     was_master: bool,
@@ -85,8 +83,6 @@ pub struct Opener {
     pub privileged: bool,
     /// The opener's process ID.
     pub pid: i32,
-    /// The opener's effective user ID.
-    pub uid: u32,
 }
 
 /// The permission flags of an ioctl, as in Linux's `DRM_IOCTL_DEF`.
@@ -213,7 +209,6 @@ impl DeviceState {
             authenticated: who.privileged,
             caps: ClientCaps::default(),
             pid: who.pid,
-            uid: who.uid,
             master: None,
             owns_master: false,
             was_master: false,
@@ -423,13 +418,15 @@ impl DeviceState {
         }
     }
 
-    /// The next non-zero magic number not in the table. The table has at
-    /// most [`MAX_FILES`] entries, so at most that many candidates are
-    /// skipped.
+    /// The next non-zero magic number that no open file holds, whether
+    /// still waiting in the table or already consumed by `AUTH_MAGIC` (the
+    /// file keeps reporting it), so that numbers stay unique even after the
+    /// counter wraps. At most [`MAX_FILES`] files exist, so at most that
+    /// many candidates are skipped.
     fn unused_magic(&self) -> u32 {
         let mut m = self.next_magic;
         loop {
-            if m != 0 && !self.magics.iter().any(|e| e.magic == m) {
+            if m != 0 && !self.files.iter().flatten().any(|f| f.magic == m) {
                 return m;
             }
             m = m.wrapping_add(1);
@@ -463,6 +460,11 @@ impl DeviceState {
             let f = self.file(c).expect("current master is open");
             assert!(f.owns_master && f.was_master && f.authenticated);
         }
+        for (i, (_, f)) in files.iter().enumerate() {
+            if f.magic != 0 {
+                assert!(files[i + 1..].iter().all(|(_, g)| g.magic != f.magic), "magic numbers are unique");
+            }
+        }
         for (i, e) in self.magics.iter().enumerate() {
             assert_ne!(e.magic, 0);
             let f = self.file(e.file).expect("magic of an open file");
@@ -486,10 +488,10 @@ mod tests {
     }
 
     fn user(kind: NodeKind, pid: i32) -> Opener {
-        Opener { kind, privileged: false, pid, uid: 101 }
+        Opener { kind, privileged: false, pid }
     }
     fn root(kind: NodeKind, pid: i32) -> Opener {
-        Opener { kind, privileged: true, pid, uid: 0 }
+        Opener { kind, privileged: true, pid }
     }
 
     const R0: Perm = Perm { auth: false, master: false, root_only: false, render_allow: true };
@@ -551,6 +553,29 @@ mod tests {
         assert!(s.close(d));
         s.check();
         assert_eq!(s.auth_magic(m, md), Err(Errno::EINVAL), "closed files lose their magic");
+    }
+
+    #[test]
+    fn consumed_magic_is_not_reissued_after_wrap() {
+        let ctx = ctx();
+        let mut s = DeviceState::new();
+        let m = s.open(user(NodeKind::Primary, 1), &ctx).unwrap();
+        let b = s.open(user(NodeKind::Primary, 2), &ctx).unwrap();
+        let mb = s.get_magic(b, &ctx).unwrap();
+        assert_eq!(s.auth_magic(m, mb), Ok(()));
+        // Pretend the counter has wrapped around to b's consumed number.
+        s.next_magic = mb;
+        let c = s.open(user(NodeKind::Primary, 3), &ctx).unwrap();
+        let mc = s.get_magic(c, &ctx).unwrap();
+        assert_ne!(mc, mb);
+        // And the counter skips 0 when it wraps.
+        s.next_magic = u32::MAX;
+        let d = s.open(user(NodeKind::Primary, 4), &ctx).unwrap();
+        let e = s.open(user(NodeKind::Primary, 5), &ctx).unwrap();
+        assert_eq!(s.get_magic(d, &ctx), Ok(u32::MAX));
+        let me = s.get_magic(e, &ctx).unwrap();
+        assert!(me != 0 && me != mb && me != mc);
+        s.check();
     }
 
     #[test]
@@ -689,7 +714,7 @@ mod tests {
                         match seed % 8 {
                             0 | 1 => {
                                 let kind = if seed & 0x100 != 0 { NodeKind::Render } else { NodeKind::Primary };
-                                let who = Opener { kind, privileged: seed & 0x200 != 0, pid: t as i32, uid: 1 };
+                                let who = Opener { kind, privileged: seed & 0x200 != 0, pid: t as i32 };
                                 if let Ok(c) = s.open(who, &ctx) {
                                     mine.push(c);
                                 }

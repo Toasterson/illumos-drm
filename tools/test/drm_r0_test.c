@@ -57,8 +57,8 @@ check(int ok, const char *what)
 #ifdef PROBE32
 
 /*
- * 32-bit processes are refused with ENOTSUP for every command, known or
- * not, because only the LP64 ABI exists.
+ * 32-bit processes are refused with ENOTSUP for every core command,
+ * because only the LP64 ABI exists; other commands are ENOTTY.
  */
 int
 main(void)
@@ -80,8 +80,9 @@ main(void)
 	check(ioctl(fd, DRM_IOCTL_GET_CAP, &cap) == -1 && errno == ENOTSUP,
 	    "32-bit DRM_IOCTL_GET_CAP fails with ENOTSUP");
 	errno = 0;
-	check(ioctl(fd, _IO('d', 0xfe)) == -1 && errno == ENOTSUP,
-	    "32-bit unknown ioctl fails with ENOTSUP");
+	check(ioctl(fd, _IO('d', 0xfe)) == -1 && errno == ENOTTY,
+	    "32-bit unknown DRM ioctl fails with ENOTTY");
+	check(!isatty(fd), "32-bit isatty() is false (TCGETA is ENOTTY)");
 	(void) close(fd);
 	(void) printf("probe32: %d failures\n", failures);
 	return (failures);
@@ -183,9 +184,10 @@ test_client_caps(int fd)
 	check(drmSetClientCap(fd, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS, 1) == 0,
 	    "SET_CLIENT_CAP WRITEBACK_CONNECTORS=1 after ATOMIC");
 	check(drmSetClientCap(fd, DRM_CLIENT_CAP_STEREO_3D, 1) == 0, "SET_CLIENT_CAP STEREO_3D=1");
+	check(drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 2) == 0, "SET_CLIENT_CAP ATOMIC=2 (Linux's Xorg value)");
 	errno = 0;
-	check(is_err(drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 2), EINVAL),
-	    "SET_CLIENT_CAP ATOMIC=2 is EINVAL");
+	check(is_err(drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 3), EINVAL),
+	    "SET_CLIENT_CAP ATOMIC=3 is EINVAL");
 	errno = 0;
 	check(is_err(drmSetClientCap(fd, 99, 1), EINVAL), "SET_CLIENT_CAP 99 (unknown) is EINVAL");
 }
@@ -253,10 +255,21 @@ struct stress {
 	int id;
 	int errors;
 	int opens;
+	int auths;
 };
 
 static int master_fd;
 
+/*
+ * One of eight threads of an unprivileged process. Each iteration opens a
+ * card or render file, queries it, and for card files asks the root
+ * master (whose file this process inherited) to authenticate its magic
+ * number. The parent process drops and retakes master concurrently, so a
+ * card open can find the device without master and become master itself;
+ * AUTH_MAGIC may therefore fail with EACCES (master_fd is not master at
+ * the moment) or EINVAL (the magic belongs to another master's namespace),
+ * but whenever it succeeds the file must be authenticated.
+ */
 static void *
 stress_thread(void *arg)
 {
@@ -269,6 +282,7 @@ stress_thread(void *arg)
 		int render = (i + s->id) % 3 == 0;
 		fd = open(render ? RENDER : CARD, O_RDWR);
 		if (fd < 0) {
+			(void) printf("INFO thread %d: open errno %d\n", s->id, errno);
 			s->errors++;
 			continue;
 		}
@@ -278,20 +292,51 @@ stress_thread(void *arg)
 		if (!render) {
 			if (drmGetMagic(fd, &magic) != 0 || magic == 0) {
 				s->errors++;
-			} else if (i % 2 == 0) {
-				/* The master may be busy handing over; EACCES is fine. */
+			} else {
 				r = drmAuthMagic(master_fd, magic);
-				if (r != 0 && r != -EACCES && r != -EINVAL)
+				if (r == 0) {
+					s->auths++;
+					if (get_auth(fd) != 1) {
+						(void) printf("INFO thread %d: AUTH_MAGIC succeeded but the file is not authenticated\n", s->id);
+						s->errors++;
+					}
+				} else if (r != -EACCES && r != -EINVAL) {
+					(void) printf("INFO thread %d: AUTH_MAGIC %d\n", s->id, r);
 					s->errors++;
+				}
 			}
-		}
-		if (s->id == 0 && i % 10 == 0) {
-			(void) drmDropMaster(master_fd);
-			(void) drmSetMaster(master_fd);
 		}
 		(void) close(fd);
 	}
 	return (NULL);
+}
+
+/* The unprivileged stress process; exits with the number of failures. */
+static void
+stress_child(void)
+{
+	pthread_t th[8];
+	struct stress st[8];
+	int i, n = 0, auths = 0;
+
+	drop_to_nobody();
+	for (i = 0; i < 8; i++) {
+		(void) memset(&st[i], 0, sizeof (st[i]));
+		st[i].id = i;
+		(void) pthread_create(&th[i], NULL, stress_thread, &st[i]);
+	}
+	for (i = 0; i < 8; i++) {
+		(void) pthread_join(th[i], NULL);
+		n += st[i].opens;
+		auths += st[i].auths;
+		if (st[i].errors != 0)
+			(void) printf("INFO stress thread %d: %d errors\n", i, st[i].errors);
+		check(st[i].errors == 0, "nobody: stress thread without unexpected errors");
+	}
+	(void) printf("INFO stress: %d opens and closes, %d authentications in 8 threads as nobody\n",
+	    n, auths);
+	check(auths > 0, "nobody: some authentications succeeded during the stress run");
+	exit(failures);
 }
 
 int
@@ -303,8 +348,6 @@ main(void)
 	int fd, fd2, rfd, i, n, status, p2c[2], c2p[2];
 	drm_magic_t magic;
 	pid_t pid;
-	pthread_t th[8];
-	struct stress st[8];
 	static int fds[600];
 
 	(void) setvbuf(stdout, NULL, _IOLBF, 0);
@@ -421,23 +464,25 @@ main(void)
 		(void) close(rfd);
 	}
 
-	/* Concurrent opens, ioctls and closes from eight threads. */
-	for (i = 0; i < 8; i++) {
-		st[i].id = i;
-		st[i].errors = 0;
-		st[i].opens = 0;
-		(void) pthread_create(&th[i], NULL, stress_thread, &st[i]);
-	}
+	/*
+	 * Concurrent opens, ioctls and closes from eight unprivileged threads,
+	 * while this (root, opening) process drops and retakes master.
+	 */
+	pid = fork();
+	if (pid == 0)
+		stress_child();
 	n = 0;
-	for (i = 0; i < 8; i++) {
-		(void) pthread_join(th[i], NULL);
-		n += st[i].opens;
-		if (st[i].errors != 0)
-			(void) printf("INFO stress thread %d: %d errors\n", i, st[i].errors);
-		check(st[i].errors == 0, "stress thread without unexpected errors");
+	i = 0;
+	while (waitpid(pid, &status, WNOHANG) == 0) {
+		(void) drmDropMaster(fd);
+		if (drmSetMaster(fd) == 0)
+			n++;
+		else
+			i++;
 	}
-	(void) printf("INFO stress: %d opens and closes in 8 threads\n", n);
-	check(get_auth(fd) == 1 && drmSetMaster(fd) == 0, "master still master after the stress run");
+	(void) printf("INFO master toggles during the stress run: %d retaken, %d refused (EBUSY)\n", n, i);
+	check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "unprivileged stress run (see above)");
+	check(drmSetMaster(fd) == 0 && get_auth(fd) == 1, "master is retaken once the stress files are closed");
 
 	/* The clone id space: 511 files per device, then EMFILE. */
 	(void) setrlimit(RLIMIT_NOFILE, &rl);
