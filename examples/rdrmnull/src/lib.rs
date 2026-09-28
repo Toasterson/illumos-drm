@@ -31,6 +31,12 @@
 //!   (`tools/test/rdrmnull-dma-root-node.conf`). The DDI does not allow
 //!   this; it reproduces the kernel panic an R1 trial caused, so that a
 //!   crash dump can be taken. Use a disposable VM with a dump device.
+//!   illumos-ddi allocates DMA handles only from the driver's own node (an
+//!   `OwnNode`) and refuses the root node, so this mode goes around it with
+//!   raw `ddi-sys` calls (`drm::gem::GemDma::against`). It is only compiled
+//!   with the `panic-drill` cargo feature, which is off by default; a module
+//!   built without it refuses `root-node` at attach and cannot name another
+//!   node at all.
 //!
 //! It also has three driver-private ioctls that exist only for the kernel
 //! tests (`tools/test/drm_r1_test.c`) and are not an interface for anything
@@ -299,6 +305,8 @@ enum DmaDrill {
     /// `"self"`: bind against the driver's own node.
     OwnNode,
     /// `"root-node"`: bind against `ddi_root_node(9F)` (outside the DDI).
+    /// Only with the `panic-drill` feature.
+    #[cfg(feature = "panic-drill")]
     RootNode,
 }
 
@@ -315,7 +323,16 @@ impl DmaDrill {
         let drill = match mode.to_bytes() {
             b"none" => DmaDrill::Off,
             b"self" => DmaDrill::OwnNode,
+            #[cfg(feature = "panic-drill")]
             b"root-node" => DmaDrill::RootNode,
+            #[cfg(not(feature = "panic-drill"))]
+            b"root-node" => {
+                dev.warn(format_args!(
+                    "dma-mode \"root-node\" panics the system on purpose and needs rdrmnull built with the \
+                     panic-drill feature; this build refuses it"
+                ));
+                return Err(DdiError);
+            }
             other => {
                 dev.warn(format_args!("unknown dma-mode {:?}: none, self or root-node", core::str::from_utf8(other)));
                 return Err(DdiError);
@@ -496,6 +513,7 @@ impl drm::Driver for NullDriver {
             // root node, which lives as long as the system; the DDI requires
             // the driver's own node, and the DMA framework's reaction to
             // another one is what the drill records.
+            #[cfg(feature = "panic-drill")]
             DmaDrill::RootNode => {
                 Some(unsafe { GemDma::against(DRILL_DMA_ATTR, DevInfo::from_raw(sys::ddi_root_node())) })
             }
@@ -517,9 +535,9 @@ impl Driver for RDrmNull {
     type Instance = drm::Device<NullDriver>;
     const LINKINFO: &'static CStr = c"Rust DRM null driver r1";
 
-    fn attach(dev: DevInfo, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
-        let dma = DmaDrill::from_conf(&dev, ctx)?;
-        drm::Device::attach(dev, NullDriver { timer: Mutex::new(None), dma }, ctx)
+    fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
+        let dma = DmaDrill::from_conf(&node, ctx)?;
+        drm::Device::attach(node, NullDriver { timer: Mutex::new(None), dma }, ctx)
     }
 
     fn detach(inst: Self::Instance, _dev: DevInfo, ctx: &Sleepable) -> Result<(), (Self::Instance, DdiError)> {

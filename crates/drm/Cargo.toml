@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Test aid, off by default: lets GemDma::against name a device node other
+# than the driver's own, bypassing illumos-ddi's own-node rule with raw
+# ddi_dma_alloc_handle(9F) calls. It exists only so that the rdrmnull DMA
+# drill can reproduce the 2026-09-28 root-node panic on a disposable VM.
+# A production build must not enable it.
+panic-drill = []
+
 [dependencies]
 ddi.workspace = true
 drm-uapi.workspace = true

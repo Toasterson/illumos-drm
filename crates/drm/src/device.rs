@@ -77,13 +77,16 @@ pub struct Device<D: Driver> {
 }
 
 impl<D: Driver> Device<D> {
-    /// Registers a device for the driver instance `dev`: creates the
+    /// Registers a device for the driver instance `node`, the capability for
+    /// the driver's own node that `ddi::Driver::attach` received; the GEM
+    /// state keeps it to allocate DMA handles. Creates the
     /// primary node `card<N>` and, if the driver has [`Features::RENDER`],
     /// the render node `renderD<128+N>`, where `N` is the instance number.
     /// Both nodes have the node type `ddi_display:drm`
     /// (`DDI_NT_DISPLAY_DRM`), for which devfsadm creates the `/dev/dri`
     /// links (see `packaging/devlink.tab`).
-    pub fn attach(dev: DevInfo, driver: D, ctx: &Sleepable) -> Result<Device<D>, DdiError> {
+    pub fn attach(node: OwnNode, driver: D, ctx: &Sleepable) -> Result<Device<D>, DdiError> {
+        let dev = node.dev();
         let Some(index) = u32::try_from(dev.instance().0).ok().filter(|i| *i < MAX_DEVICES) else {
             dev.warn(format_args!(
                 "instance {} is above the {MAX_DEVICES} DRM devices a driver can have",
@@ -107,7 +110,7 @@ impl<D: Driver> Device<D> {
             return Err(DdiError);
         }
         let gem = if D::FEATURES.contains(Features::GEM) {
-            match GemCore::new(dev, driver.gem_dma(&dev), D::MAX_MEMORY, ctx) {
+            match GemCore::new(node, driver.gem_dma(&dev), D::MAX_MEMORY, ctx) {
                 Ok(g) => Some(g),
                 Err(e) => {
                     dev.warn(format_args!("cannot set up GEM: {e:?}"));
