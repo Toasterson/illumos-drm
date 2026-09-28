@@ -47,10 +47,13 @@
 #![warn(missing_docs)]
 
 pub mod caps;
+pub mod defer;
 #[cfg(not(test))]
 mod device;
 pub mod driver;
 pub mod ioctl;
+pub mod karc;
+mod kmem;
 pub mod kvec;
 pub mod minor;
 pub mod state;
