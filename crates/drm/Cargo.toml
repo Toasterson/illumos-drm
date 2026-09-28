@@ -1,0 +1,17 @@
+[package]
+name = "drm"
+description = "The DRM core for illumos: device registration, card and render nodes, per-file state and core ioctls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ddi.workspace = true
+drm-uapi.workspace = true
+
+[package.metadata.kmod]
+# The core is a library linked into each driver module; it needs nothing
+# beyond genunix and unix.
+depends = []

@@ -3,6 +3,28 @@
 version = 4
 
 [[package]]
+name = "ddi"
+version = "0.0.1"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=8463d9da9283062967071be58d8a3bd604a8d80b#8463d9da9283062967071be58d8a3bd604a8d80b"
+dependencies = [
+ "ddi-sys",
+ "zerocopy",
+]
+
+[[package]]
+name = "ddi-sys"
+version = "0.0.1"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=8463d9da9283062967071be58d8a3bd604a8d80b#8463d9da9283062967071be58d8a3bd604a8d80b"
+
+[[package]]
+name = "drm"
+version = "0.0.1"
+dependencies = [
+ "ddi",
+ "drm-uapi",
+]
+
+[[package]]
 name = "drm-uapi"
 version = "0.0.1"
 
@@ -62,7 +84,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -76,6 +98,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "syn"
+version = "2.0.119"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -101,6 +134,26 @@ version = "0.0.1"
 dependencies = [
  "drm-uapi",
  "serde_json",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.59"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.59"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
