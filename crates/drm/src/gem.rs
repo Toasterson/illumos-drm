@@ -89,6 +89,7 @@ use ddi::sys;
 use ddi::{DmaAttr, DmaCookie, OwnNode};
 
 use crate::defer::{self, Ctx, DeferList, Deferrable};
+use crate::dmaerr;
 use crate::idmap::{IdAlloc, IdMap};
 use crate::karc::{KArc, KArcLast};
 use crate::kvec::KVec;
@@ -336,10 +337,12 @@ impl SysMem {
     /// DMA with `dma` if given, against `node`, the device's own node that
     /// the driver received in attach (the DMA handle "must only be used by
     /// the device for which it was allocated", `ddi_dma_alloc_handle(9F)`).
-    /// Fails with `EINVAL` for a zero size, `ENOMEM` if memory or DMA
-    /// resources are short, and the errno of the DMA error otherwise
-    /// (`From<DmaError> for Errno` in illumos-ddi: `EINVAL` for attributes
-    /// the framework cannot satisfy, which is what a pseudo node gets).
+    /// Fails with `EINVAL` for a zero size, `ENOMEM` if memory is short, and
+    /// with the errno [`dmaerr::object_errno`]
+    /// gives for a failed DMA allocation or binding: `ENOMEM` when DMA
+    /// resources are short or the memory cannot be mapped for the device,
+    /// `EINVAL` for attributes the framework can never satisfy (which is what
+    /// a pseudo node gets), `ENXIO` for a node the own-node guard refuses.
     pub fn new(node: &OwnNode, size: usize, dma: Option<&DmaAttr>, ctx: &Sleepable) -> Result<SysMem, Errno> {
         Self::alloc(DmaTarget::Own(node), size, dma, ctx)
     }
@@ -384,7 +387,7 @@ impl SysMem {
 
     fn bind(&self, target: DmaTarget<'_>, attr: &DmaAttr, ctx: &Sleepable) -> Result<SgTable, Errno> {
         let handle = match target {
-            DmaTarget::Own(node) => SgHandle::Own(ddi::DmaHandle::new(node, attr, ctx).map_err(Errno::from)?),
+            DmaTarget::Own(node) => SgHandle::Own(ddi::DmaHandle::new(node, attr, ctx).map_err(dmaerr::object_errno)?),
             #[cfg(feature = "panic-drill")]
             DmaTarget::Foreign(dev) => {
                 // The drill bypasses illumos-ddi, whose guard would refuse
@@ -405,7 +408,7 @@ impl SysMem {
                     )
                 };
                 if raw.is_null() || r != sys::DDI_SUCCESS {
-                    return Err(if r == sys::DDI_DMA_BADATTR { Errno::EINVAL } else { Errno::EIO });
+                    return Err(dmaerr::object_errno(dmaerr::from_code(r)));
                 }
                 SgHandle::Raw(raw)
             }
@@ -433,11 +436,12 @@ impl SysMem {
                 // Never requested (no DDI_DMA_PARTIAL); release and refuse.
                 // SAFETY: the handle was bound by the call above.
                 unsafe { sys::ddi_dma_unbind_handle(handle.as_raw()) };
-                return Err(Errno::ENOMEM);
+                return Err(dmaerr::object_errno(DmaError::PartialMap));
             }
-            sys::DDI_DMA_NORESOURCES | sys::DDI_DMA_TOOBIG => return Err(Errno::ENOMEM),
-            sys::DDI_DMA_NOMAPPING => return Err(Errno::EFAULT),
-            _ => return Err(Errno::EIO),
+            // ENOMEM for a shortage or no mapping (not EFAULT, which in a
+            // create ioctl reads as a bad user pointer), EIO for codes a
+            // fresh handle cannot return.
+            _ => return Err(dmaerr::object_errno(dmaerr::from_code(r))),
         }
         // SAFETY: the handle is bound.
         let n = unsafe { sys::ddi_dma_ncookies(handle.as_raw()) };

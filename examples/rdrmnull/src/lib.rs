@@ -25,7 +25,11 @@
 //!   This only works when the node's parent is a nexus that does DMA, so
 //!   the `.conf` must attach it under the root nexus
 //!   (`tools/test/rdrmnull-dma-self.conf`); such a node leaves its instance
-//!   in `/etc/path_to_inst` after `rem_drv`.
+//!   in `/etc/path_to_inst` after `rem_drv`. The integer property
+//!   `dma-max-transfer` lowers the largest transfer of the DMA attributes
+//!   (`dma_attr_maxxfer`) to that many bytes, so that the bind of any
+//!   larger object fails (`tools/test/rdrmnull-dma-self-tiny.conf` and
+//!   `drm_dma_errno_test.c` record the errno userland gets).
 //! * `"root-node"`: stay a pseudo node but allocate the DMA handles against
 //!   `ddi_root_node(9F)` and bind every object
 //!   (`tools/test/rdrmnull-dma-root-node.conf`). The DDI does not allow
@@ -349,10 +353,29 @@ impl DmaDrill {
 /// one cookie per page of the largest object (16 MiB).
 const DRILL_DMA_ATTR: DmaAttr = DmaAttr::bits64().max_cookies((NullDriver::OBJECT_LIMIT / 4096) as u32);
 
+/// The DMA attributes of the drill from `rdrmnull.conf`: [`DRILL_DMA_ATTR`],
+/// with the largest transfer lowered to `dma-max-transfer` bytes if that
+/// integer property is set (a positive number).
+fn drill_dma_attr(dev: &DevInfo, ctx: &Sleepable) -> Result<DmaAttr, DdiError> {
+    match dev.props().int(c"dma-max-transfer", ctx) {
+        Ok(None) => Ok(DRILL_DMA_ATTR),
+        Ok(Some(n)) if n > 0 => {
+            dev.note(format_args!("DMA drill: dma-max-transfer {n} bytes"));
+            Ok(DRILL_DMA_ATTR.max_transfer(n as u64))
+        }
+        _ => {
+            dev.warn(format_args!("dma-max-transfer must be a positive integer property"));
+            Err(DdiError)
+        }
+    }
+}
+
 /// The DRM driver: no hardware, only the test timer and the DMA drill.
 pub struct NullDriver {
     timer: Mutex<Option<LaterTimer>>,
     dma: DmaDrill,
+    /// The DMA attributes of the drill, from [`drill_dma_attr`].
+    dma_attr: DmaAttr,
 }
 
 impl NullDriver {
@@ -508,7 +531,7 @@ impl drm::Driver for NullDriver {
     fn gem_dma(&self, _dev: &DevInfo) -> Option<GemDma> {
         match self.dma {
             DmaDrill::Off => None,
-            DmaDrill::OwnNode => Some(GemDma::new(DRILL_DMA_ATTR)),
+            DmaDrill::OwnNode => Some(GemDma::new(self.dma_attr)),
             // SAFETY: none; this is the drill. ddi_root_node(9F) returns the
             // root node, which lives as long as the system; the DDI requires
             // the driver's own node, and the DMA framework's reaction to
@@ -537,7 +560,8 @@ impl Driver for RDrmNull {
 
     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
         let dma = DmaDrill::from_conf(&node, ctx)?;
-        drm::Device::attach(node, NullDriver { timer: Mutex::new(None), dma }, ctx)
+        let dma_attr = drill_dma_attr(&node, ctx)?;
+        drm::Device::attach(node, NullDriver { timer: Mutex::new(None), dma, dma_attr }, ctx)
     }
 
     fn detach(inst: Self::Instance, _dev: DevInfo, ctx: &Sleepable) -> Result<(), (Self::Instance, DdiError)> {
