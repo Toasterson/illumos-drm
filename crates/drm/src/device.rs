@@ -30,6 +30,15 @@
 //! including a test that drives it from eight threads through a mutex
 //! (`state::tests::concurrent_open_close_auth_master`); the kernel side is
 //! exercised with concurrent opens and ioctls by `tools/test/drm_r0_test.c`.
+//!
+//! GEM state (handles, names, objects, mappings) lives in a separate
+//! [`GemCore`] with its own locks (see [`crate::gem`]); the device mutex is
+//! never held while one of them is taken. A GEM ioctl checks its permission
+//! under the device mutex and acts under the GEM locks afterwards. That gap
+//! is harmless because the permissions GEM ioctls depend on cannot be lost:
+//! a file's node kind never changes and a file never loses its
+//! authentication. `close(9E)` runs only after every ioctl of the file has
+//! returned, so no GEM ioctl can see a file whose GEM state is gone.
 
 use ddi::prelude::*;
 use ddi::sys;
@@ -37,8 +46,12 @@ use drm_uapi as uapi;
 
 use crate::caps;
 use crate::driver::{BUS_ID_MAX, BusId, Driver, Features};
-use crate::ioctl::{self, Op};
+use crate::dumb::DumbRequest;
+use crate::gem::{GemCore, registry};
+use crate::ioctl::{self, Entry, Op};
+use crate::karc::KArc;
 use crate::minor::{self, CloneId, MAX_DEVICES, NodeKind};
+use crate::offsets::PAGE_SIZE;
 use crate::state::{DeviceState, IF_MAJOR, IF_MINOR, Opener, SetVersion};
 use crate::uaccess::{UserArg, copy_in_bytes, copy_out_bytes};
 
@@ -56,6 +69,8 @@ pub struct Device<D: Driver> {
     bus_id: BusId,
     state: Mutex<DeviceState>,
     has_render: bool,
+    /// The GEM state, for drivers with [`Features::GEM`].
+    gem: Option<KArc<GemCore<D::Object>>>,
     // Dropping these removes the minor nodes.
     _card: MinorNode,
     _render: Option<MinorNode>,
@@ -68,7 +83,7 @@ impl<D: Driver> Device<D> {
     /// Both nodes have the node type `ddi_display:drm`
     /// (`DDI_NT_DISPLAY_DRM`), for which devfsadm creates the `/dev/dri`
     /// links (see `packaging/devlink.tab`).
-    pub fn attach(dev: DevInfo, driver: D, _ctx: &Sleepable) -> Result<Device<D>, DdiError> {
+    pub fn attach(dev: DevInfo, driver: D, ctx: &Sleepable) -> Result<Device<D>, DdiError> {
         let Some(index) = u32::try_from(dev.instance().0).ok().filter(|i| *i < MAX_DEVICES) else {
             dev.warn(format_args!(
                 "instance {} is above the {MAX_DEVICES} DRM devices a driver can have",
@@ -81,11 +96,42 @@ impl<D: Driver> Device<D> {
             dev.warn(format_args!("bus ID does not fit in {BUS_ID_MAX} bytes"));
             return Err(DdiError);
         }
-        let card = Self::node(&dev, NodeKind::Primary, index)?;
-        let render = if D::FEATURES.contains(Features::RENDER) {
-            Some(Self::node(&dev, NodeKind::Render, index)?)
+        if D::FEATURES.contains(Features::DUMB) && !D::FEATURES.contains(Features::GEM) {
+            dev.warn(format_args!("dumb buffers need GEM"));
+            return Err(DdiError);
+        }
+        // The offset arithmetic assumes the amd64 page.
+        // SAFETY: ptob(9F) may be called from any context.
+        if unsafe { sys::ptob(1) } as u64 != PAGE_SIZE {
+            dev.warn(format_args!("unexpected page size"));
+            return Err(DdiError);
+        }
+        let gem = if D::FEATURES.contains(Features::GEM) {
+            match GemCore::new(dev, D::DMA_ATTR, D::MAX_MEMORY, ctx) {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    dev.warn(format_args!("cannot set up GEM: {e:?}"));
+                    return Err(DdiError);
+                }
+            }
         } else {
             None
+        };
+        if let Some(g) = &gem
+            && !registry::insert(index, &**g)
+        {
+            dev.warn(format_args!("device {index} is registered twice"));
+            return Err(DdiError);
+        }
+        let nodes = Self::nodes(&dev, index);
+        let (card, render) = match nodes {
+            Ok(n) => n,
+            Err(e) => {
+                if gem.is_some() {
+                    registry::remove(index);
+                }
+                return Err(e);
+            }
         };
         dev.report();
         Ok(Device {
@@ -95,9 +141,17 @@ impl<D: Driver> Device<D> {
             bus_id,
             state: Mutex::new(DeviceState::new()),
             has_render: render.is_some(),
+            gem,
             _card: card,
             _render: render,
         })
+    }
+
+    fn nodes(dev: &DevInfo, index: u32) -> Result<(MinorNode, Option<MinorNode>), DdiError> {
+        let card = Self::node(dev, NodeKind::Primary, index)?;
+        let render =
+            if D::FEATURES.contains(Features::RENDER) { Some(Self::node(dev, NodeKind::Render, index)?) } else { None };
+        Ok((card, render))
     }
 
     fn node(dev: &DevInfo, kind: NodeKind, index: u32) -> Result<MinorNode, DdiError> {
@@ -107,15 +161,29 @@ impl<D: Driver> Device<D> {
     }
 
     /// Unregisters the device. Refuses, and hands the device back, while
-    /// files are open.
+    /// files are open or GEM objects remain (after the driver's
+    /// [`Driver::before_detach`] and the deferred releases have run).
     #[allow(clippy::result_large_err, reason = "the shape of ddi::Driver::detach, which hands the instance back")]
-    pub fn detach(self, _ctx: &Sleepable) -> Result<(), (Device<D>, DdiError)> {
+    pub fn detach(self, ctx: &Sleepable) -> Result<(), (Device<D>, DdiError)> {
         let open = self.state.lock().open_files();
         if open != 0 {
             self.dev.warn(format_args!("detach refused: {open} files open"));
             return Err((self, DdiError));
         }
+        self.driver.before_detach(ctx);
+        if let Some(g) = &self.gem {
+            if let Err(s) = GemCore::quiesce(g, ctx) {
+                self.dev.warn(format_args!("detach refused: GEM state in use: {s:?}"));
+                return Err((self, DdiError));
+            }
+            registry::remove(self.index);
+        }
         Ok(())
+    }
+
+    /// Returns the GEM state, if the driver has [`Features::GEM`].
+    pub fn gem(&self) -> Option<&KArc<GemCore<D::Object>>> {
+        self.gem.as_ref()
     }
 
     /// Returns the driver's state.
@@ -251,32 +319,52 @@ impl<D: Driver> CharDevice for Device<D> {
             return Err(Errno::ENXIO);
         }
         let who = Opener { kind: d.kind, privileged: cred.has_sys_devices_priv(), pid: caller_pid() };
-        let mut s = self.state.lock();
-        let clone = s.open(who, ctx)?;
-        match minor::file_minor(d.kind, self.index, clone) {
-            Some(m) => Ok(Some(Minor(m))),
-            None => {
-                s.close(clone);
-                Err(Errno::ENXIO)
+        let (clone, m) = {
+            let mut s = self.state.lock();
+            let clone = s.open(who, ctx)?;
+            match minor::file_minor(d.kind, self.index, clone) {
+                Some(m) => (clone, m),
+                None => {
+                    s.close(clone);
+                    return Err(Errno::ENXIO);
+                }
             }
+        };
+        // Creating the handle table may block; the device mutex is not held.
+        if let Some(g) = &self.gem
+            && let Err(e) = g.file_open(clone, ctx)
+        {
+            self.state.lock().close(clone);
+            return Err(e);
         }
+        Ok(Some(Minor(m)))
     }
 
-    fn close(
-        &self,
-        minor: Minor,
-        _flags: OpenFlags,
-        _otyp: OpenType,
-        _cred: &Cred<'_>,
-        _ctx: &Sleepable,
-    ) -> Result<()> {
+    fn close(&self, minor: Minor, _flags: OpenFlags, _otyp: OpenType, _cred: &Cred<'_>, ctx: &Sleepable) -> Result<()> {
         let d = minor::decode(minor.0).ok_or(Errno::ENXIO)?;
         // A node minor without a clone id was never handed out by
         // clone_open, so there is no file to forget.
         if let Some(c) = d.clone {
             self.state.lock().close(c);
+            if let Some(g) = &self.gem {
+                g.file_close(c, ctx);
+            }
         }
         Ok(())
+    }
+
+    fn devmap(
+        &self,
+        minor: Minor,
+        dhp: DevmapHandle<'_>,
+        off: u64,
+        len: usize,
+        _model: DataModel,
+        ctx: &Sleepable,
+    ) -> Result<usize> {
+        let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
+        let g = self.gem.as_ref().ok_or(Errno::ENXIO)?;
+        g.devmap(c, &dhp, off, len, ctx)
     }
 
     fn ioctl(&self, minor: Minor, cmd: IoctlCmd, arg: IoctlArg<'_>, cred: &Cred<'_>, ctx: &Sleepable) -> Result<i32> {
@@ -284,18 +372,53 @@ impl<D: Driver> CharDevice for Device<D> {
         // core command (recognised by group and number, since its structure
         // sizes differ) instead of a misread structure, and ENOTTY for
         // anything else, as any caller would.
+        let cmd = cmd.0 as u32;
         if arg.model() == DataModel::Ilp32 {
-            return Err(if ioctl::is_core_nr(cmd.0 as u32) { Errno::ENOTSUP } else { Errno::ENOTTY });
+            let known = ioctl::is_core_nr(cmd) || ioctl::is_driver_nr(D::IOCTLS, cmd);
+            return Err(if known { Errno::ENOTSUP } else { Errno::ENOTTY });
         }
-        let entry = ioctl::lookup(cmd.0 as u32).ok_or(Errno::ENOTTY)?;
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
         // drv_priv(9F) is only called when an ioctl's permission needs it.
         let privileged = &|| cred.has_sys_devices_priv();
+        if let Some(entry) = ioctl::lookup(cmd) {
+            self.core_ioctl(entry, c, privileged, &arg, ctx)?;
+            return Ok(0);
+        }
+        let entry = ioctl::lookup_driver(D::IOCTLS, cmd).ok_or(Errno::ENOTTY)?;
+        self.state.lock().permit(c, entry.perm, privileged)?;
+        self.driver.ioctl(self, c, cmd, &arg, ctx)?;
+        Ok(0)
+    }
+}
+
+impl<D: Driver> Device<D> {
+    fn gem_or(&self, e: Errno) -> Result<&KArc<GemCore<D::Object>>, Errno> {
+        self.gem.as_ref().ok_or(e)
+    }
+
+    /// The GEM state for the dumb-buffer ioctls: `ENOSYS` without
+    /// [`Features::DUMB`], as Linux answers for a driver without
+    /// `dumb_create`.
+    fn dumb_gem(&self) -> Result<&KArc<GemCore<D::Object>>, Errno> {
+        if !D::FEATURES.contains(Features::DUMB) {
+            return Err(ENOSYS);
+        }
+        self.gem_or(ENOSYS)
+    }
+
+    fn core_ioctl(
+        &self,
+        entry: &Entry,
+        c: CloneId,
+        privileged: &dyn Fn() -> bool,
+        arg: &IoctlArg<'_>,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
         let perm = entry.perm;
         match entry.op {
-            Op::Version => self.version(c, perm, privileged, &arg)?,
-            Op::GetUnique => self.get_unique(c, perm, privileged, &arg)?,
-            Op::SetUnique => self.set_unique(c, perm, privileged, &arg)?,
+            Op::Version => self.version(c, perm, privileged, arg)?,
+            Op::GetUnique => self.get_unique(c, perm, privileged, arg)?,
+            Op::SetUnique => self.set_unique(c, perm, privileged, arg)?,
             Op::GetMagic => {
                 let magic = {
                     let mut s = self.state.lock();
@@ -305,16 +428,16 @@ impl<D: Driver> CharDevice for Device<D> {
                 let mut a = UserArg::<uapi::drm_auth>::zeroed();
                 // SAFETY: a field assignment.
                 unsafe { a.get_mut() }.magic = magic;
-                a.write(&arg)?;
+                a.write(arg)?;
             }
             Op::AuthMagic => {
-                let a = UserArg::<uapi::drm_auth>::read(&arg)?;
+                let a = UserArg::<uapi::drm_auth>::read(arg)?;
                 let mut s = self.state.lock();
                 s.permit(c, perm, privileged)?;
                 s.auth_magic(c, a.get().magic)?;
             }
             Op::GetClient => {
-                let mut cl = UserArg::<uapi::drm_client>::read(&arg)?;
+                let mut cl = UserArg::<uapi::drm_client>::read(arg)?;
                 let auth = {
                     let s = self.state.lock();
                     s.permit(c, perm, privileged)?;
@@ -334,10 +457,10 @@ impl<D: Driver> CharDevice for Device<D> {
                 a.uid = UID_NOBODY;
                 a.magic = 0;
                 a.iocs = 0;
-                cl.write(&arg)?;
+                cl.write(arg)?;
             }
             Op::SetVersion => {
-                let mut v = UserArg::<uapi::drm_set_version>::read(&arg)?;
+                let mut v = UserArg::<uapi::drm_set_version>::read(arg)?;
                 let sv = {
                     let a = v.get();
                     SetVersion {
@@ -360,19 +483,19 @@ impl<D: Driver> CharDevice for Device<D> {
                 a.drm_di_minor = IF_MINOR;
                 a.drm_dd_major = D::MAJOR;
                 a.drm_dd_minor = D::MINOR;
-                v.write(&arg)?;
+                v.write(arg)?;
                 r?;
             }
             Op::GetCap => {
-                let mut g = UserArg::<uapi::drm_get_cap>::read(&arg)?;
+                let mut g = UserArg::<uapi::drm_get_cap>::read(arg)?;
                 self.state.lock().permit(c, perm, privileged)?;
                 let value = caps::get_cap(D::FEATURES, &D::MODE_CONFIG, g.get().capability)?;
                 // SAFETY: a field assignment.
                 unsafe { g.get_mut() }.value = value;
-                g.write(&arg)?;
+                g.write(arg)?;
             }
             Op::SetClientCap => {
-                let a = UserArg::<uapi::drm_set_client_cap>::read(&arg)?;
+                let a = UserArg::<uapi::drm_set_client_cap>::read(arg)?;
                 let mut s = self.state.lock();
                 s.permit(c, perm, privileged)?;
                 let f = s.file_mut(c).ok_or(Errno::ENXIO)?;
@@ -388,7 +511,93 @@ impl<D: Driver> CharDevice for Device<D> {
                 s.permit(c, perm, privileged)?;
                 s.drop_master(c, privileged, caller_pid())?;
             }
+            Op::GemClose => {
+                let a = UserArg::<uapi::drm_gem_close>::read(arg)?;
+                self.state.lock().permit(c, perm, privileged)?;
+                let g = self.gem_or(caps::EOPNOTSUPP)?;
+                // `pad` is ignored, as in Linux's drm_gem_close_ioctl: the
+                // kernel has never checked it, so userland need not clear it.
+                g.handle_close(c, a.get().handle, ctx)?;
+            }
+            Op::GemFlink => {
+                // `name` is an output; its input value is ignored, as in Linux.
+                let mut a = UserArg::<uapi::drm_gem_flink>::read(arg)?;
+                self.state.lock().permit(c, perm, privileged)?;
+                let g = self.gem_or(caps::EOPNOTSUPP)?;
+                let name = g.flink(c, a.get().handle, ctx)?;
+                // SAFETY: a field assignment.
+                unsafe { a.get_mut() }.name = name;
+                a.write(arg)?;
+            }
+            Op::GemOpen => {
+                // `handle` and `size` are outputs, ignored on input as in Linux.
+                let mut a = UserArg::<uapi::drm_gem_open>::read(arg)?;
+                self.state.lock().permit(c, perm, privileged)?;
+                let g = self.gem_or(caps::EOPNOTSUPP)?;
+                let (handle, size) = g.open_name(c, a.get().name, ctx)?;
+                // SAFETY: only field assignments below.
+                let m = unsafe { a.get_mut() };
+                m.handle = handle;
+                m.size = size;
+                a.write(arg)?;
+            }
+            Op::CreateDumb => {
+                // `handle`, `pitch` and `size` are outputs; whatever the
+                // caller left in them is overwritten, as in Linux, which
+                // cannot refuse garbage there because old userland leaves it.
+                let mut a = UserArg::<uapi::drm_mode_create_dumb>::read(arg)?;
+                self.state.lock().permit(c, perm, privileged)?;
+                let g = self.dumb_gem()?;
+                let req = {
+                    let v = a.get();
+                    DumbRequest { width: v.width, height: v.height, bpp: v.bpp, flags: v.flags }
+                };
+                let layout = self.driver.dumb_layout(&req)?;
+                let size = usize::try_from(layout.size).map_err(|_| Errno::EINVAL)?;
+                if size > D::MAX_OBJECT_SIZE {
+                    return Err(Errno::ENOMEM);
+                }
+                // Charged before the locked allocation, so that concurrent
+                // requests cannot allocate past the device's budget.
+                let reservation = g.reserve(size, ctx)?;
+                let mem = g.sys_mem(size, ctx)?;
+                let obj = GemCore::create_reserved(g, D::Object::from(mem), reservation, ctx)?;
+                let size = obj.size() as u64;
+                let handle = g.handle_create(c, obj, ctx)?;
+                // SAFETY: only field assignments below.
+                let m = unsafe { a.get_mut() };
+                m.handle = handle;
+                m.pitch = layout.pitch;
+                m.size = size;
+                a.write(arg)?;
+            }
+            Op::MapDumb => {
+                let mut a = UserArg::<uapi::drm_mode_map_dumb>::read(arg)?;
+                self.state.lock().permit(c, perm, privileged)?;
+                let g = self.dumb_gem()?;
+                // `pad` is ignored, as in Linux's drm_mode_mmap_dumb_ioctl.
+                let obj = g.lookup(c, a.get().handle)?;
+                let off = g.mmap_offset(&obj, ctx);
+                obj.put(ctx);
+                // SAFETY: a field assignment.
+                unsafe { a.get_mut() }.offset = off?;
+                a.write(arg)?;
+            }
+            Op::DestroyDumb => {
+                let a = UserArg::<uapi::drm_mode_destroy_dumb>::read(arg)?;
+                self.state.lock().permit(c, perm, privileged)?;
+                let g = self.dumb_gem()?;
+                g.handle_close(c, a.get().handle, ctx)?;
+            }
         }
-        Ok(0)
+        Ok(())
     }
 }
+
+/// `ENOSYS`, which Linux returns for dumb-buffer ioctls of a driver without
+/// them. `ddi::Errno` has no named constant for it.
+const ENOSYS: Errno = match Errno::new(sys::errno::ENOSYS) {
+    Some(e) => e,
+    // Unreachable: ENOSYS is 89. EINVAL keeps the constant total.
+    None => Errno::EINVAL,
+};

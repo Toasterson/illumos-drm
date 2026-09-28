@@ -1,6 +1,6 @@
 [package]
 name = "rdrmnull"
-description = "A DRM null driver: one device with card and render nodes and no hardware, for testing the core"
+description = "A DRM null driver: one device with card and render nodes, GEM objects and dumb buffers in system memory and no hardware, for testing the core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,8 +11,12 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-ddi = { workspace = true, features = ["panic-handler"] }
+# global-alloc-sleep: the DRM core keeps its handle and name tables in
+# alloc::collections::BTreeMap, whose nodes come from the global allocator;
+# the core only inserts with the Sleepable token (see drm::idmap).
+ddi = { workspace = true, features = ["panic-handler", "global-alloc-sleep"] }
 drm.workspace = true
+drm-uapi.workspace = true
 
 [package.metadata.kmod]
 # Install class: /usr/kernel/drv/amd64/rdrmnull

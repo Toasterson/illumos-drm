@@ -14,6 +14,22 @@
 //! from a 32-bit process fail with `ENOTSUP`, because only the LP64 ABI is
 //! supported.
 //!
+//! Since milestone R1 it also has GEM buffer objects ([`gem`]): per-file
+//! handles, FLINK names, fake mmap offsets and `mmap(2)` through
+//! `devmap(9E)`, system-memory objects from `ddi_umem_alloc(9F)` with an
+//! optional DMA scatter/gather table, dumb buffers, and the ioctls
+//! `GEM_CLOSE`, `GEM_FLINK`, `GEM_OPEN`, `MODE_CREATE_DUMB`,
+//! `MODE_MAP_DUMB` and `MODE_DESTROY_DUMB`, plus driver-private ioctls.
+//! References to objects can be dropped in interrupt context
+//! ([`defer`]).
+//!
+//! The handle and name tables are `alloc::collections::BTreeMap`s, so the
+//! driver module must provide a global allocator: enable the
+//! `global-alloc-sleep` feature of the `ddi` crate, as `rdrmnull` does. The
+//! core only inserts into those maps with the `Sleepable` token; all its
+//! other allocations go through [`kvec::KVec`] and [`karc::KArc`], which
+//! choose `KM_SLEEP` or `KM_NOSLEEP` per call.
+//!
 //! The crate is a `no_std` library on top of the `ddi` crate and is linked
 //! statically into each driver module; there is no separate `misc/drm`
 //! module yet (see the README for why). A driver implements [`Driver`],
@@ -21,7 +37,7 @@
 //! minor numbers with [`minor::instance_of_minor`]:
 //!
 //! ```ignore
-//! ddi::module! { driver: MyModule, ops: [char] }
+//! ddi::module! { driver: MyModule, ops: [char, devmap] }
 //!
 //! impl ddi::Driver for MyModule {
 //!     type Instance = drm::Device<MyDriver>;
@@ -40,19 +56,32 @@
 //! ```
 //!
 //! The logic that decides things ([`state`], [`caps`], [`ioctl`],
-//! [`minor`]) is plain data and is unit-tested on the host; [`Device`] is
-//! the thin kernel layer that copies arguments and holds the lock.
+//! [`minor`], [`objects`], [`idmap`], [`offsets`], [`dumb`], [`karc`],
+//! [`defer`]) is plain data and is unit-tested on the host, several parts
+//! from many threads; [`Device`] and [`gem`] are the kernel layer that
+//! copies arguments, holds the locks and calls the DDI.
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+extern crate alloc;
+
 pub mod caps;
+pub mod defer;
 #[cfg(not(test))]
 mod device;
 pub mod driver;
+pub mod dumb;
+#[cfg(not(test))]
+pub mod gem;
+pub mod idmap;
 pub mod ioctl;
+pub mod karc;
+mod kmem;
 pub mod kvec;
 pub mod minor;
+pub mod objects;
+pub mod offsets;
 pub mod state;
 #[cfg(not(test))]
 pub mod uaccess;
@@ -60,3 +89,5 @@ pub mod uaccess;
 #[cfg(not(test))]
 pub use device::Device;
 pub use driver::{BusId, Driver, Features, ModeConfig};
+#[cfg(not(test))]
+pub use gem::{GemObject, GemRef, SysMem};

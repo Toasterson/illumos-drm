@@ -4,10 +4,12 @@
 
 //! A growable array on the kernel heap whose growth never panics.
 //!
-//! `alloc::vec::Vec` needs a global allocator, and the `ddi` crate
-//! deliberately has none, because a global allocator would have to choose
-//! between `KM_SLEEP` and `KM_NOSLEEP` without knowing the context. `KVec`
-//! takes the decision per call instead: [`KVec::push`] grows with
+//! `alloc::vec::Vec` needs a global allocator, and a global allocator has
+//! to choose between `KM_SLEEP` and `KM_NOSLEEP` without knowing the
+//! context; the optional one of the `ddi` crate (`global-alloc-sleep`)
+//! always sleeps, which the core only accepts for its `BTreeMap` tables,
+//! with the token checked at every insertion. `KVec` takes the decision
+//! per call instead: [`KVec::push`] grows with
 //! `KM_SLEEP` and demands the [`Sleepable`] token, [`KVec::try_push`] grows
 //! with `KM_NOSLEEP` and may be used anywhere. Both report failure as a
 //! value; neither can panic.
@@ -21,58 +23,7 @@ use core::ptr::{self, NonNull};
 
 use ddi::{Errno, Sleepable};
 
-/// The allocation flag of one growth step.
-#[derive(Clone, Copy)]
-enum Flag {
-    Sleep,
-    NoSleep,
-}
-
-#[cfg(not(test))]
-mod raw {
-    use super::Flag;
-    use ddi::sys;
-
-    pub fn alloc(size: usize, flag: Flag) -> *mut u8 {
-        let f = match flag {
-            Flag::Sleep => sys::KM_SLEEP,
-            Flag::NoSleep => sys::KM_NOSLEEP,
-        };
-        // SAFETY: kmem_alloc(9F) may be called with KM_SLEEP from thread
-        // context, which the Sleepable token of the caller proves, and with
-        // KM_NOSLEEP from any context.
-        unsafe { sys::kmem_alloc(size, f) as *mut u8 }
-    }
-
-    /// # Safety
-    /// `p` must come from [`alloc`] with the same `size`.
-    pub unsafe fn free(p: *mut u8, size: usize) {
-        unsafe { sys::kmem_free(p as *mut sys::c_void, size) }
-    }
-}
-
-#[cfg(test)]
-mod raw {
-    extern crate std;
-    use super::Flag;
-    use std::alloc::Layout;
-
-    pub fn alloc(size: usize, _flag: Flag) -> *mut u8 {
-        match Layout::from_size_align(size, 8) {
-            // SAFETY: size is non-zero; callers never allocate zero bytes.
-            Ok(l) => unsafe { std::alloc::alloc(l) },
-            Err(_) => core::ptr::null_mut(),
-        }
-    }
-
-    /// # Safety
-    /// `p` must come from [`alloc`] with the same `size`.
-    pub unsafe fn free(p: *mut u8, size: usize) {
-        if let Ok(l) = Layout::from_size_align(size, 8) {
-            unsafe { std::alloc::dealloc(p, l) }
-        }
-    }
-}
+use crate::kmem::{self as raw, Flag};
 
 /// A growable array of `T` in kernel memory.
 ///

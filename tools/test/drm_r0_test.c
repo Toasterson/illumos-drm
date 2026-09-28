@@ -150,7 +150,10 @@ test_caps(int fd, const char *node)
 		{ DRM_CAP_CURSOR_WIDTH, 64, "CURSOR_WIDTH" },
 		{ DRM_CAP_CURSOR_HEIGHT, 64, "CURSOR_HEIGHT" },
 		{ DRM_CAP_ADDFB2_MODIFIERS, 0, "ADDFB2_MODIFIERS" },
-		{ DRM_CAP_DUMB_BUFFER, 0, "DUMB_BUFFER" },
+		/* Dumb buffers exist since R1; rdrmnull prefers 24 bits and a shadow. */
+		{ DRM_CAP_DUMB_BUFFER, 1, "DUMB_BUFFER" },
+		{ DRM_CAP_DUMB_PREFERRED_DEPTH, 24, "DUMB_PREFERRED_DEPTH" },
+		{ DRM_CAP_DUMB_PREFER_SHADOW, 1, "DUMB_PREFER_SHADOW" },
 		{ DRM_CAP_CRTC_IN_VBLANK_EVENT, 0, "CRTC_IN_VBLANK_EVENT" },
 	};
 	char what[128];
@@ -430,8 +433,9 @@ main(int argc, char **argv)
 		check(ioctl(fd, _IOWR('d', 0x00, char[36]), buf) == -1 && errno == ENOTTY,
 		    "DRM_IOCTL_VERSION with a 36-byte (ILP32) size is ENOTTY");
 		errno = 0;
-		check(ioctl(fd, DRM_IOCTL_GEM_CLOSE, buf) == -1 && errno == ENOTTY,
-		    "DRM_IOCTL_GEM_CLOSE (R1) is ENOTTY");
+		(void) memset(buf, 0, sizeof (buf));
+		check(ioctl(fd, DRM_IOCTL_GEM_CLOSE, buf) == -1 && errno == EINVAL,
+		    "DRM_IOCTL_GEM_CLOSE of handle 0 is EINVAL (GEM exists since R1)");
 		errno = 0;
 		check(ioctl(fd, DRM_IOCTL_VERSION, (void *)8) == -1 && errno == EFAULT,
 		    "DRM_IOCTL_VERSION with a bad pointer is EFAULT");
