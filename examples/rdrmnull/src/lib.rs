@@ -351,7 +351,8 @@ impl DmaDrill {
 
 /// The DMA attributes of the drill: any 64-bit address, page-aligned, and
 /// one cookie per page of the largest object (16 MiB).
-const DRILL_DMA_ATTR: DmaAttr = DmaAttr::bits64().max_cookies((NullDriver::OBJECT_LIMIT / 4096) as u32);
+const DRILL_DMA_ATTR: DmaAttr =
+    DmaAttr::bits64().max_cookies((NullDriver::OBJECT_LIMIT as u64 / drm::offsets::PAGE_SIZE) as u32);
 
 /// The DMA attributes of the drill from `rdrmnull.conf`: [`DRILL_DMA_ATTR`],
 /// with the largest transfer lowered to `dma-max-transfer` bytes if that
@@ -400,7 +401,7 @@ impl NullDriver {
         if size == 0 || size > <NullDriver as drm::Driver>::MAX_OBJECT_SIZE / 2 {
             return Err(if size == 0 { Errno::EINVAL } else { Errno::ENOMEM });
         }
-        let reservation = g.reserve(size.next_multiple_of(4096) * 2, ctx)?;
+        let reservation = g.reserve(size.next_multiple_of(drm::offsets::PAGE_SIZE as usize) * 2, ctx)?;
         let m0 = g.sys_mem(size, ctx)?;
         let m1 = g.sys_mem(size, ctx)?;
         let obj = NullObject::Movable(Movable { dev: g.dev_info(), mem: [m0, m1], cur: AtomicUsize::new(0) });
