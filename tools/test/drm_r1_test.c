@@ -515,8 +515,18 @@ test_dumb(int fd)
 	check(gem_stats(&g) && g.objects == 1 && g.handles == 1 && g.umem_bytes == size && g.offsets == 0,
 	    "kstat: one object, one handle, 1228800 bytes, no offset yet");
 	print_gem("after CREATE_DUMB", &g);
-	/* rdrmnull is a pseudo device: no DMA binding, no scatter/gather table. */
-	check(g.dma_segments == 0, "kstat: no DMA segments (rdrmnull does no DMA)");
+	/*
+	 * rdrmnull is a pseudo device: no DMA binding, no scatter/gather
+	 * table. Under the DMA drill (RDRMNULL_DMA=1, set by run-r1-test.sh
+	 * for a .conf with dma-mode "self" or "root-node") every object is
+	 * bound, with at most one cookie per page.
+	 */
+	if (getenv("RDRMNULL_DMA") != NULL && strcmp(getenv("RDRMNULL_DMA"), "1") == 0) {
+		check(g.dma_segments >= 1 && g.dma_segments <= size / PAGE,
+		    "kstat: the object's memory is bound for DMA (scatter/gather entries)");
+	} else {
+		check(g.dma_segments == 0, "kstat: no DMA segments (rdrmnull does no DMA)");
+	}
 
 	check(map_dumb(fd, h, 0, &off) == 0, "MAP_DUMB");
 	(void) printf("INFO fake offset 0x%llx\n", (unsigned long long)off);

@@ -107,7 +107,7 @@ impl<D: Driver> Device<D> {
             return Err(DdiError);
         }
         let gem = if D::FEATURES.contains(Features::GEM) {
-            match GemCore::new(dev, D::DMA_ATTR, D::MAX_MEMORY, ctx) {
+            match GemCore::new(dev, driver.gem_dma(&dev), D::MAX_MEMORY, ctx) {
                 Ok(g) => Some(g),
                 Err(e) => {
                     dev.warn(format_args!("cannot set up GEM: {e:?}"));

@@ -423,6 +423,39 @@ impl Drop for SysMem {
     }
 }
 
+/// How the object memory of a device is bound for DMA
+/// ([`Driver::gem_dma`](crate::Driver::gem_dma)): the attributes, and the
+/// node the DMA handles are allocated against.
+///
+/// [`GemDma::new`] binds against the device's own node, the only node
+/// `ddi_dma_alloc_handle(9F)` accepts. [`GemDma::against`] names another
+/// node; it exists for the `rdrmnull` DMA drill, which reproduces the kernel
+/// panic that binding against `ddi_root_node(9F)` from a pseudo node caused
+/// (see `tools/test/rdrmnull-dma-root-node.conf`).
+#[derive(Clone, Copy)]
+pub struct GemDma {
+    attr: DmaAttr,
+    node: Option<DevInfo>,
+}
+
+impl GemDma {
+    /// Binds with `attr` against the device's own node.
+    pub const fn new(attr: DmaAttr) -> GemDma {
+        GemDma { attr, node: None }
+    }
+
+    /// Binds with `attr` against `node` instead of the device's own node.
+    ///
+    /// # Safety
+    /// `ddi_dma_alloc_handle(9F)` requires the driver's own node. Any other
+    /// node is outside the DDI: the caller must keep `node` valid for as long
+    /// as the device exists and accepts whatever the DMA framework does with
+    /// it, up to a panic. Only the DMA drill of `rdrmnull` uses this.
+    pub const unsafe fn against(attr: DmaAttr, node: DevInfo) -> GemDma {
+        GemDma { attr, node: Some(node) }
+    }
+}
+
 /// The scatter/gather table of a [`SysMem`], from `ddi_dma_cookie_iter(9F)`.
 pub struct SgIter<'a> {
     handle: sys::ddi_dma_handle_t,
@@ -948,6 +981,9 @@ pub struct GemCore<O: GemObject> {
     tq: TaskQueue,
     dev: DevInfo,
     dma: Option<DmaAttr>,
+    /// The node object memory is bound against: `dev` unless the driver
+    /// named another one ([`GemDma::against`]).
+    dma_node: DevInfo,
     max_memory: u64,
     names: Mutex<IdMap<GemRef<O>, KIdSpace>>,
     offsets: Mutex<OffsetMap<ObjPtr<O>, VmemArena>>,
@@ -989,12 +1025,12 @@ unsafe impl<O: GemObject> Send for CorePtr<O> {}
 impl<O: GemObject> GemCore<O> {
     /// Creates the GEM state of a device: the deferred-release task
     /// queue, the name space, the offset arena and the `gem` kstat. `dma`
-    /// are the attributes every object's memory is bound with against
-    /// `dev`, or `None` for devices that do no DMA; `max_memory` limits the
-    /// memory of all objects together.
+    /// says how every object's memory is bound (normally against `dev`), or
+    /// is `None` for devices that do no DMA; `max_memory` limits the memory
+    /// of all objects together.
     pub(crate) fn new(
         dev: DevInfo,
-        dma: Option<DmaAttr>,
+        dma: Option<GemDma>,
         max_memory: usize,
         ctx: &Sleepable,
     ) -> Result<KArc<GemCore<O>>, Errno> {
@@ -1014,7 +1050,8 @@ impl<O: GemObject> GemCore<O> {
             GemCore {
                 tq,
                 dev,
-                dma,
+                dma: dma.map(|d| d.attr),
+                dma_node: dma.and_then(|d| d.node).unwrap_or(dev),
                 max_memory: max_memory as u64,
                 names: Mutex::new(IdMap::new(names)),
                 offsets: Mutex::new(OffsetMap::new(arena)),
@@ -1042,7 +1079,7 @@ impl<O: GemObject> GemCore<O> {
     /// Allocates system memory for an object of this device, bound for DMA
     /// if the driver asked for it ([`SysMem::new`]).
     pub fn sys_mem(&self, size: usize, ctx: &Sleepable) -> Result<SysMem, Errno> {
-        SysMem::new(&self.dev, size, self.dma.as_ref(), ctx)
+        SysMem::new(&self.dma_node, size, self.dma.as_ref(), ctx)
     }
 
     /// Returns a snapshot of the statistics.

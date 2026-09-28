@@ -90,4 +90,4 @@ pub mod uaccess;
 pub use device::Device;
 pub use driver::{BusId, Driver, Features, ModeConfig};
 #[cfg(not(test))]
-pub use gem::{GemObject, GemRef, SysMem};
+pub use gem::{GemDma, GemObject, GemRef, SysMem};

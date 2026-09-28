@@ -17,6 +17,21 @@
 //! handles), so its objects have no scatter/gather table
 //! ([`drm::Driver::DMA_ATTR`] is `None`).
 //!
+//! The string property `dma-mode` in `rdrmnull.conf` is a test aid, the DMA
+//! drill; nothing but the kernel tests should set it:
+//!
+//! * `"none"` (or no property): no DMA, as above.
+//! * `"self"`: bind every object for DMA against the driver's own node.
+//!   This only works when the node's parent is a nexus that does DMA, so
+//!   the `.conf` must attach it under the root nexus
+//!   (`tools/test/rdrmnull-dma-self.conf`); such a node leaves its instance
+//!   in `/etc/path_to_inst` after `rem_drv`.
+//! * `"root-node"`: stay a pseudo node but allocate the DMA handles against
+//!   `ddi_root_node(9F)` and bind every object
+//!   (`tools/test/rdrmnull-dma-root-node.conf`). The DDI does not allow
+//!   this; it reproduces the kernel panic an R1 trial caused, so that a
+//!   crash dump can be taken. Use a disposable VM with a dump device.
+//!
 //! It also has three driver-private ioctls that exist only for the kernel
 //! tests (`tools/test/drm_r1_test.c`) and are not an interface for anything
 //! else:
@@ -43,9 +58,10 @@ use core::ffi::{CStr, c_int, c_void};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
+use ddi::DmaAttr;
 use ddi::prelude::*;
 use ddi::sys;
-use drm::gem::{Fault, GemCore, GemObject, GemRef, Mapping, SysMem, UmemCookie};
+use drm::gem::{Fault, GemCore, GemDma, GemObject, GemRef, Mapping, SysMem, UmemCookie};
 use drm::ioctl::DriverIoctl;
 use drm::minor::CloneId;
 use drm::state::Perm;
@@ -274,9 +290,57 @@ fn put_later(a: &Atomic) {
     }
 }
 
-/// The DRM driver: no hardware, only the test timer.
+/// The DMA drill (`dma-mode` in `rdrmnull.conf`; see the crate
+/// documentation).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DmaDrill {
+    /// `"none"`: no DMA.
+    Off,
+    /// `"self"`: bind against the driver's own node.
+    OwnNode,
+    /// `"root-node"`: bind against `ddi_root_node(9F)` (outside the DDI).
+    RootNode,
+}
+
+impl DmaDrill {
+    fn from_conf(dev: &DevInfo, ctx: &Sleepable) -> Result<DmaDrill, DdiError> {
+        let mode = match dev.props().string(c"dma-mode", ctx) {
+            Ok(None) => return Ok(DmaDrill::Off),
+            Ok(Some(s)) => s,
+            Err(_) => {
+                dev.warn(format_args!("dma-mode must be a string property"));
+                return Err(DdiError);
+            }
+        };
+        let drill = match mode.to_bytes() {
+            b"none" => DmaDrill::Off,
+            b"self" => DmaDrill::OwnNode,
+            b"root-node" => DmaDrill::RootNode,
+            other => {
+                dev.warn(format_args!("unknown dma-mode {:?}: none, self or root-node", core::str::from_utf8(other)));
+                return Err(DdiError);
+            }
+        };
+        if drill != DmaDrill::Off {
+            dev.note(format_args!("DMA drill: dma-mode {:?}", mode.to_str().unwrap_or("?")));
+        }
+        Ok(drill)
+    }
+}
+
+/// The DMA attributes of the drill: any 64-bit address, page-aligned, and
+/// one cookie per page of the largest object (16 MiB).
+const DRILL_DMA_ATTR: DmaAttr = DmaAttr::bits64().max_cookies((NullDriver::OBJECT_LIMIT / 4096) as u32);
+
+/// The DRM driver: no hardware, only the test timer and the DMA drill.
 pub struct NullDriver {
     timer: Mutex<Option<LaterTimer>>,
+    dma: DmaDrill,
+}
+
+impl NullDriver {
+    /// [`drm::Driver::MAX_OBJECT_SIZE`], named here for [`DRILL_DMA_ATTR`].
+    const OBJECT_LIMIT: usize = 16 << 20;
 }
 
 impl NullDriver {
@@ -399,7 +463,7 @@ impl drm::Driver for NullDriver {
     // Small limits, so that the tests reach them without exhausting the
     // test machine: 16 MiB per object (a 2048 by 2048 dumb buffer of 32-bit
     // pixels), 64 MiB for the device.
-    const MAX_OBJECT_SIZE: usize = 16 << 20;
+    const MAX_OBJECT_SIZE: usize = NullDriver::OBJECT_LIMIT;
     const MAX_MEMORY: usize = 64 << 20;
     const IOCTLS: &'static [DriverIoctl] = &[
         DriverIoctl { cmd: RDRMNULL_IOCTL_CREATE_MOVABLE, perm: TEST_ONLY },
@@ -424,6 +488,20 @@ impl drm::Driver for NullDriver {
         }
     }
 
+    fn gem_dma(&self, _dev: &DevInfo) -> Option<GemDma> {
+        match self.dma {
+            DmaDrill::Off => None,
+            DmaDrill::OwnNode => Some(GemDma::new(DRILL_DMA_ATTR)),
+            // SAFETY: none; this is the drill. ddi_root_node(9F) returns the
+            // root node, which lives as long as the system; the DDI requires
+            // the driver's own node, and the DMA framework's reaction to
+            // another one is what the drill records.
+            DmaDrill::RootNode => {
+                Some(unsafe { GemDma::against(DRILL_DMA_ATTR, DevInfo::from_raw(sys::ddi_root_node())) })
+            }
+        }
+    }
+
     fn before_detach(&self, ctx: &Sleepable) {
         // Cancel or finish the timer, then drop a reference it never got to.
         let t = self.timer.lock().take();
@@ -440,7 +518,8 @@ impl Driver for RDrmNull {
     const LINKINFO: &'static CStr = c"Rust DRM null driver r1";
 
     fn attach(dev: DevInfo, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
-        drm::Device::attach(dev, NullDriver { timer: Mutex::new(None) }, ctx)
+        let dma = DmaDrill::from_conf(&dev, ctx)?;
+        drm::Device::attach(dev, NullDriver { timer: Mutex::new(None), dma }, ctx)
     }
 
     fn detach(inst: Self::Instance, _dev: DevInfo, ctx: &Sleepable) -> Result<(), (Self::Instance, DdiError)> {
