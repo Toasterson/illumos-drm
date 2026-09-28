@@ -99,11 +99,11 @@ scripts that link, load, test and unload `rdrmnull` on an illumos machine
 **Dependency on illumos-ddi.** `ddi-sys` and `ddi` are a git dependency on
 <https://code.aopc.cloud/illumos/illumos-ddi.git>, pinned by revision in
 the workspace `Cargo.toml`. The pinned revision is the `drm-r0` branch
-(`77df4ce177`): illumos-ddi `main` (`eb18ab93b7`) plus clone-open support
+(`bfc7ff7b2a`): illumos-ddi `main` (`eb18ab93b7`) plus clone-open support
 in the `CharDevice` glue (`CharDevice::clone_open`, commits `8463d9da92`,
 `f36d47958e` and `e019d5bd3c`) and the `devmap(9E)` entry point
 (`CharDevice::devmap` and `module! { ops: [char, devmap] }`, commits
-`94680b671c` and `77df4ce177`); illumos-ddi pull request
+`94680b671c`, `77df4ce177` and `bfc7ff7b2a`); illumos-ddi pull request
 <https://code.aopc.cloud/illumos/illumos-ddi/pulls/1>. Per-file DRM
 state is impossible without clone opens, because a character device
 otherwise sees only the last `close(9E)` of a device number, and GEM
@@ -214,6 +214,14 @@ start at an object's offset and stay within it.
 the object (Linux's `drm_vma_node_is_allowed`); `devmap_dup(9E)` (fork)
 and `devmap_unmap(9E)` (munmap, exit, splits) take and drop references for
 each piece; `devmap_access(9E)` defaults to `devmap_default_access(9F)`.
+Every piece a partial `munmap(2)` leaves gets private data holding its own
+reference, whatever else fails, because the framework keeps the piece (and,
+for the middle case, a copy of the old private-data pointer). Such a piece
+is *unsettled* until its next fault: the framework adjusts its offset into
+the memory only after `devmap_unmap(9E)` returns, so it must not be
+remapped before then; a move invalidates it, and its next fault (which
+holds the address-space lock the `munmap(2)` held) calls
+`GemObject::mapped` with the final geometry.
 The framework can free a mapping handle after a successful `devmap(9E)`
 without calling back (a private mapping fails that way), so the reference
 is parked by handle and thread and dropped by the next entry point of the
@@ -239,14 +247,17 @@ binding against `ddi_root_node(9F)` from the pseudo node panicked the test
 machine, so neither is used. Object memory is locked, so a driver sets
 limits per object and per device (`MAX_OBJECT_SIZE`, `MAX_MEMORY`; 256 MiB
 and 1 GiB by default, 16 and 64 MiB in `rdrmnull`); requests above them are
-`ENOMEM`.
+`ENOMEM`. The device budget is charged before the memory is allocated
+(`GemCore::reserve`, `GemCore::create_reserved`), so concurrent requests
+cannot exceed it even for a moment.
 
-**Dumb buffers (R1).** `MODE_CREATE_DUMB` accepts 8, 16, 24 and 32 bits per
-pixel unless the driver's `Driver::dumb_layout` says otherwise, pads rows to
-64 bytes, rounds the size up to a page, refuses zero dimensions, non-zero
-`flags` and every overflow with `EINVAL`, and keeps Linux's 32-bit size
-limit. `MAP_DUMB` refuses a non-zero `pad` (Linux ignores it), `GEM_CLOSE`
-too. `DRM_CAP_DUMB_BUFFER` is 1 for drivers with `Features::GEM` and
+**Dumb buffers (R1).** `MODE_CREATE_DUMB` follows Linux's
+`drm_mode_create_dumb`: any non-zero `bpp` up to `U32_MAX - 8`, counted as
+`ceil(bpp / 8)` bytes per pixel, non-zero dimensions, `flags` ignored, and
+Linux's 32-bit size limit; every overflow is `EINVAL`. The default layout
+(`Driver::dumb_layout` may replace it) pads rows to 64 bytes and rounds the
+size up to a page. `MAP_DUMB` and `GEM_CLOSE` ignore `pad`, as Linux does,
+since userland has never been required to clear it. `DRM_CAP_DUMB_BUFFER` is 1 for drivers with `Features::GEM` and
 `Features::DUMB`, and `DUMB_PREFERRED_DEPTH` and `DUMB_PREFER_SHADOW` report
 the driver's `ModeConfig`; `ADDFB2_MODIFIERS` stays 0 until R3.
 
@@ -267,9 +278,11 @@ documented upstream); it requires `DEVMAP_ALLOW_REMAP` at setup, and the
 framework then refuses soft-locking such mappings (raw I/O from them
 fails); `devmap_unload(9F)` counts offsets from the mapping piece's own
 user offset, so the manual's "offset 0, length 0 for the whole mapping"
-fails with `EINVAL` for GEM offsets; nothing serialises a move against a
-concurrent `munmap(2)` that splits the mapping being remapped, which a real
-movable-object layer has to solve.
+fails with `EINVAL` for GEM offsets; a piece split off by a partial
+`munmap(2)` must not be remapped until the framework has finished it (see
+*Mapping*), so a move only invalidates such a piece and its next fault
+remaps it. The test covers a head and a middle `munmap(2)` of a movable
+mapping with per-page patterns, before and after the pieces settle.
 
 **Ioctl semantics.** The permission flags and the behaviour follow Linux
 (`drm_ioctls[]`, `drm_auth.c`, `drm_getcap`, `drm_setclientcap`):
@@ -287,7 +300,7 @@ movable-object layer has to solve.
 | `GET_CLIENT` | primary | addition beyond the R0 work item, to make authentication observable: index 0 only (the caller), authentication state, the caller's pid, the anonymous uid, as on Linux |
 | `SET_MASTER` | primary | needs `PRIV_SYS_DEVICES`, or a former master used by its opening process (`PRIV_SYS_DEVICES` is checked only if the second condition fails) |
 | `DROP_MASTER` | primary | same permission, only by the current master |
-| `GEM_CLOSE` | all files, render too | unknown handle `EINVAL`; non-zero `pad` `EINVAL`; `EOPNOTSUPP` without `GEM` |
+| `GEM_CLOSE` | all files, render too | unknown handle `EINVAL`; `pad` ignored; `EOPNOTSUPP` without `GEM` |
 | `GEM_FLINK` | authenticated (primary) | unknown handle `ENOENT`; one name per object, from 1 |
 | `GEM_OPEN` | authenticated (primary) | unknown name `ENOENT`; returns a new handle and the size |
 | `MODE_CREATE_DUMB` | primary | see *Dumb buffers*; `ENOSYS` without `DUMB` |

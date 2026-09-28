@@ -388,8 +388,11 @@ test_dumb_args(int fd)
 	check(create_dumb(fd, 0, 16, 32, 0, &h, NULL, NULL) == EINVAL, "CREATE_DUMB width 0 is EINVAL");
 	check(create_dumb(fd, 16, 0, 32, 0, &h, NULL, NULL) == EINVAL, "CREATE_DUMB height 0 is EINVAL");
 	check(create_dumb(fd, 16, 16, 0, 0, &h, NULL, NULL) == EINVAL, "CREATE_DUMB bpp 0 is EINVAL");
-	check(create_dumb(fd, 16, 16, 12, 0, &h, NULL, NULL) == EINVAL, "CREATE_DUMB bpp 12 is EINVAL");
-	check(create_dumb(fd, 16, 16, 32, 1, &h, NULL, NULL) == EINVAL, "CREATE_DUMB flags 1 is EINVAL");
+	check(create_dumb(fd, 16, 16, 0xfffffff8u, 0, &h, NULL, NULL) == EINVAL, "CREATE_DUMB bpp above U32_MAX - 8 is EINVAL");
+	check(create_dumb(fd, 100, 1, 12, 0, &h, &pitch, &size) == 0 && pitch == 256 && destroy_dumb(fd, h) == 0,
+	    "CREATE_DUMB bpp 12 is accepted as 2 bytes per pixel, as in Linux (pitch 256)");
+	check(create_dumb(fd, 16, 16, 32, 1, &h, &pitch, NULL) == 0 && pitch == 64 && destroy_dumb(fd, h) == 0,
+	    "CREATE_DUMB flags are ignored, as in Linux");
 	check(create_dumb(fd, 0x40000000, 1, 32, 0, &h, NULL, NULL) == EINVAL,
 	    "CREATE_DUMB width*4 overflowing 32 bits is EINVAL");
 	check(create_dumb(fd, 65536, 65536, 32, 0, &h, NULL, NULL) == EINVAL,
@@ -400,7 +403,7 @@ test_dumb_args(int fd)
 	    "CREATE_DUMB of one row more than 16 MiB is ENOMEM");
 	check(create_dumb(fd, 100, 10, 24, 0, &h, &pitch, &size) == 0 && pitch == 320 && size == PAGE,
 	    "CREATE_DUMB 100x10x24: pitch 320 (64-byte rows), size one page");
-	check(map_dumb(fd, h, 1, &off) == EINVAL, "MAP_DUMB with pad 1 is EINVAL");
+	check(map_dumb(fd, h, 1, &off) == 0, "MAP_DUMB ignores pad, as in Linux");
 	check(map_dumb(fd, h + 1000, 0, &off) == ENOENT, "MAP_DUMB of an unknown handle is ENOENT");
 	check(map_dumb(fd, 0, 0, &off) == ENOENT, "MAP_DUMB of handle 0 is ENOENT");
 	check(destroy_dumb(fd, h) == 0, "DESTROY_DUMB");
@@ -637,8 +640,7 @@ test_dumb(int fd)
 	check(gem_stats(&g) && g.handles == 2 && g.objects == 1, "kstat: two handles, one object");
 
 	/* Close the handles; the mapping keeps the object alive. */
-	check(gem_close(fd, h, 1) == EINVAL, "GEM_CLOSE with pad 1 is EINVAL");
-	check(gem_close(fd, h, 0) == 0, "GEM_CLOSE of the first handle");
+	check(gem_close(fd, h, 1) == 0, "GEM_CLOSE of the first handle (pad ignored, as in Linux)");
 	check(gem_close(fd, h, 0) == EINVAL, "GEM_CLOSE again is EINVAL");
 	check(gem_open(fd, name, &h, &sz) == 0, "the name survives while a handle remains");
 	check(gem_close(fd, h, 0) == 0 && destroy_dumb(fd, h2) == 0, "close the remaining handles");
@@ -791,8 +793,10 @@ test_refault(int fd)
 {
 	struct rdrmnull_create_movable c;
 	uint32_t pieces, backing, dh;
-	uint64_t off, size = 2 * PAGE;
+	uint64_t off, size = 4 * PAGE;
 	volatile uint8_t *p;
+	struct gem g;
+	int i;
 	struct gem g0, g1;
 	pid_t pid;
 	int status, pc[2], cp[2];
@@ -867,7 +871,42 @@ test_refault(int fd)
 	check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "refault: child checks (see above)");
 	check(all_bytes((const void *)p, size, 0x33), "refault: the parent sees the second backing too");
 
-	(void) munmap((void *)p, size);
+	/*
+	 * 5. Partial munmap of a movable mapping. Page i holds 0x40 + i in the
+	 * second backing and 0x50 + i in the first, so that a piece pointed at
+	 * the wrong offset shows. The head and then the middle page are
+	 * unmapped, leaving pieces for pages 1 and 3, which the framework
+	 * finishes after the unmap callback; they must keep showing their own
+	 * pages, and moves must redirect them, both before and after their
+	 * first fault settles them.
+	 */
+	for (i = 0; i < 4; i++)
+		(void) memset((void *)(p + i * PAGE), 0x40 + i, PAGE);
+	check(move(fd, c.handle, 0, &pieces, &backing) == 0 && backing == 0, "refault: move to the first backing");
+	for (i = 0; i < 4; i++)
+		(void) memset((void *)(p + i * PAGE), 0x50 + i, PAGE);
+	check(move(fd, c.handle, 0, &pieces, &backing) == 0 && backing == 1 &&
+	    all_bytes((const void *)(p + PAGE), PAGE, 0x41) && all_bytes((const void *)(p + 3 * PAGE), PAGE, 0x43),
+	    "refault: per-page patterns in both backings");
+	check(munmap((void *)p, PAGE) == 0, "refault: munmap the head page of the movable mapping");
+	check(munmap((void *)(p + 2 * PAGE), PAGE) == 0, "refault: munmap a middle page of the movable mapping");
+	(void) gem_stats(&g);
+	check(g.mappings == 2, "refault: two pieces remain (pages 1 and 3)");
+	check(all_bytes((const void *)(p + PAGE), PAGE, 0x41) && all_bytes((const void *)(p + 3 * PAGE), PAGE, 0x43),
+	    "refault: after the splits the pieces show their own pages (0x41, 0x43)");
+	check(move(fd, c.handle, 0, &pieces, &backing) == 0 && pieces == 2 && backing == 0,
+	    "refault: move with split pieces (2 pieces, invalidated only until their next fault)");
+	check(all_bytes((const void *)(p + PAGE), PAGE, 0x51) && all_bytes((const void *)(p + 3 * PAGE), PAGE, 0x53),
+	    "refault: the split pieces follow the move at their right offsets (0x51, 0x53)");
+	check(move(fd, c.handle, MOVE_UNLOAD_ONLY, &pieces, &backing) == 0 && pieces == 2 &&
+	    all_bytes((const void *)(p + PAGE), PAGE, 0x51) && all_bytes((const void *)(p + 3 * PAGE), PAGE, 0x53),
+	    "refault: unload and refault of the settled pieces keeps their offsets");
+	check(move(fd, c.handle, 0, &pieces, &backing) == 0 && pieces == 2 && backing == 1 &&
+	    all_bytes((const void *)(p + PAGE), PAGE, 0x41) && all_bytes((const void *)(p + 3 * PAGE), PAGE, 0x43),
+	    "refault: a second move remaps the settled pieces at their right offsets (0x41, 0x43)");
+
+	(void) munmap((void *)(p + PAGE), PAGE);
+	(void) munmap((void *)(p + 3 * PAGE), PAGE);
 	check(gem_close(fd, c.handle, 0) == 0, "refault: close the movable object");
 	check(gem_idle("after the refault experiment"), "refault: both backings are freed");
 }
