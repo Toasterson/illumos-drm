@@ -40,6 +40,11 @@ impl Features {
 
 /// Mode-setting properties that `GET_CAP` reports. Fields left at their
 /// defaults report what the core itself provides.
+///
+/// Only the cursor size is reported in R0. `preferred_depth` and
+/// `prefer_shadow` take effect when the core implements dumb buffers (R1),
+/// and `fb_modifiers` when it implements `ADDFB2` (R3); until then `GET_CAP`
+/// reports 0 for all three, because the ioctls they describe do not exist.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModeConfig {
     /// A valid cursor width (`DRM_CAP_CURSOR_WIDTH`); 0 reports the Linux
@@ -47,13 +52,15 @@ pub struct ModeConfig {
     pub cursor_width: u64,
     /// A valid cursor height (`DRM_CAP_CURSOR_HEIGHT`); 0 reports 64.
     pub cursor_height: u64,
-    /// The preferred depth of dumb buffers (`DRM_CAP_DUMB_PREFERRED_DEPTH`).
+    /// The preferred depth of dumb buffers (`DRM_CAP_DUMB_PREFERRED_DEPTH`),
+    /// reported from R1 on.
     pub preferred_depth: u64,
     /// Whether clients should render to a shadow buffer rather than to a
-    /// dumb buffer directly (`DRM_CAP_DUMB_PREFER_SHADOW`).
+    /// dumb buffer directly (`DRM_CAP_DUMB_PREFER_SHADOW`), reported from R1
+    /// on.
     pub prefer_shadow: bool,
     /// Whether `ADDFB2` accepts format modifiers
-    /// (`DRM_CAP_ADDFB2_MODIFIERS`).
+    /// (`DRM_CAP_ADDFB2_MODIFIERS`), reported from R3 on.
     pub fb_modifiers: bool,
 }
 
@@ -88,7 +95,7 @@ impl BusId {
     }
     /// Returns the bytes of the bus ID, without a terminating NUL.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.buf[..self.len]
+        self.buf.get(..self.len).unwrap_or(&[])
     }
 }
 

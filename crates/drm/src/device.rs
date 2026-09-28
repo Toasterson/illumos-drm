@@ -128,7 +128,13 @@ impl<D: Driver> Device<D> {
         self.dev
     }
 
-    fn version(&self, c: CloneId, perm: crate::state::Perm, privileged: bool, arg: &IoctlArg<'_>) -> Result<(), Errno> {
+    fn version(
+        &self,
+        c: CloneId,
+        perm: crate::state::Perm,
+        privileged: &dyn Fn() -> bool,
+        arg: &IoctlArg<'_>,
+    ) -> Result<(), Errno> {
         let mut v = UserArg::<uapi::drm_version>::read(arg)?;
         self.state.lock().permit(c, perm, privileged)?;
         // SAFETY: only field assignments below.
@@ -146,7 +152,7 @@ impl<D: Driver> Device<D> {
         &self,
         c: CloneId,
         perm: crate::state::Perm,
-        privileged: bool,
+        privileged: &dyn Fn() -> bool,
         arg: &IoctlArg<'_>,
     ) -> Result<(), Errno> {
         let mut u = UserArg::<uapi::drm_unique>::read(arg)?;
@@ -171,7 +177,7 @@ impl<D: Driver> Device<D> {
         &self,
         c: CloneId,
         perm: crate::state::Perm,
-        privileged: bool,
+        privileged: &dyn Fn() -> bool,
         arg: &IoctlArg<'_>,
     ) -> Result<(), Errno> {
         let u = UserArg::<uapi::drm_unique>::read(arg)?;
@@ -183,7 +189,7 @@ impl<D: Driver> Device<D> {
             return Err(Errno::EINVAL);
         }
         let mut buf = [0u8; BUS_ID_MAX];
-        let want = &mut buf[..len];
+        let want = buf.get_mut(..len).ok_or(Errno::EINVAL)?;
         copy_in_bytes(arg, u.get().unique as usize, want)?;
         let mut s = self.state.lock();
         s.permit(c, perm, privileged)?;
@@ -202,7 +208,7 @@ impl<D: Driver> Device<D> {
 /// length, so the partial copy is the ABI, not a silent truncation.
 fn copy_field(arg: &IoctlArg<'_>, len: &mut usize, addr: usize, value: &[u8]) -> Result<(), Errno> {
     let n = value.len().min(*len);
-    copy_out_bytes(arg, addr, &value[..n])?;
+    copy_out_bytes(arg, addr, value.get(..n).ok_or(Errno::EINVAL)?)?;
     *len = value.len();
     Ok(())
 }
@@ -283,7 +289,8 @@ impl<D: Driver> CharDevice for Device<D> {
         }
         let entry = ioctl::lookup(cmd.0 as u32).ok_or(Errno::ENOTTY)?;
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
-        let privileged = cred.has_sys_devices_priv();
+        // drv_priv(9F) is only called when an ioctl's permission needs it.
+        let privileged = &|| cred.has_sys_devices_priv();
         let perm = entry.perm;
         match entry.op {
             Op::Version => self.version(c, perm, privileged, &arg)?,

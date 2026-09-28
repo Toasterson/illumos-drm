@@ -62,12 +62,14 @@ pub fn get_cap(features: Features, mode: &ModeConfig, cap: u64) -> Result<u64, E
     Ok(match cap {
         uapi::DRM_CAP_CURSOR_WIDTH => nonzero_or(mode.cursor_width, 64),
         uapi::DRM_CAP_CURSOR_HEIGHT => nonzero_or(mode.cursor_height, 64),
-        uapi::DRM_CAP_DUMB_PREFERRED_DEPTH => mode.preferred_depth,
-        uapi::DRM_CAP_DUMB_PREFER_SHADOW => u64::from(mode.prefer_shadow),
-        uapi::DRM_CAP_ADDFB2_MODIFIERS => u64::from(mode.fb_modifiers),
-        // Dumb buffers are milestone R1; the vblank ioctl, page flips and
-        // their events are R3. Until then the core has none of them.
+        // Dumb buffers are milestone R1; ADDFB2, the vblank ioctl, page flips
+        // and their events are R3. Until those ioctls exist the core reports
+        // none of them, whatever the driver's ModeConfig says; the
+        // ModeConfig fields for dumb buffers and modifiers take effect then.
         uapi::DRM_CAP_DUMB_BUFFER
+        | uapi::DRM_CAP_DUMB_PREFERRED_DEPTH
+        | uapi::DRM_CAP_DUMB_PREFER_SHADOW
+        | uapi::DRM_CAP_ADDFB2_MODIFIERS
         | uapi::DRM_CAP_VBLANK_HIGH_CRTC
         | uapi::DRM_CAP_ASYNC_PAGE_FLIP
         | uapi::DRM_CAP_PAGE_FLIP_TARGET
@@ -162,10 +164,20 @@ mod tests {
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_CURSOR_HEIGHT as u64), Ok(64));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_ADDFB2_MODIFIERS as u64), Ok(0));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_DUMB_BUFFER as u64), Ok(0));
-        let big = ModeConfig { cursor_width: 256, cursor_height: 128, fb_modifiers: true, ..m };
+        let big = ModeConfig {
+            cursor_width: 256,
+            cursor_height: 128,
+            preferred_depth: 24,
+            prefer_shadow: true,
+            fb_modifiers: true,
+        };
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_CURSOR_WIDTH as u64), Ok(256));
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_CURSOR_HEIGHT as u64), Ok(128));
-        assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_ADDFB2_MODIFIERS as u64), Ok(1));
+        // No ADDFB2 or dumb buffers before R1/R3, so the driver's values do
+        // not show yet.
+        assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_ADDFB2_MODIFIERS as u64), Ok(0));
+        assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_DUMB_PREFERRED_DEPTH as u64), Ok(0));
+        assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_DUMB_PREFER_SHADOW as u64), Ok(0));
         // Unknown capabilities, including ones that only differ in the high
         // bits, are EINVAL for a mode-setting driver and EOPNOTSUPP without.
         for (f, e) in [(Features::NONE, EOPNOTSUPP), (KMS, Errno::EINVAL)] {

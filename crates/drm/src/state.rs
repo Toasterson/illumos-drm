@@ -204,6 +204,10 @@ impl DeviceState {
             }
         };
         let clone = CloneId::new(slot as u32).ok_or(Errno::EMFILE)?;
+        if !matches!(self.files.get(slot), Some(None)) {
+            // Unreachable: the slot was found empty or just pushed.
+            return Err(Errno::EMFILE);
+        }
         let mut file = DrmFile {
             kind: who.kind,
             authenticated: who.privileged,
@@ -229,7 +233,21 @@ impl DeviceState {
                 }
             }
         }
-        self.files[slot] = Some(file);
+        let master = file.master;
+        match self.files.get_mut(slot) {
+            Some(entry) => *entry = Some(file),
+            None => {
+                // Unreachable: the slot was checked above and nothing since
+                // shrinks the table. Undo the master binding and fail.
+                if self.current == Some(clone) {
+                    self.current = None;
+                }
+                if let Some(id) = master {
+                    self.unref_master(id);
+                }
+                return Err(Errno::EMFILE);
+            }
+        }
         self.open += 1;
         Ok(clone)
     }
@@ -239,7 +257,7 @@ impl DeviceState {
     /// file.
     pub fn close(&mut self, c: CloneId) -> bool {
         let Some(file) = self.files.get_mut(c.index()).and_then(Option::take) else { return false };
-        self.open -= 1;
+        self.open = self.open.saturating_sub(1);
         self.remove_magic_of(c);
         if self.current == Some(c) {
             self.current = None;
@@ -252,10 +270,12 @@ impl DeviceState {
 
     /// Checks the permission flags of an ioctl for file `c`, in the order
     /// Linux's `drm_ioctl_permit` uses. Fails with `EACCES`, or `ENXIO` if
-    /// the file does not exist.
-    pub fn permit(&self, c: CloneId, perm: Perm, privileged: bool) -> Result<(), Errno> {
+    /// the file does not exist. `privileged` is asked only for `ROOT_ONLY`
+    /// ioctls, as Linux calls `capable()` only then, so that ordinary
+    /// ioctls never trigger a privilege check (and its audit record).
+    pub fn permit(&self, c: CloneId, perm: Perm, privileged: impl FnOnce() -> bool) -> Result<(), Errno> {
         let f = self.file(c).ok_or(Errno::ENXIO)?;
-        if perm.root_only && !privileged {
+        if perm.root_only && !privileged() {
             return Err(Errno::EACCES);
         }
         if perm.auth && f.kind != NodeKind::Render && !f.authenticated {
@@ -302,9 +322,17 @@ impl DeviceState {
     }
 
     /// `SET_MASTER` by file `c` of process `pid`.
-    pub fn set_master(&mut self, c: CloneId, privileged: bool, pid: i32, ctx: &Sleepable) -> Result<(), Errno> {
+    /// `privileged` is asked only when the file is not a former master used
+    /// by its opening process, as in Linux's `drm_master_check_perm`.
+    pub fn set_master(
+        &mut self,
+        c: CloneId,
+        privileged: impl FnOnce() -> bool,
+        pid: i32,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
         let f = self.file(c).ok_or(Errno::ENXIO)?;
-        if !(f.was_master && f.pid == pid) && !privileged {
+        if !(f.was_master && f.pid == pid) && !privileged() {
             return Err(Errno::EACCES);
         }
         if self.current == Some(c) {
@@ -335,9 +363,10 @@ impl DeviceState {
     }
 
     /// `DROP_MASTER` by file `c` of process `pid`.
-    pub fn drop_master(&mut self, c: CloneId, privileged: bool, pid: i32) -> Result<(), Errno> {
+    /// `privileged` is asked only when needed, as for [`Self::set_master`].
+    pub fn drop_master(&mut self, c: CloneId, privileged: impl FnOnce() -> bool, pid: i32) -> Result<(), Errno> {
         let f = self.file(c).ok_or(Errno::ENXIO)?;
-        if !(f.was_master && f.pid == pid) && !privileged {
+        if !(f.was_master && f.pid == pid) && !privileged() {
             return Err(Errno::EACCES);
         }
         if self.current != Some(c) {
@@ -404,11 +433,16 @@ impl DeviceState {
     }
 
     fn unref_master(&mut self, id: MasterId) {
-        if let Some(i) = self.masters.iter().position(|m| m.id == id) {
-            self.masters[i].refs -= 1;
-            if self.masters[i].refs == 0 {
-                self.masters.swap_remove(i);
+        let Some(i) = self.masters.iter().position(|m| m.id == id) else { return };
+        let gone = match self.masters.get_mut(i) {
+            Some(m) => {
+                m.refs = m.refs.saturating_sub(1);
+                m.refs == 0
             }
+            None => false,
+        };
+        if gone {
+            self.masters.swap_remove(i);
         }
     }
 
@@ -534,9 +568,9 @@ mod tests {
         assert_ne!(magic, 0);
         assert_eq!(s.get_magic(c, &ctx), Ok(magic), "stable per file");
         s.check();
-        assert_eq!(s.permit(c, AUTH_MASTER, false), Err(Errno::EACCES), "a client is not master");
-        assert_eq!(s.permit(m, AUTH_MASTER, false), Ok(()));
-        assert_eq!(s.permit(m, ROOT_AUTH_MASTER, false), Err(Errno::EACCES));
+        assert_eq!(s.permit(c, AUTH_MASTER, || false), Err(Errno::EACCES), "a client is not master");
+        assert_eq!(s.permit(m, AUTH_MASTER, || false), Ok(()));
+        assert_eq!(s.permit(m, ROOT_AUTH_MASTER, || false), Err(Errno::EACCES));
         assert_eq!(s.auth_magic(m, magic ^ 0x5555), Err(Errno::EINVAL));
         assert_eq!(s.auth_magic(m, 0), Err(Errno::EINVAL));
         assert_eq!(s.auth_magic(m, magic), Ok(()));
@@ -583,11 +617,11 @@ mod tests {
         let ctx = ctx();
         let mut s = DeviceState::new();
         let r = s.open(user(NodeKind::Render, 1), &ctx).unwrap();
-        assert_eq!(s.permit(r, R0, false), Ok(()));
-        assert_eq!(s.permit(r, PRIMARY_ONLY, true), Err(Errno::EACCES));
-        assert_eq!(s.permit(r, Perm { auth: true, render_allow: true, ..R0 }, false), Ok(()));
+        assert_eq!(s.permit(r, R0, || false), Ok(()));
+        assert_eq!(s.permit(r, PRIMARY_ONLY, || true), Err(Errno::EACCES));
+        assert_eq!(s.permit(r, Perm { auth: true, render_allow: true, ..R0 }, || false), Ok(()));
         assert_eq!(s.get_magic(r, &ctx), Err(Errno::EINVAL));
-        assert_eq!(s.set_master(r, true, 1, &ctx), Err(Errno::EINVAL));
+        assert_eq!(s.set_master(r, || true, 1, &ctx), Err(Errno::EINVAL));
         assert!(!s.unique_set(r));
         // A render open does not take the master role from a later card open.
         let p = s.open(user(NodeKind::Primary, 2), &ctx).unwrap();
@@ -603,28 +637,28 @@ mod tests {
         let b = s.open(user(NodeKind::Primary, 2), &ctx).unwrap();
         let magic_b = s.get_magic(b, &ctx).unwrap();
         // Only the master itself, from the opening process, may drop.
-        assert_eq!(s.drop_master(a, false, 99), Err(Errno::EACCES));
-        assert_eq!(s.drop_master(b, false, 2), Err(Errno::EACCES));
-        assert_eq!(s.drop_master(b, true, 2), Err(Errno::EINVAL));
-        assert_eq!(s.drop_master(a, false, 1), Ok(()));
+        assert_eq!(s.drop_master(a, || false, 99), Err(Errno::EACCES));
+        assert_eq!(s.drop_master(b, || false, 2), Err(Errno::EACCES));
+        assert_eq!(s.drop_master(b, || true, 2), Err(Errno::EINVAL));
+        assert_eq!(s.drop_master(a, || false, 1), Ok(()));
         assert!(!s.is_current_master(a));
         s.check();
         // An unprivileged file that never was master cannot take over.
-        assert_eq!(s.set_master(b, false, 2, &ctx), Err(Errno::EACCES));
+        assert_eq!(s.set_master(b, || false, 2, &ctx), Err(Errno::EACCES));
         // A privileged one can, and gets a new master object: its old magic
         // is gone, and a is no longer in its namespace.
-        assert_eq!(s.set_master(b, true, 2, &ctx), Ok(()));
+        assert_eq!(s.set_master(b, || true, 2, &ctx), Ok(()));
         assert!(s.is_current_master(b) && s.file(b).unwrap().authenticated);
         assert_eq!(s.file(b).unwrap().magic(), 0);
         s.check();
-        assert_eq!(s.set_master(b, false, 2, &ctx), Ok(()), "already master");
-        assert_eq!(s.set_master(a, false, 1, &ctx), Err(Errno::EBUSY));
+        assert_eq!(s.set_master(b, || false, 2, &ctx), Ok(()), "already master");
+        assert_eq!(s.set_master(a, || false, 1, &ctx), Err(Errno::EBUSY));
         let magic_a = s.get_magic(a, &ctx).unwrap();
         assert_eq!(s.auth_magic(b, magic_a), Err(Errno::EINVAL), "other namespace");
         assert_ne!(magic_a, magic_b);
         // b drops, a (a former master, same process) takes back its object.
-        assert_eq!(s.drop_master(b, false, 2), Ok(()));
-        assert_eq!(s.set_master(a, false, 1, &ctx), Ok(()));
+        assert_eq!(s.drop_master(b, || false, 2), Ok(()));
+        assert_eq!(s.set_master(a, || false, 1, &ctx), Ok(()));
         assert!(s.is_current_master(a));
         s.check();
         // New files bind to a's object, so a can authenticate them.
@@ -632,6 +666,28 @@ mod tests {
         let mc = s.get_magic(c, &ctx).unwrap();
         assert_eq!(s.auth_magic(a, mc), Ok(()));
         s.check();
+    }
+
+    #[test]
+    fn privilege_is_asked_only_when_needed() {
+        let ctx = ctx();
+        let mut s = DeviceState::new();
+        let m = s.open(user(NodeKind::Primary, 1), &ctx).unwrap();
+        let never = || -> bool { panic!("privilege checked for an unprivileged operation") };
+        assert_eq!(s.permit(m, AUTH_MASTER, never), Ok(()));
+        assert_eq!(s.permit(m, PRIMARY_ONLY, never), Ok(()));
+        // A former master of the same process needs no privilege.
+        assert_eq!(s.drop_master(m, never, 1), Ok(()));
+        assert_eq!(s.set_master(m, never, 1, &ctx), Ok(()));
+        // Only ROOT_ONLY and the master ioctls of other files ask.
+        let asked = core::cell::Cell::new(0);
+        let ask = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        assert_eq!(s.permit(m, ROOT_AUTH_MASTER, ask), Err(Errno::EACCES));
+        assert_eq!(s.drop_master(m, ask, 2), Err(Errno::EACCES));
+        assert_eq!(asked.get(), 2);
     }
 
     #[test]
@@ -729,16 +785,16 @@ mod tests {
                             4 if !mine.is_empty() => {
                                 // Authenticate some waiting magic if we hold the master.
                                 let c = mine[pick(mine.len())];
-                                if s.permit(c, AUTH_MASTER, false).is_ok() {
+                                if s.permit(c, AUTH_MASTER, || false).is_ok() {
                                     let m = s.magics.first().map(|e| e.magic).unwrap_or(1);
                                     let _ = s.auth_magic(c, m);
                                 }
                             }
                             5 if !mine.is_empty() => {
-                                let _ = s.set_master(mine[pick(mine.len())], seed & 0x400 != 0, t as i32, &ctx);
+                                let _ = s.set_master(mine[pick(mine.len())], || seed & 0x400 != 0, t as i32, &ctx);
                             }
                             6 if !mine.is_empty() => {
-                                let _ = s.drop_master(mine[pick(mine.len())], false, t as i32);
+                                let _ = s.drop_master(mine[pick(mine.len())], || false, t as i32);
                             }
                             _ => {}
                         }

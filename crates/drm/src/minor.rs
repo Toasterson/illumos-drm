@@ -123,6 +123,10 @@ pub fn instance_of_minor(minor: Minor) -> Option<Instance> {
 /// A NUL-terminated minor node name in a fixed buffer.
 type Name = [u8; 12];
 
+// `name` and `names` index arrays, but they only run during constant
+// evaluation of the two statics below, where an out-of-bounds index would
+// be a compile error; no code of theirs exists at run time.
+
 const fn name(prefix: &[u8], n: u32) -> Name {
     let mut out = [0u8; 12];
     let mut i = 0;
