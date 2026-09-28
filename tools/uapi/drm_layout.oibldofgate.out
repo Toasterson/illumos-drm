@@ -1,0 +1,666 @@
+size drm_clip_rect 8
+off drm_clip_rect x1 0
+off drm_clip_rect y1 2
+off drm_clip_rect x2 4
+off drm_clip_rect y2 6
+size drm_drawable_info 16
+off drm_drawable_info num_rects 0
+off drm_drawable_info rects 8
+size drm_tex_region 8
+off drm_tex_region next 0
+off drm_tex_region prev 1
+off drm_tex_region in_use 2
+off drm_tex_region padding 3
+off drm_tex_region age 4
+size drm_hw_lock 64
+off drm_hw_lock lock 0
+off drm_hw_lock padding 4
+size drm_version 64
+off drm_version version_major 0
+off drm_version version_minor 4
+off drm_version version_patchlevel 8
+off drm_version name_len 16
+off drm_version name 24
+off drm_version date_len 32
+off drm_version date 40
+off drm_version desc_len 48
+off drm_version desc 56
+size drm_unique 16
+off drm_unique unique_len 0
+off drm_unique unique 8
+size drm_list 16
+off drm_list count 0
+off drm_list version 8
+size drm_block 4
+off drm_block unused 0
+size drm_control 8
+off drm_control func 0
+off drm_control irq 4
+size drm_ctx_priv_map 16
+off drm_ctx_priv_map ctx_id 0
+off drm_ctx_priv_map handle 8
+size drm_map 40
+off drm_map offset 0
+off drm_map handle 8
+off drm_map size 16
+off drm_map type_ 24
+off drm_map flags 28
+off drm_map mtrr 32
+size drm_client 40
+off drm_client idx 0
+off drm_client auth 4
+off drm_client pid 8
+off drm_client uid 16
+off drm_client magic 24
+off drm_client iocs 32
+size drm_stats 248
+off drm_stats count 0
+off drm_stats data 8
+size drm_lock 8
+off drm_lock context 0
+off drm_lock flags 4
+size drm_buf_desc 32
+off drm_buf_desc count 0
+off drm_buf_desc size 4
+off drm_buf_desc low_mark 8
+off drm_buf_desc high_mark 12
+off drm_buf_desc flags 16
+off drm_buf_desc agp_start 24
+size drm_buf_info 16
+off drm_buf_info count 0
+off drm_buf_info list 8
+size drm_buf_free 16
+off drm_buf_free count 0
+off drm_buf_free list 8
+size drm_buf_pub 24
+off drm_buf_pub idx 0
+off drm_buf_pub total 4
+off drm_buf_pub used 8
+off drm_buf_pub address 16
+size drm_buf_map 32
+off drm_buf_map count 0
+off drm_buf_map virtual_ 8
+off drm_buf_map list 16
+off drm_buf_map fd 24
+size drm_dma 64
+off drm_dma context 0
+off drm_dma send_count 4
+off drm_dma send_indices 8
+off drm_dma send_sizes 16
+off drm_dma flags 24
+off drm_dma request_count 28
+off drm_dma request_size 32
+off drm_dma request_indices 40
+off drm_dma request_sizes 48
+off drm_dma granted_count 56
+size drm_ctx 8
+off drm_ctx handle 0
+off drm_ctx flags 4
+size drm_ctx_res 16
+off drm_ctx_res count 0
+off drm_ctx_res contexts 8
+size drm_draw 4
+off drm_draw handle 0
+size drm_update_draw 24
+off drm_update_draw handle 0
+off drm_update_draw type_ 4
+off drm_update_draw num 8
+off drm_update_draw data 16
+size drm_auth 4
+off drm_auth magic 0
+size drm_irq_busid 16
+off drm_irq_busid irq 0
+off drm_irq_busid busnum 4
+off drm_irq_busid devnum 8
+off drm_irq_busid funcnum 12
+size drm_wait_vblank_request 16
+off drm_wait_vblank_request type_ 0
+off drm_wait_vblank_request sequence 4
+off drm_wait_vblank_request signal 8
+size drm_wait_vblank_reply 24
+off drm_wait_vblank_reply type_ 0
+off drm_wait_vblank_reply sequence 4
+off drm_wait_vblank_reply tval_sec 8
+off drm_wait_vblank_reply tval_usec 16
+size drm_wait_vblank 24
+size drm_modeset_ctl 8
+off drm_modeset_ctl crtc 0
+off drm_modeset_ctl cmd 4
+size drm_agp_mode 8
+off drm_agp_mode mode 0
+size drm_agp_buffer 32
+off drm_agp_buffer size 0
+off drm_agp_buffer handle 8
+off drm_agp_buffer type_ 16
+off drm_agp_buffer physical 24
+size drm_agp_binding 16
+off drm_agp_binding handle 0
+off drm_agp_binding offset 8
+size drm_agp_info 56
+off drm_agp_info agp_version_major 0
+off drm_agp_info agp_version_minor 4
+off drm_agp_info mode 8
+off drm_agp_info aperture_base 16
+off drm_agp_info aperture_size 24
+off drm_agp_info memory_allowed 32
+off drm_agp_info memory_used 40
+off drm_agp_info id_vendor 48
+off drm_agp_info id_device 50
+size drm_scatter_gather 16
+off drm_scatter_gather size 0
+off drm_scatter_gather handle 8
+size drm_set_version 16
+off drm_set_version drm_di_major 0
+off drm_set_version drm_di_minor 4
+off drm_set_version drm_dd_major 8
+off drm_set_version drm_dd_minor 12
+size drm_gem_close 8
+off drm_gem_close handle 0
+off drm_gem_close pad 4
+size drm_gem_flink 8
+off drm_gem_flink handle 0
+off drm_gem_flink name 4
+size drm_gem_open 16
+off drm_gem_open name 0
+off drm_gem_open handle 4
+off drm_gem_open size 8
+size drm_get_cap 16
+off drm_get_cap capability 0
+off drm_get_cap value 8
+size drm_set_client_cap 16
+off drm_set_client_cap capability 0
+off drm_set_client_cap value 8
+size drm_prime_handle 12
+off drm_prime_handle handle 0
+off drm_prime_handle flags 4
+off drm_prime_handle fd 8
+size drm_syncobj_create 8
+off drm_syncobj_create handle 0
+off drm_syncobj_create flags 4
+size drm_syncobj_destroy 8
+off drm_syncobj_destroy handle 0
+off drm_syncobj_destroy pad 4
+size drm_syncobj_handle 16
+off drm_syncobj_handle handle 0
+off drm_syncobj_handle flags 4
+off drm_syncobj_handle fd 8
+off drm_syncobj_handle pad 12
+size drm_syncobj_transfer 32
+off drm_syncobj_transfer src_handle 0
+off drm_syncobj_transfer dst_handle 4
+off drm_syncobj_transfer src_point 8
+off drm_syncobj_transfer dst_point 16
+off drm_syncobj_transfer flags 24
+off drm_syncobj_transfer pad 28
+size drm_syncobj_wait 32
+off drm_syncobj_wait handles 0
+off drm_syncobj_wait timeout_nsec 8
+off drm_syncobj_wait count_handles 16
+off drm_syncobj_wait flags 20
+off drm_syncobj_wait first_signaled 24
+off drm_syncobj_wait pad 28
+size drm_syncobj_timeline_wait 40
+off drm_syncobj_timeline_wait handles 0
+off drm_syncobj_timeline_wait points 8
+off drm_syncobj_timeline_wait timeout_nsec 16
+off drm_syncobj_timeline_wait count_handles 24
+off drm_syncobj_timeline_wait flags 28
+off drm_syncobj_timeline_wait first_signaled 32
+off drm_syncobj_timeline_wait pad 36
+size drm_syncobj_array 16
+off drm_syncobj_array handles 0
+off drm_syncobj_array count_handles 8
+off drm_syncobj_array pad 12
+size drm_syncobj_timeline_array 24
+off drm_syncobj_timeline_array handles 0
+off drm_syncobj_timeline_array points 8
+off drm_syncobj_timeline_array count_handles 16
+off drm_syncobj_timeline_array flags 20
+size drm_crtc_get_sequence 24
+off drm_crtc_get_sequence crtc_id 0
+off drm_crtc_get_sequence active 4
+off drm_crtc_get_sequence sequence 8
+off drm_crtc_get_sequence sequence_ns 16
+size drm_crtc_queue_sequence 24
+off drm_crtc_queue_sequence crtc_id 0
+off drm_crtc_queue_sequence flags 4
+off drm_crtc_queue_sequence sequence 8
+off drm_crtc_queue_sequence user_data 16
+size drm_mode_modeinfo 68
+off drm_mode_modeinfo clock 0
+off drm_mode_modeinfo hdisplay 4
+off drm_mode_modeinfo hsync_start 6
+off drm_mode_modeinfo hsync_end 8
+off drm_mode_modeinfo htotal 10
+off drm_mode_modeinfo hskew 12
+off drm_mode_modeinfo vdisplay 14
+off drm_mode_modeinfo vsync_start 16
+off drm_mode_modeinfo vsync_end 18
+off drm_mode_modeinfo vtotal 20
+off drm_mode_modeinfo vscan 22
+off drm_mode_modeinfo vrefresh 24
+off drm_mode_modeinfo flags 28
+off drm_mode_modeinfo type_ 32
+off drm_mode_modeinfo name 36
+size drm_mode_card_res 64
+off drm_mode_card_res fb_id_ptr 0
+off drm_mode_card_res crtc_id_ptr 8
+off drm_mode_card_res connector_id_ptr 16
+off drm_mode_card_res encoder_id_ptr 24
+off drm_mode_card_res count_fbs 32
+off drm_mode_card_res count_crtcs 36
+off drm_mode_card_res count_connectors 40
+off drm_mode_card_res count_encoders 44
+off drm_mode_card_res min_width 48
+off drm_mode_card_res max_width 52
+off drm_mode_card_res min_height 56
+off drm_mode_card_res max_height 60
+size drm_mode_crtc 104
+off drm_mode_crtc set_connectors_ptr 0
+off drm_mode_crtc count_connectors 8
+off drm_mode_crtc crtc_id 12
+off drm_mode_crtc fb_id 16
+off drm_mode_crtc x 20
+off drm_mode_crtc y 24
+off drm_mode_crtc gamma_size 28
+off drm_mode_crtc mode_valid 32
+off drm_mode_crtc mode 36
+size drm_mode_set_plane 48
+off drm_mode_set_plane plane_id 0
+off drm_mode_set_plane crtc_id 4
+off drm_mode_set_plane fb_id 8
+off drm_mode_set_plane flags 12
+off drm_mode_set_plane crtc_x 16
+off drm_mode_set_plane crtc_y 20
+off drm_mode_set_plane crtc_w 24
+off drm_mode_set_plane crtc_h 28
+off drm_mode_set_plane src_x 32
+off drm_mode_set_plane src_y 36
+off drm_mode_set_plane src_h 40
+off drm_mode_set_plane src_w 44
+size drm_mode_get_plane 32
+off drm_mode_get_plane plane_id 0
+off drm_mode_get_plane crtc_id 4
+off drm_mode_get_plane fb_id 8
+off drm_mode_get_plane possible_crtcs 12
+off drm_mode_get_plane gamma_size 16
+off drm_mode_get_plane count_format_types 20
+off drm_mode_get_plane format_type_ptr 24
+size drm_mode_get_plane_res 16
+off drm_mode_get_plane_res plane_id_ptr 0
+off drm_mode_get_plane_res count_planes 8
+size drm_mode_get_encoder 20
+off drm_mode_get_encoder encoder_id 0
+off drm_mode_get_encoder encoder_type 4
+off drm_mode_get_encoder crtc_id 8
+off drm_mode_get_encoder possible_crtcs 12
+off drm_mode_get_encoder possible_clones 16
+size drm_mode_get_connector 80
+off drm_mode_get_connector encoders_ptr 0
+off drm_mode_get_connector modes_ptr 8
+off drm_mode_get_connector props_ptr 16
+off drm_mode_get_connector prop_values_ptr 24
+off drm_mode_get_connector count_modes 32
+off drm_mode_get_connector count_props 36
+off drm_mode_get_connector count_encoders 40
+off drm_mode_get_connector encoder_id 44
+off drm_mode_get_connector connector_id 48
+off drm_mode_get_connector connector_type 52
+off drm_mode_get_connector connector_type_id 56
+off drm_mode_get_connector connection 60
+off drm_mode_get_connector mm_width 64
+off drm_mode_get_connector mm_height 68
+off drm_mode_get_connector subpixel 72
+off drm_mode_get_connector pad 76
+size drm_mode_property_enum 40
+off drm_mode_property_enum value 0
+off drm_mode_property_enum name 8
+size drm_mode_get_property 64
+off drm_mode_get_property values_ptr 0
+off drm_mode_get_property enum_blob_ptr 8
+off drm_mode_get_property prop_id 16
+off drm_mode_get_property flags 20
+off drm_mode_get_property name 24
+off drm_mode_get_property count_values 56
+off drm_mode_get_property count_enum_blobs 60
+size drm_mode_connector_set_property 16
+off drm_mode_connector_set_property value 0
+off drm_mode_connector_set_property prop_id 8
+off drm_mode_connector_set_property connector_id 12
+size drm_mode_obj_get_properties 32
+off drm_mode_obj_get_properties props_ptr 0
+off drm_mode_obj_get_properties prop_values_ptr 8
+off drm_mode_obj_get_properties count_props 16
+off drm_mode_obj_get_properties obj_id 20
+off drm_mode_obj_get_properties obj_type 24
+size drm_mode_obj_set_property 24
+off drm_mode_obj_set_property value 0
+off drm_mode_obj_set_property prop_id 8
+off drm_mode_obj_set_property obj_id 12
+off drm_mode_obj_set_property obj_type 16
+size drm_mode_get_blob 16
+off drm_mode_get_blob blob_id 0
+off drm_mode_get_blob length 4
+off drm_mode_get_blob data 8
+size drm_mode_fb_cmd 28
+off drm_mode_fb_cmd fb_id 0
+off drm_mode_fb_cmd width 4
+off drm_mode_fb_cmd height 8
+off drm_mode_fb_cmd pitch 12
+off drm_mode_fb_cmd bpp 16
+off drm_mode_fb_cmd depth 20
+off drm_mode_fb_cmd handle 24
+size drm_mode_fb_cmd2 104
+off drm_mode_fb_cmd2 fb_id 0
+off drm_mode_fb_cmd2 width 4
+off drm_mode_fb_cmd2 height 8
+off drm_mode_fb_cmd2 pixel_format 12
+off drm_mode_fb_cmd2 flags 16
+off drm_mode_fb_cmd2 handles 20
+off drm_mode_fb_cmd2 pitches 36
+off drm_mode_fb_cmd2 offsets 52
+off drm_mode_fb_cmd2 modifier 72
+size drm_mode_fb_dirty_cmd 24
+off drm_mode_fb_dirty_cmd fb_id 0
+off drm_mode_fb_dirty_cmd flags 4
+off drm_mode_fb_dirty_cmd color 8
+off drm_mode_fb_dirty_cmd num_clips 12
+off drm_mode_fb_dirty_cmd clips_ptr 16
+size drm_mode_mode_cmd 72
+off drm_mode_mode_cmd connector_id 0
+off drm_mode_mode_cmd mode 4
+size drm_mode_cursor 28
+off drm_mode_cursor flags 0
+off drm_mode_cursor crtc_id 4
+off drm_mode_cursor x 8
+off drm_mode_cursor y 12
+off drm_mode_cursor width 16
+off drm_mode_cursor height 20
+off drm_mode_cursor handle 24
+size drm_mode_cursor2 36
+off drm_mode_cursor2 flags 0
+off drm_mode_cursor2 crtc_id 4
+off drm_mode_cursor2 x 8
+off drm_mode_cursor2 y 12
+off drm_mode_cursor2 width 16
+off drm_mode_cursor2 height 20
+off drm_mode_cursor2 handle 24
+off drm_mode_cursor2 hot_x 28
+off drm_mode_cursor2 hot_y 32
+size drm_mode_crtc_lut 32
+off drm_mode_crtc_lut crtc_id 0
+off drm_mode_crtc_lut gamma_size 4
+off drm_mode_crtc_lut red 8
+off drm_mode_crtc_lut green 16
+off drm_mode_crtc_lut blue 24
+size drm_color_ctm 72
+off drm_color_ctm matrix 0
+size drm_color_lut 8
+off drm_color_lut red 0
+off drm_color_lut green 2
+off drm_color_lut blue 4
+off drm_color_lut reserved 6
+size drm_mode_crtc_page_flip 24
+off drm_mode_crtc_page_flip crtc_id 0
+off drm_mode_crtc_page_flip fb_id 4
+off drm_mode_crtc_page_flip flags 8
+off drm_mode_crtc_page_flip reserved 12
+off drm_mode_crtc_page_flip user_data 16
+size drm_mode_crtc_page_flip_target 24
+off drm_mode_crtc_page_flip_target crtc_id 0
+off drm_mode_crtc_page_flip_target fb_id 4
+off drm_mode_crtc_page_flip_target flags 8
+off drm_mode_crtc_page_flip_target sequence 12
+off drm_mode_crtc_page_flip_target user_data 16
+size drm_mode_create_dumb 32
+off drm_mode_create_dumb height 0
+off drm_mode_create_dumb width 4
+off drm_mode_create_dumb bpp 8
+off drm_mode_create_dumb flags 12
+off drm_mode_create_dumb handle 16
+off drm_mode_create_dumb pitch 20
+off drm_mode_create_dumb size 24
+size drm_mode_map_dumb 16
+off drm_mode_map_dumb handle 0
+off drm_mode_map_dumb pad 4
+off drm_mode_map_dumb offset 8
+size drm_mode_destroy_dumb 4
+off drm_mode_destroy_dumb handle 0
+size drm_mode_atomic 56
+off drm_mode_atomic flags 0
+off drm_mode_atomic count_objs 4
+off drm_mode_atomic objs_ptr 8
+off drm_mode_atomic count_props_ptr 16
+off drm_mode_atomic props_ptr 24
+off drm_mode_atomic prop_values_ptr 32
+off drm_mode_atomic reserved 40
+off drm_mode_atomic user_data 48
+size drm_format_modifier_blob 24
+off drm_format_modifier_blob version 0
+off drm_format_modifier_blob flags 4
+off drm_format_modifier_blob count_formats 8
+off drm_format_modifier_blob formats_offset 12
+off drm_format_modifier_blob count_modifiers 16
+off drm_format_modifier_blob modifiers_offset 20
+size drm_format_modifier 24
+off drm_format_modifier formats 0
+off drm_format_modifier offset 8
+off drm_format_modifier pad 12
+off drm_format_modifier modifier 16
+size drm_mode_create_blob 16
+off drm_mode_create_blob data 0
+off drm_mode_create_blob length 8
+off drm_mode_create_blob blob_id 12
+size drm_mode_destroy_blob 4
+off drm_mode_destroy_blob blob_id 0
+size drm_mode_create_lease 24
+off drm_mode_create_lease object_ids 0
+off drm_mode_create_lease object_count 8
+off drm_mode_create_lease flags 12
+off drm_mode_create_lease lessee_id 16
+off drm_mode_create_lease fd 20
+size drm_mode_list_lessees 16
+off drm_mode_list_lessees count_lessees 0
+off drm_mode_list_lessees pad 4
+off drm_mode_list_lessees lessees_ptr 8
+size drm_mode_get_lease 16
+off drm_mode_get_lease count_objects 0
+off drm_mode_get_lease pad 4
+off drm_mode_get_lease objects_ptr 8
+size drm_mode_revoke_lease 4
+off drm_mode_revoke_lease lessee_id 0
+size drm_mode_rect 16
+off drm_mode_rect x1 0
+off drm_mode_rect y1 4
+off drm_mode_rect x2 8
+off drm_mode_rect y2 12
+size drm_event 8
+off drm_event type_ 0
+off drm_event length 4
+size drm_event_vblank 32
+off drm_event_vblank base 0
+off drm_event_vblank user_data 8
+off drm_event_vblank tv_sec 16
+off drm_event_vblank tv_usec 20
+off drm_event_vblank sequence 24
+off drm_event_vblank crtc_id 28
+size drm_event_crtc_sequence 32
+off drm_event_crtc_sequence base 0
+off drm_event_crtc_sequence user_data 8
+off drm_event_crtc_sequence time_ns 16
+off drm_event_crtc_sequence sequence 24
+size drm_virtgpu_map 16
+off drm_virtgpu_map offset 0
+off drm_virtgpu_map handle 8
+off drm_virtgpu_map pad 12
+size drm_virtgpu_execbuffer 32
+off drm_virtgpu_execbuffer flags 0
+off drm_virtgpu_execbuffer size 4
+off drm_virtgpu_execbuffer command 8
+off drm_virtgpu_execbuffer bo_handles 16
+off drm_virtgpu_execbuffer num_bo_handles 24
+off drm_virtgpu_execbuffer fence_fd 28
+size drm_virtgpu_getparam 16
+off drm_virtgpu_getparam param 0
+off drm_virtgpu_getparam value 8
+size drm_virtgpu_resource_create 56
+off drm_virtgpu_resource_create target 0
+off drm_virtgpu_resource_create format 4
+off drm_virtgpu_resource_create bind 8
+off drm_virtgpu_resource_create width 12
+off drm_virtgpu_resource_create height 16
+off drm_virtgpu_resource_create depth 20
+off drm_virtgpu_resource_create array_size 24
+off drm_virtgpu_resource_create last_level 28
+off drm_virtgpu_resource_create nr_samples 32
+off drm_virtgpu_resource_create flags 36
+off drm_virtgpu_resource_create bo_handle 40
+off drm_virtgpu_resource_create res_handle 44
+off drm_virtgpu_resource_create size 48
+off drm_virtgpu_resource_create stride 52
+size drm_virtgpu_resource_info 16
+off drm_virtgpu_resource_info bo_handle 0
+off drm_virtgpu_resource_info res_handle 4
+off drm_virtgpu_resource_info size 8
+off drm_virtgpu_resource_info stride 12
+size drm_virtgpu_3d_box 24
+off drm_virtgpu_3d_box x 0
+off drm_virtgpu_3d_box y 4
+off drm_virtgpu_3d_box z 8
+off drm_virtgpu_3d_box w 12
+off drm_virtgpu_3d_box h 16
+off drm_virtgpu_3d_box d 20
+size drm_virtgpu_3d_transfer_to_host 36
+off drm_virtgpu_3d_transfer_to_host bo_handle 0
+off drm_virtgpu_3d_transfer_to_host box_ 4
+off drm_virtgpu_3d_transfer_to_host level 28
+off drm_virtgpu_3d_transfer_to_host offset 32
+size drm_virtgpu_3d_transfer_from_host 36
+off drm_virtgpu_3d_transfer_from_host bo_handle 0
+off drm_virtgpu_3d_transfer_from_host box_ 4
+off drm_virtgpu_3d_transfer_from_host level 28
+off drm_virtgpu_3d_transfer_from_host offset 32
+size drm_virtgpu_3d_wait 8
+off drm_virtgpu_3d_wait handle 0
+off drm_virtgpu_3d_wait flags 4
+size drm_virtgpu_get_caps 24
+off drm_virtgpu_get_caps cap_set_id 0
+off drm_virtgpu_get_caps cap_set_ver 4
+off drm_virtgpu_get_caps addr 8
+off drm_virtgpu_get_caps size 16
+off drm_virtgpu_get_caps pad 20
+ioctl DRM_IOCTL_VERSION 0xc0406400
+ioctl DRM_IOCTL_GET_UNIQUE 0xc0106401
+ioctl DRM_IOCTL_GET_MAGIC 0x40046402
+ioctl DRM_IOCTL_IRQ_BUSID 0xc0106403
+ioctl DRM_IOCTL_GET_MAP 0xc0286404
+ioctl DRM_IOCTL_GET_CLIENT 0xc0286405
+ioctl DRM_IOCTL_GET_STATS 0x40f86406
+ioctl DRM_IOCTL_SET_VERSION 0xc0106407
+ioctl DRM_IOCTL_MODESET_CTL 0x80086408
+ioctl DRM_IOCTL_GEM_CLOSE 0x80086409
+ioctl DRM_IOCTL_GEM_FLINK 0xc008640a
+ioctl DRM_IOCTL_GEM_OPEN 0xc010640b
+ioctl DRM_IOCTL_GET_CAP 0xc010640c
+ioctl DRM_IOCTL_SET_CLIENT_CAP 0x8010640d
+ioctl DRM_IOCTL_SET_UNIQUE 0x80106410
+ioctl DRM_IOCTL_AUTH_MAGIC 0x80046411
+ioctl DRM_IOCTL_BLOCK 0xc0046412
+ioctl DRM_IOCTL_UNBLOCK 0xc0046413
+ioctl DRM_IOCTL_CONTROL 0x80086414
+ioctl DRM_IOCTL_ADD_MAP 0xc0286415
+ioctl DRM_IOCTL_ADD_BUFS 0xc0206416
+ioctl DRM_IOCTL_MARK_BUFS 0x80206417
+ioctl DRM_IOCTL_INFO_BUFS 0xc0106418
+ioctl DRM_IOCTL_MAP_BUFS 0xc0206419
+ioctl DRM_IOCTL_FREE_BUFS 0x8010641a
+ioctl DRM_IOCTL_RM_MAP 0x8028641b
+ioctl DRM_IOCTL_SET_SAREA_CTX 0x8010641c
+ioctl DRM_IOCTL_GET_SAREA_CTX 0xc010641d
+ioctl DRM_IOCTL_SET_MASTER 0x2000641e
+ioctl DRM_IOCTL_DROP_MASTER 0x2000641f
+ioctl DRM_IOCTL_ADD_CTX 0xc0086420
+ioctl DRM_IOCTL_RM_CTX 0xc0086421
+ioctl DRM_IOCTL_MOD_CTX 0x80086422
+ioctl DRM_IOCTL_GET_CTX 0xc0086423
+ioctl DRM_IOCTL_SWITCH_CTX 0x80086424
+ioctl DRM_IOCTL_NEW_CTX 0x80086425
+ioctl DRM_IOCTL_RES_CTX 0xc0106426
+ioctl DRM_IOCTL_ADD_DRAW 0xc0046427
+ioctl DRM_IOCTL_RM_DRAW 0xc0046428
+ioctl DRM_IOCTL_DMA 0xc0406429
+ioctl DRM_IOCTL_LOCK 0x8008642a
+ioctl DRM_IOCTL_UNLOCK 0x8008642b
+ioctl DRM_IOCTL_FINISH 0x8008642c
+ioctl DRM_IOCTL_PRIME_HANDLE_TO_FD 0xc00c642d
+ioctl DRM_IOCTL_PRIME_FD_TO_HANDLE 0xc00c642e
+ioctl DRM_IOCTL_AGP_ACQUIRE 0x20006430
+ioctl DRM_IOCTL_AGP_RELEASE 0x20006431
+ioctl DRM_IOCTL_AGP_ENABLE 0x80086432
+ioctl DRM_IOCTL_AGP_INFO 0x40386433
+ioctl DRM_IOCTL_AGP_ALLOC 0xc0206434
+ioctl DRM_IOCTL_AGP_FREE 0x80206435
+ioctl DRM_IOCTL_AGP_BIND 0x80106436
+ioctl DRM_IOCTL_AGP_UNBIND 0x80106437
+ioctl DRM_IOCTL_SG_ALLOC 0xc0106438
+ioctl DRM_IOCTL_SG_FREE 0x80106439
+ioctl DRM_IOCTL_WAIT_VBLANK 0xc018643a
+ioctl DRM_IOCTL_CRTC_GET_SEQUENCE 0xc018643b
+ioctl DRM_IOCTL_CRTC_QUEUE_SEQUENCE 0xc018643c
+ioctl DRM_IOCTL_UPDATE_DRAW 0x8018643f
+ioctl DRM_IOCTL_MODE_GETRESOURCES 0xc04064a0
+ioctl DRM_IOCTL_MODE_GETCRTC 0xc06864a1
+ioctl DRM_IOCTL_MODE_SETCRTC 0xc06864a2
+ioctl DRM_IOCTL_MODE_CURSOR 0xc01c64a3
+ioctl DRM_IOCTL_MODE_GETGAMMA 0xc02064a4
+ioctl DRM_IOCTL_MODE_SETGAMMA 0xc02064a5
+ioctl DRM_IOCTL_MODE_GETENCODER 0xc01464a6
+ioctl DRM_IOCTL_MODE_GETCONNECTOR 0xc05064a7
+ioctl DRM_IOCTL_MODE_ATTACHMODE 0xc04864a8
+ioctl DRM_IOCTL_MODE_DETACHMODE 0xc04864a9
+ioctl DRM_IOCTL_MODE_GETPROPERTY 0xc04064aa
+ioctl DRM_IOCTL_MODE_SETPROPERTY 0xc01064ab
+ioctl DRM_IOCTL_MODE_GETPROPBLOB 0xc01064ac
+ioctl DRM_IOCTL_MODE_GETFB 0xc01c64ad
+ioctl DRM_IOCTL_MODE_ADDFB 0xc01c64ae
+ioctl DRM_IOCTL_MODE_RMFB 0xc00464af
+ioctl DRM_IOCTL_MODE_PAGE_FLIP 0xc01864b0
+ioctl DRM_IOCTL_MODE_DIRTYFB 0xc01864b1
+ioctl DRM_IOCTL_MODE_CREATE_DUMB 0xc02064b2
+ioctl DRM_IOCTL_MODE_MAP_DUMB 0xc01064b3
+ioctl DRM_IOCTL_MODE_DESTROY_DUMB 0xc00464b4
+ioctl DRM_IOCTL_MODE_GETPLANERESOURCES 0xc01064b5
+ioctl DRM_IOCTL_MODE_GETPLANE 0xc02064b6
+ioctl DRM_IOCTL_MODE_SETPLANE 0xc03064b7
+ioctl DRM_IOCTL_MODE_ADDFB2 0xc06864b8
+ioctl DRM_IOCTL_MODE_OBJ_GETPROPERTIES 0xc02064b9
+ioctl DRM_IOCTL_MODE_OBJ_SETPROPERTY 0xc01864ba
+ioctl DRM_IOCTL_MODE_CURSOR2 0xc02464bb
+ioctl DRM_IOCTL_MODE_ATOMIC 0xc03864bc
+ioctl DRM_IOCTL_MODE_CREATEPROPBLOB 0xc01064bd
+ioctl DRM_IOCTL_MODE_DESTROYPROPBLOB 0xc00464be
+ioctl DRM_IOCTL_SYNCOBJ_CREATE 0xc00864bf
+ioctl DRM_IOCTL_SYNCOBJ_DESTROY 0xc00864c0
+ioctl DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD 0xc01064c1
+ioctl DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE 0xc01064c2
+ioctl DRM_IOCTL_SYNCOBJ_WAIT 0xc02064c3
+ioctl DRM_IOCTL_SYNCOBJ_RESET 0xc01064c4
+ioctl DRM_IOCTL_SYNCOBJ_SIGNAL 0xc01064c5
+ioctl DRM_IOCTL_MODE_CREATE_LEASE 0xc01864c6
+ioctl DRM_IOCTL_MODE_LIST_LESSEES 0xc01064c7
+ioctl DRM_IOCTL_MODE_GET_LEASE 0xc01064c8
+ioctl DRM_IOCTL_MODE_REVOKE_LEASE 0xc00464c9
+ioctl DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT 0xc02864ca
+ioctl DRM_IOCTL_SYNCOBJ_QUERY 0xc01864cb
+ioctl DRM_IOCTL_SYNCOBJ_TRANSFER 0xc02064cc
+ioctl DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL 0xc01864cd
+ioctl DRM_IOCTL_MODE_GETFB2 0xc06864ce
+ioctl DRM_IOCTL_VIRTGPU_MAP 0xc0106441
+ioctl DRM_IOCTL_VIRTGPU_EXECBUFFER 0xc0206442
+ioctl DRM_IOCTL_VIRTGPU_GETPARAM 0xc0106443
+ioctl DRM_IOCTL_VIRTGPU_RESOURCE_CREATE 0xc0386444
+ioctl DRM_IOCTL_VIRTGPU_RESOURCE_INFO 0xc0106445
+ioctl DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST 0xc0246446
+ioctl DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST 0xc0246447
+ioctl DRM_IOCTL_VIRTGPU_WAIT 0xc0086448
+ioctl DRM_IOCTL_VIRTGPU_GET_CAPS 0xc0186449

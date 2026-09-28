@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/drm-uapi", "xtask"]
+default-members = ["crates/drm-uapi"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://code.aopc.cloud/illumos/illumos-drm"
+rust-version = "1.97"
+
+[workspace.dependencies]
+drm-uapi = { path = "crates/drm-uapi" }
+serde_json = "1"
+
+# Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug
+# info for mdb/DTrace; abort on panic (the target JSON enforces it too).
+[profile.release]
+debug = 2
+panic = "abort"
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
