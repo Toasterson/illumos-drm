@@ -1,0 +1,21 @@
+[package]
+name = "rdrmnull"
+description = "A DRM null driver: one device with card and render nodes and no hardware, for testing the core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+ddi = { workspace = true, features = ["panic-handler"] }
+drm.workspace = true
+
+[package.metadata.kmod]
+# Install class: /usr/kernel/drv/amd64/rdrmnull
+class = "drv"
+conf = "rdrmnull.conf"
+depends = []

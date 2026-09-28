@@ -59,6 +59,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdrmnull"
+version = "0.0.1"
+dependencies = [
+ "ddi",
+ "drm",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"

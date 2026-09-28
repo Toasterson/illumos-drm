@@ -1,0 +1,20 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# /dev/dri links for illumos-drm drivers.
+#
+# The core creates the minor nodes card<N> and renderD<128+N> with the node
+# type ddi_display:drm (DDI_NT_DISPLAY_DRM). On OpenIndiana the package
+# driver/graphics/drm delivers the devfsadm link module SUNW_drm_link, which
+# links every ddi_display:drm node as /dev/dri/<minor name> without further
+# configuration. Where that module is absent, one line per driver in
+# /etc/devlink.tab does the same; the separator between the two fields is
+# a tab. An IPS package delivers the line with the devlink attribute of the
+# driver action, which writes tabs as \t:
+#   driver name=rdrmnull devlink="type=ddi_display:drm;name=rdrmnull\tdri/\M0"
+#
+# The plain ddi_display node type is deliberately not used: devfsadm's
+# misc_link module would add /dev/fbs/<minor> and /dev/fb<N> console
+# framebuffer links for every such node.
+type=ddi_display:drm;name=rdrmnull	dri/\M0
