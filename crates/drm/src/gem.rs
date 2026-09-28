@@ -59,8 +59,11 @@
 //! the object (Linux's `drm_vma_node_is_allowed`), and records the mapping.
 //! `devmap_dup(9E)` (fork) and `devmap_unmap(9E)` (munmap, exit, and the
 //! split of a mapping that is partly unmapped) take and drop references for
-//! each piece. `devmap_access(9E)` asks the object; the default loads the
-//! translations with `devmap_default_access(9F)`.
+//! each piece; a piece that a split leaves always gets private data with its
+//! own reference, and stays unsettled until its next fault
+//! ([`Mapping::is_settled`]). `devmap_access(9E)` settles such a piece and
+//! then asks the object; the default loads the translations with
+//! `devmap_default_access(9F)`.
 //!
 //! A mapping keeps its file open (specfs does not call `close(9E)` while
 //! the file is mapped), and the device cannot detach while a file is open,
@@ -466,6 +469,7 @@ pub struct Mapping {
     uoff: u64,
     len: usize,
     obj_off: u64,
+    settled: bool,
 }
 
 impl Mapping {
@@ -491,6 +495,21 @@ impl Mapping {
     /// Reports whether the piece is empty (never, for a live mapping).
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+    /// Reports whether the framework has finished setting up the piece.
+    ///
+    /// A piece that a partial `munmap(2)` split off is recorded from inside
+    /// `devmap_unmap(9E)`, but the framework adjusts its offset into the
+    /// memory (`devmap_handle_reduce_len`) only after that callback returns,
+    /// and nothing tells the driver when. Until the piece's next fault,
+    /// which runs after the `munmap(2)` has finished, the piece is not
+    /// settled: its translations may be invalidated with
+    /// [`Mapping::unload`], but it must not be pointed at other memory,
+    /// because the framework would then add the offset a second time.
+    /// [`GemObject::mapped`] runs for it at that fault, with the final
+    /// geometry, before [`GemObject::access`].
+    pub fn is_settled(&self) -> bool {
+        self.settled
     }
     /// Invalidates the translations of the whole piece with
     /// `devmap_unload(9F)`, so that the next access calls
@@ -578,11 +597,12 @@ pub trait GemObject: Send + Sync + Sized + 'static {
     /// is read with the mapping list locked (see
     /// [`GemRef::with_mappings`]).
     fn umem(&self) -> UmemCookie;
-    /// Called with the mapping list locked after a mapping piece was
-    /// recorded (`mmap(2)`, `fork(2)`, or the split of a partial
-    /// `munmap(2)`). A movable object points the piece at its current
-    /// memory here, in case it moved after the piece was set up. An error
-    /// fails `mmap(2)` and `fork(2)`; after a split it is only logged.
+    /// Called with the mapping list locked once a mapping piece is set up:
+    /// in `mmap(2)` and `fork(2)`, and for a piece split off by a partial
+    /// `munmap(2)` at its first fault afterwards (see
+    /// [`Mapping::is_settled`]). A movable object points the piece at its
+    /// current memory here, in case it moved after the piece was copied. An
+    /// error fails the `mmap(2)` or `fork(2)`, or the faulting access.
     fn mapped(&self, _m: &Mapping, _ctx: &Sleepable) -> Result<(), Errno> {
         Ok(())
     }
@@ -607,13 +627,16 @@ impl GemObject for SysMem {
 
 // --- the object and its references -----------------------------------------------
 
-/// One recorded mapping piece; the devmap private data (`pvtp`).
+/// One mapping piece; the devmap private data (`pvtp`). Every piece holds
+/// a reference to its object for as long as the framework has the pointer.
 struct MapPriv<O: GemObject> {
     /// The piece's reference; `None` only while it is being torn down.
     obj: Option<GemRef<O>>,
     dhp: sys::devmap_cookie_t,
     uoff: u64,
     len: usize,
+    /// See [`Mapping::is_settled`]. Set only with the mapping list locked.
+    settled: AtomicBool,
 }
 
 impl<O: GemObject> MapPriv<O> {
@@ -623,6 +646,7 @@ impl<O: GemObject> MapPriv<O> {
             uoff: self.uoff,
             len: self.len,
             obj_off: self.uoff.wrapping_sub(obj.common().offset()),
+            settled: self.settled.load(Ordering::Acquire),
         }
     }
 }
@@ -935,6 +959,27 @@ pub struct GemCore<O: GemObject> {
     kstat: Option<TypedKstat<GemKstat>>,
 }
 
+/// Object memory charged to a device's budget ahead of its allocation
+/// ([`GemCore::reserve`]); returned when dropped.
+#[must_use = "a reservation is returned as soon as it is dropped"]
+pub struct Reservation<'a, O: GemObject> {
+    core: &'a GemCore<O>,
+    bytes: u64,
+}
+
+impl<O: GemObject> Reservation<'_, O> {
+    /// Returns the number of bytes reserved.
+    pub fn bytes(&self) -> usize {
+        self.bytes as usize
+    }
+}
+
+impl<O: GemObject> Drop for Reservation<'_, O> {
+    fn drop(&mut self) {
+        self.core.stats.memory.fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
 /// A raw pointer to the device's GEM state, for the drain task.
 struct CorePtr<O: GemObject>(*const GemCore<O>);
 // SAFETY: the task only runs while the state exists (GemCore::quiesce and
@@ -1164,27 +1209,52 @@ impl<O: GemObject> GemCore<O> {
 
     // --- objects and handles ---
 
-    /// Makes `obj` a GEM object of this device and returns the first
-    /// reference. `EINVAL` if its size is zero or not a multiple of the
-    /// page size, `ENOMEM` if its memory would take the device past its
-    /// limit ([`Driver::MAX_MEMORY`](crate::Driver::MAX_MEMORY)); the
-    /// object is dropped then, which frees its memory.
-    pub fn create(this: &KArc<GemCore<O>>, obj: O, ctx: &Sleepable) -> Result<GemRef<O>, Errno> {
-        this.housekeeping(ctx);
-        let size = obj.size();
-        if size == 0 || !(size as u64).is_multiple_of(PAGE_SIZE) {
-            return Err(Errno::EINVAL);
-        }
-        // The memory already exists; the limit caps what the device keeps.
-        // Charged before the object exists, so that its destructor, which
-        // also runs if the allocation below fails, always balances the
-        // counters.
-        let bytes = obj.memory_bytes() as u64;
-        let before = this.stats.memory.fetch_add(bytes, Ordering::Relaxed);
-        if before.checked_add(bytes).is_none_or(|total| total > this.max_memory) {
-            this.stats.memory.fetch_sub(bytes, Ordering::Relaxed);
+    /// Charges `bytes` of object memory to the device's budget
+    /// ([`Driver::MAX_MEMORY`](crate::Driver::MAX_MEMORY)) before they are
+    /// allocated, so that concurrent requests cannot allocate past it even
+    /// for a moment. `ENOMEM` if the budget does not have them. The charge
+    /// goes back when the reservation is dropped, unless
+    /// [`GemCore::create_reserved`] turns it into an object's.
+    pub fn reserve(&self, bytes: usize, _ctx: &Sleepable) -> Result<Reservation<'_, O>, Errno> {
+        let bytes = bytes as u64;
+        let before = self.stats.memory.fetch_add(bytes, Ordering::Relaxed);
+        if before.checked_add(bytes).is_none_or(|total| total > self.max_memory) {
+            self.stats.memory.fetch_sub(bytes, Ordering::Relaxed);
             return Err(Errno::ENOMEM);
         }
+        Ok(Reservation { core: self, bytes })
+    }
+
+    /// Makes `obj` a GEM object of this device and returns the first
+    /// reference, charging its memory to the budget now: `ENOMEM` if it
+    /// does not fit (the object is dropped then, which frees its memory).
+    /// Drivers that allocate reserve first and use
+    /// [`GemCore::create_reserved`].
+    pub fn create(this: &KArc<GemCore<O>>, obj: O, ctx: &Sleepable) -> Result<GemRef<O>, Errno> {
+        let r = this.reserve(obj.memory_bytes(), ctx)?;
+        Self::create_reserved(this, obj, r, ctx)
+    }
+
+    /// Makes `obj` a GEM object of this device and returns the first
+    /// reference, taking over `reservation` as the object's charge. `EINVAL`
+    /// if the object's size is zero or not a multiple of the page size, or
+    /// if its [`GemObject::memory_bytes`] differs from the reservation.
+    pub fn create_reserved(
+        this: &KArc<GemCore<O>>,
+        obj: O,
+        reservation: Reservation<'_, O>,
+        ctx: &Sleepable,
+    ) -> Result<GemRef<O>, Errno> {
+        this.housekeeping(ctx);
+        let size = obj.size();
+        let bytes = obj.memory_bytes() as u64;
+        if size == 0 || !(size as u64).is_multiple_of(PAGE_SIZE) || bytes != reservation.bytes {
+            return Err(Errno::EINVAL);
+        }
+        // The charge now belongs to the object; its destructor, which also
+        // runs if the allocation below fails, returns it and balances the
+        // other counters.
+        core::mem::forget(reservation);
         this.stats.objects.fetch_add(1, Ordering::Relaxed);
         this.stats.segments.fetch_add(obj.dma_segments() as u64, Ordering::Relaxed);
         let inner = GemInner {
@@ -1465,7 +1535,9 @@ impl<O: GemObject> GemCore<O> {
     }
 }
 
-/// Records a mapping piece for `obj` and returns its private data.
+/// Records a mapping piece set up by `mmap(2)` or `fork(2)` and returns
+/// its private data. [`GemObject::mapped`] runs for it; if that fails, the
+/// piece is dropped again and the error fails the operation.
 fn record<O: GemObject>(
     obj: GemRef<O>,
     dhp: sys::devmap_cookie_t,
@@ -1473,59 +1545,108 @@ fn record<O: GemObject>(
     len: usize,
     ctx: &Sleepable,
 ) -> Result<NonNull<MapPriv<O>>, Errno> {
-    let core = KArc::clone(&obj.inner().core);
-    let b = KBox::new(MapPriv { obj: Some(obj), dhp, uoff, len }, ctx);
-    // SAFETY: into_raw never returns null.
-    let p = unsafe { NonNull::new_unchecked(KBox::into_raw(b)) };
+    let p = alloc_piece(obj, dhp, uoff, len, true, ctx);
     // SAFETY: we own the box until the pointer is handed to the framework.
     let m = unsafe { p.as_ref() };
-    let Some(obj) = m.obj.as_ref() else { return Err(Errno::EINVAL) };
-    let res = {
-        let mut maps = obj.inner().maps.lock();
-        match maps.0.push(p, ctx) {
-            Ok(()) => {
-                let r = obj.object().mapped(&m.mapping(obj), ctx);
-                if r.is_err() {
-                    let i = maps.0.iter().position(|q| *q == p);
-                    i.and_then(|i| maps.0.swap_remove(i));
+    let res = match m.obj.as_ref() {
+        Some(obj) => {
+            let mut maps = obj.inner().maps.lock();
+            match maps.0.push(p, ctx) {
+                Ok(()) => {
+                    let r = obj.object().mapped(&m.mapping(obj), ctx);
+                    if r.is_err() {
+                        let i = maps.0.iter().position(|q| *q == p);
+                        i.and_then(|i| maps.0.swap_remove(i));
+                    }
+                    r
                 }
-                r
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
         }
+        None => Err(Errno::EINVAL),
     };
     if let Err(e) = res {
         // SAFETY: not recorded; we still own the box.
-        let mut b = unsafe { KBox::from_raw(p.as_ptr()) };
-        put_opt(b.obj.take(), ctx);
-        drop(b);
+        free_piece(unsafe { KBox::from_raw(p.as_ptr()) }, false, ctx);
         return Err(e);
     }
-    core.stats.mappings.fetch_add(1, Ordering::Relaxed);
-    core.publish();
-    drop(core);
+    count_piece(m, 1);
     Ok(p)
+}
+
+/// Records a piece that a partial `munmap(2)` split off. This cannot fail:
+/// the framework keeps the piece whatever the callback does, so the piece
+/// must hold a reference and have private data. It starts unsettled (see
+/// [`Mapping::is_settled`]); if it cannot be listed, it keeps its reference
+/// but no movable-object move can redirect it, which is logged.
+fn record_split<O: GemObject>(
+    obj: GemRef<O>,
+    dhp: sys::devmap_cookie_t,
+    uoff: u64,
+    len: usize,
+    ctx: &Sleepable,
+) -> NonNull<MapPriv<O>> {
+    let p = alloc_piece(obj, dhp, uoff, len, false, ctx);
+    // SAFETY: we own the box until the pointer is handed to the framework.
+    let m = unsafe { p.as_ref() };
+    if let Some(obj) = m.obj.as_ref() {
+        let listed = obj.inner().maps.lock().0.push(p, ctx);
+        if let Err(e) = listed {
+            let dev = obj.inner().core.dev;
+            dev.warn(format_args!("mapping piece at {uoff:#x} not listed: {e:?}"));
+        }
+    }
+    count_piece(m, 1);
+    p
+}
+
+fn alloc_piece<O: GemObject>(
+    obj: GemRef<O>,
+    dhp: sys::devmap_cookie_t,
+    uoff: u64,
+    len: usize,
+    settled: bool,
+    ctx: &Sleepable,
+) -> NonNull<MapPriv<O>> {
+    let b = KBox::new(MapPriv { obj: Some(obj), dhp, uoff, len, settled: AtomicBool::new(settled) }, ctx);
+    // SAFETY: into_raw never returns null.
+    unsafe { NonNull::new_unchecked(KBox::into_raw(b)) }
+}
+
+fn count_piece<O: GemObject>(m: &MapPriv<O>, n: i64) {
+    if let Some(obj) = m.obj.as_ref() {
+        let core = &obj.inner().core;
+        if n > 0 {
+            core.stats.mappings.fetch_add(n as u64, Ordering::Relaxed);
+        } else {
+            core.stats.mappings.fetch_sub(n.unsigned_abs(), Ordering::Relaxed);
+        }
+        core.publish();
+    }
+}
+
+/// Frees a piece and drops its reference; `counted` pieces also leave the
+/// statistics.
+fn free_piece<O: GemObject>(mut b: KBox<MapPriv<O>>, counted: bool, ctx: &Sleepable) {
+    if counted {
+        count_piece(&b, -1);
+    }
+    put_opt(b.obj.take(), ctx);
+    drop(b);
 }
 
 /// Removes a piece from its object's list and frees it, dropping its
 /// reference.
 fn unrecord<O: GemObject>(p: NonNull<MapPriv<O>>, ctx: &Sleepable) {
-    // SAFETY: a piece recorded by `record`, owned by the framework until
-    // now; devmap_unmap(9E) hands it back exactly once.
-    let mut b = unsafe { KBox::from_raw(p.as_ptr()) };
-    if let Some(obj) = b.obj.take() {
-        let core = KArc::clone(&obj.inner().core);
-        {
-            let mut maps = obj.inner().maps.lock();
-            let i = maps.0.iter().position(|q| *q == p);
-            i.and_then(|i| maps.0.swap_remove(i));
-        }
-        core.stats.mappings.fetch_sub(1, Ordering::Relaxed);
-        obj.put(ctx);
-        core.publish();
-        drop(core);
+    // SAFETY: a piece from `record` or `record_split`, owned by the
+    // framework until now; devmap_unmap(9E) hands it back exactly once.
+    let b = unsafe { KBox::from_raw(p.as_ptr()) };
+    if let Some(obj) = b.obj.as_ref() {
+        let mut maps = obj.inner().maps.lock();
+        let i = maps.0.iter().position(|q| *q == p);
+        i.and_then(|i| maps.0.swap_remove(i));
     }
-    drop(b);
+    free_piece(b, true, ctx);
 }
 
 // --- devmap callbacks -------------------------------------------------------------
@@ -1553,14 +1674,22 @@ pub(crate) mod registry {
     /// [`remove`] before the state goes away.
     pub(crate) fn insert<O: GemObject>(index: u32, core: &GemCore<O>) -> bool {
         let (Some(c), Some(t)) = (CORES.get(index as usize), TAGS.get(index as usize)) else { return false };
-        t.store(tag::<O>(), Ordering::Relaxed);
-        c.compare_exchange(
-            ptr::null_mut(),
-            core as *const GemCore<O> as *mut c_void,
-            Ordering::Release,
-            Ordering::Relaxed,
-        )
-        .is_ok()
+        let claimed = c
+            .compare_exchange(
+                ptr::null_mut(),
+                core as *const GemCore<O> as *mut c_void,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok();
+        // Only the device that claimed the slot sets its tag, so a second
+        // registration cannot change the type a live entry is checked
+        // against. A lookup before the tag is set finds no device, which is
+        // harmless: no file of the device can be open yet.
+        if claimed {
+            t.store(tag::<O>(), Ordering::Release);
+        }
+        claimed
     }
 
     /// Forgets device `index`.
@@ -1577,7 +1706,7 @@ pub(crate) mod registry {
     /// which keeps the device attached for the duration of the call.
     pub(crate) unsafe fn get<'a, O: GemObject>(index: u32) -> Option<&'a GemCore<O>> {
         let p = CORES.get(index as usize)?.load(Ordering::Acquire);
-        if p.is_null() || TAGS.get(index as usize)?.load(Ordering::Relaxed) != tag::<O>() {
+        if p.is_null() || TAGS.get(index as usize)?.load(Ordering::Acquire) != tag::<O>() {
             return None;
         }
         // SAFETY: stored by insert from a live GemCore<O> (checked tag); the
@@ -1654,11 +1783,14 @@ unsafe extern "C" fn unmap_cb<O: GemObject>(
     let Some(p) = NonNull::new(pvtp.cast::<MapPriv<O>>()) else { return };
     // SAFETY: our private data; the framework hands it back once.
     let m = unsafe { p.as_ref() };
-    let (uoff, mlen, dev) = (m.uoff, m.len as u64, m.obj.as_ref().map(|o| o.inner().core.dev));
+    let (uoff, mlen) = (m.uoff, m.len as u64);
     let off = off as u64;
     let end = off.saturating_add(len as u64);
     if let Some(obj) = m.obj.as_ref() {
         // The pieces that remain when the middle or one end is unmapped.
+        // The framework keeps them whatever happens here (new_dhp1 is the
+        // old handle itself, new_dhp2 a copy that still points at `p`), so
+        // each gets private data with its own reference before `p` goes.
         let pieces = [
             (new_dhp1, new_pvtp1, uoff, off.saturating_sub(uoff)),
             (new_dhp2, new_pvtp2, end, uoff.saturating_add(mlen).saturating_sub(end)),
@@ -1667,17 +1799,9 @@ unsafe extern "C" fn unmap_cb<O: GemObject>(
             if ndhp.is_null() || npvtp.is_null() {
                 continue;
             }
-            match record(obj.clone(), ndhp, start, plen as usize, &ctx) {
-                // SAFETY: the framework passes a writable pointer.
-                Ok(q) => unsafe { *npvtp = q.as_ptr().cast() },
-                Err(e) => {
-                    // The piece exists regardless; it is not recorded, so a
-                    // movable object cannot redirect it.
-                    if let Some(d) = dev {
-                        d.warn(format_args!("mapping piece at {start:#x} not recorded: {e:?}"));
-                    }
-                }
-            }
+            let q = record_split(obj.clone(), ndhp, start, plen as usize, &ctx);
+            // SAFETY: the framework passes a writable pointer.
+            unsafe { *npvtp = q.as_ptr().cast() };
         }
     }
     unrecord(p, &ctx);
@@ -1699,6 +1823,26 @@ unsafe extern "C" fn access_cb<O: GemObject>(
     let Some(obj) = m.obj.as_ref() else { return f.default_access() };
     let core = &obj.inner().core;
     core.stats.faults.fetch_add(1, Ordering::Relaxed);
+    if !m.settled.load(Ordering::Acquire) {
+        // The first fault of a piece split off by munmap(2): the framework
+        // has finished it (the fault holds the address space lock that the
+        // munmap held), so its geometry is final. See Mapping::is_settled.
+        // SAFETY: devmap_access(9E) runs in the faulting user thread, which
+        // may block.
+        let ctx = unsafe { Sleepable::assume() };
+        let maps = obj.inner().maps.lock();
+        if !m.settled.load(Ordering::Acquire) {
+            let r = obj.object().mapped(&Mapping { settled: true, ..m.mapping(obj) }, &ctx);
+            if let Err(e) = r {
+                drop(maps);
+                core.dev.warn(format_args!("mapping piece at {:#x} not settled: {e:?}", m.uoff));
+                core.publish();
+                return sys::errno::EIO;
+            }
+            m.settled.store(true, Ordering::Release);
+        }
+        drop(maps);
+    }
     let r = obj.object().access(&m.mapping(obj), &f);
     // devmap_access(9E) runs in the faulting thread, where the kstat's
     // adaptive mutex may be taken.

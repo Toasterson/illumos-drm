@@ -340,21 +340,14 @@ impl<D: Driver> CharDevice for Device<D> {
         Ok(Some(Minor(m)))
     }
 
-    fn close(
-        &self,
-        minor: Minor,
-        _flags: OpenFlags,
-        _otyp: OpenType,
-        _cred: &Cred<'_>,
-        _ctx: &Sleepable,
-    ) -> Result<()> {
+    fn close(&self, minor: Minor, _flags: OpenFlags, _otyp: OpenType, _cred: &Cred<'_>, ctx: &Sleepable) -> Result<()> {
         let d = minor::decode(minor.0).ok_or(Errno::ENXIO)?;
         // A node minor without a clone id was never handed out by
         // clone_open, so there is no file to forget.
         if let Some(c) = d.clone {
             self.state.lock().close(c);
             if let Some(g) = &self.gem {
-                g.file_close(c, _ctx);
+                g.file_close(c, ctx);
             }
         }
         Ok(())
@@ -522,11 +515,8 @@ impl<D: Driver> Device<D> {
                 let a = UserArg::<uapi::drm_gem_close>::read(arg)?;
                 self.state.lock().permit(c, perm, privileged)?;
                 let g = self.gem_or(caps::EOPNOTSUPP)?;
-                // Linux ignores `pad`; it is refused here so that it stays
-                // usable for extensions. libdrm and Mesa zero it.
-                if a.get().pad != 0 {
-                    return Err(Errno::EINVAL);
-                }
+                // `pad` is ignored, as in Linux's drm_gem_close_ioctl: the
+                // kernel has never checked it, so userland need not clear it.
                 g.handle_close(c, a.get().handle, ctx)?;
             }
             Op::GemFlink => {
@@ -567,8 +557,11 @@ impl<D: Driver> Device<D> {
                 if size > D::MAX_OBJECT_SIZE {
                     return Err(Errno::ENOMEM);
                 }
+                // Charged before the locked allocation, so that concurrent
+                // requests cannot allocate past the device's budget.
+                let reservation = g.reserve(size, ctx)?;
                 let mem = g.sys_mem(size, ctx)?;
-                let obj = GemCore::create(g, D::Object::from(mem), ctx)?;
+                let obj = GemCore::create_reserved(g, D::Object::from(mem), reservation, ctx)?;
                 let size = obj.size() as u64;
                 let handle = g.handle_create(c, obj, ctx)?;
                 // SAFETY: only field assignments below.
@@ -582,9 +575,7 @@ impl<D: Driver> Device<D> {
                 let mut a = UserArg::<uapi::drm_mode_map_dumb>::read(arg)?;
                 self.state.lock().permit(c, perm, privileged)?;
                 let g = self.dumb_gem()?;
-                if a.get().pad != 0 {
-                    return Err(Errno::EINVAL);
-                }
+                // `pad` is ignored, as in Linux's drm_mode_mmap_dumb_ioctl.
                 let obj = g.lookup(c, a.get().handle)?;
                 let off = g.mmap_offset(&obj, ctx);
                 obj.put(ctx);

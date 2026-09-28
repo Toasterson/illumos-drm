@@ -296,10 +296,11 @@ impl NullDriver {
         if size == 0 || size > <NullDriver as drm::Driver>::MAX_OBJECT_SIZE / 2 {
             return Err(if size == 0 { Errno::EINVAL } else { Errno::ENOMEM });
         }
+        let reservation = g.reserve(size.next_multiple_of(4096) * 2, ctx)?;
         let m0 = g.sys_mem(size, ctx)?;
         let m1 = g.sys_mem(size, ctx)?;
         let obj = NullObject::Movable(Movable { dev: g.dev_info(), mem: [m0, m1], cur: AtomicUsize::new(0) });
-        let r = GemCore::create(g, obj, ctx)?;
+        let r = GemCore::create_reserved(g, obj, reservation, ctx)?;
         let handle = g.handle_create(file, r, ctx)?;
         // SAFETY: a field assignment.
         unsafe { a.get_mut() }.handle = handle;
@@ -336,7 +337,11 @@ impl NullDriver {
             }
             let mut pieces = 0u32;
             for m in maps {
-                if flags & MOVE_UNLOAD_ONLY == 0 {
+                // A piece that a partial munmap(2) split off may still be
+                // finished by the framework and must not be remapped yet
+                // (Mapping::is_settled); invalidating it is enough, because
+                // its next fault settles it on the current backing.
+                if flags & MOVE_UNLOAD_ONLY == 0 && m.is_settled() {
                     v.remap(&m)?;
                 }
                 m.unload(ctx).map_err(|_| Errno::EIO)?;

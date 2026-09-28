@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "ddi"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=77df4ce177d569328ca030fd0f3ef0741d4451a3#77df4ce177d569328ca030fd0f3ef0741d4451a3"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=bfc7ff7b2ae520e0c5592ae4e9780e22564bc070#bfc7ff7b2ae520e0c5592ae4e9780e22564bc070"
 dependencies = [
  "ddi-sys",
  "zerocopy",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "ddi-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=77df4ce177d569328ca030fd0f3ef0741d4451a3#77df4ce177d569328ca030fd0f3ef0741d4451a3"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=bfc7ff7b2ae520e0c5592ae4e9780e22564bc070#bfc7ff7b2ae520e0c5592ae4e9780e22564bc070"
 
 [[package]]
 name = "drm"

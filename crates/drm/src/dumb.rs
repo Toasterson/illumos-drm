@@ -10,8 +10,12 @@
 //! rules, which a driver may replace through
 //! [`Driver::dumb_layout`](crate::Driver::dumb_layout), are:
 //!
-//! * `width`, `height` and `bpp` are non-zero, and `bpp` is 8, 16, 24 or 32;
-//! * `flags` is zero (the uAPI reserves it; nothing is defined yet);
+//! * `width`, `height` and `bpp` are non-zero; any `bpp` is accepted and
+//!   counts as `ceil(bpp / 8)` bytes per pixel, as in Linux's
+//!   `drm_mode_create_dumb` (which refuses only `bpp > U32_MAX - 8`);
+//! * `flags` is ignored, as Linux ignores it: the uAPI header says it must
+//!   be zero, but the kernel has never checked, so clients do not reliably
+//!   clear it;
 //! * the pitch is `width * ceil(bpp / 8)` rounded up to 64 bytes, which
 //!   suits the scanout engines and CPU cache lines;
 //! * the size is `pitch * height` rounded up to a whole page;
@@ -34,7 +38,7 @@ pub struct DumbRequest {
     pub height: u32,
     /// Bits per pixel.
     pub bpp: u32,
-    /// Must be zero.
+    /// Reserved; ignored, as in Linux.
     pub flags: u32,
 }
 
@@ -50,10 +54,11 @@ pub struct DumbLayout {
 /// The pitch alignment of the default rules.
 pub const PITCH_ALIGN: u32 = 64;
 
-/// Checks the parts of a request that do not depend on the pixel format:
-/// non-zero dimensions and zero flags.
+/// Checks the parts of a request that do not depend on the layout, as
+/// Linux's `drm_mode_create_dumb` does: non-zero dimensions and a `bpp`
+/// that is non-zero and at most `U32_MAX - 8`. `flags` is not checked.
 pub fn check_request(req: &DumbRequest) -> Result<(), Errno> {
-    if req.width == 0 || req.height == 0 || req.bpp == 0 || req.flags != 0 {
+    if req.width == 0 || req.height == 0 || req.bpp == 0 || req.bpp > u32::MAX - 8 {
         return Err(Errno::EINVAL);
     }
     Ok(())
@@ -81,9 +86,6 @@ pub fn layout(req: &DumbRequest, bytes_per_pixel: u32, pitch_align: u32) -> Resu
 /// The default rules of the module documentation.
 pub fn standard_layout(req: &DumbRequest) -> Result<DumbLayout, Errno> {
     check_request(req)?;
-    if !matches!(req.bpp, 8 | 16 | 24 | 32) {
-        return Err(Errno::EINVAL);
-    }
     layout(req, req.bpp.div_ceil(8), PITCH_ALIGN)
 }
 
@@ -107,12 +109,26 @@ mod tests {
 
     #[test]
     fn refuses_bad_requests() {
-        for r in [req(0, 1, 32), req(1, 0, 32), req(1, 1, 0), DumbRequest { flags: 1, ..req(1, 1, 32) }] {
+        for r in [req(0, 1, 32), req(1, 0, 32), req(1, 1, 0)] {
             assert_eq!(standard_layout(&r), Err(Errno::EINVAL), "{r:?}");
         }
-        for bpp in [1, 4, 12, 15, 30, 33, 48, 64, u32::MAX] {
+        for bpp in [u32::MAX, u32::MAX - 7] {
             assert_eq!(standard_layout(&req(16, 16, bpp)), Err(Errno::EINVAL), "bpp {bpp}");
         }
+    }
+
+    #[test]
+    fn linux_leniency() {
+        // flags is ignored.
+        assert_eq!(standard_layout(&DumbRequest { flags: 0xffff_ffff, ..req(16, 16, 32) }).map(|l| l.pitch), Ok(64));
+        // Any non-zero bpp: ceil(bpp / 8) bytes per pixel.
+        assert_eq!(standard_layout(&req(100, 1, 1)).map(|l| l.pitch), Ok(128));
+        assert_eq!(standard_layout(&req(100, 1, 12)).map(|l| l.pitch), Ok(256));
+        assert_eq!(standard_layout(&req(100, 1, 64)).map(|l| l.pitch), Ok(832));
+        // The largest bpp Linux accepts; the pitch then overflows.
+        assert_eq!(standard_layout(&req(1, 1, u32::MAX - 8)).map(|l| l.pitch), Ok(0x2000_0000));
+        assert_eq!(standard_layout(&req(2, 1, u32::MAX - 8)), Ok(DumbLayout { pitch: 0x4000_0000, size: 0x4000_0000 }));
+        assert_eq!(standard_layout(&req(8, 1, u32::MAX - 8)), Err(Errno::EINVAL));
     }
 
     #[test]
