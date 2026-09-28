@@ -76,6 +76,12 @@ had_dri=no
 [ -d /dev/dri ] && had_dri=yes
 
 step uname -a
+# devfs drops the clone@0 nodes of idle drivers (bridge, llc1, ptm, ...) a
+# few seconds after boot, and devfsadm -C at the end recreates them, which
+# made the first run on a freshly booted machine report five new /devices
+# entries that have nothing to do with rdrmnull. Take both snapshots after
+# devfsadm -C.
+step devfsadm -C
 state before
 step digest -a sha256 rdrmnull.a
 step ld -ztype=kmod -z allextract rdrmnull.a -o rdrmnull || exit 1
