@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+description = "Build, link and check tooling (vendored from illumos-ddi, see src/main.rs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+drm-uapi.workspace = true

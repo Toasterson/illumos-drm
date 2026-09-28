@@ -1,0 +1,48 @@
+# Solstice CI (Forgejo Actions), set up like illumos-ddi's workflow.
+# Constraints of the runner: no `uses:`, no `needs:`, no `if:`, no
+# artifacts; steps run as `sh -lc`; the runner clones the repository at the
+# pushed commit before the first step and runs every step from its root.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check-hosted:
+    # Type-check, lint, format-check, document and run the host tests
+    # against the hosted illumos target. The toolchain pinned in
+    # rust-toolchain.toml goes into a private rustup in $HOME.
+    runs-on: rust
+    steps:
+      - run: >
+          curl -sSf https://sh.rustup.rs | env RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo"
+          sh -s -- -y --profile minimal --default-toolchain none --no-modify-path &&
+          export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 &&
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy --target x86_64-unknown-illumos
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo check --workspace --target x86_64-unknown-illumos
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo clippy --workspace --target x86_64-unknown-illumos -- -D warnings
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo fmt --all -- --check
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude xtask --no-deps --target x86_64-unknown-illumos
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo test -p drm -p drm-uapi
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo xtask uapi-check tools/uapi/drm_layout.oibldofgate.out
+
+  kmod-illumos:
+    # Native illumos: install the pinned nightly (the only nightly-only step
+    # is -Zbuild-std), build rdrmnull for the kernel target and link it with
+    # the illumos ld as a real kernel module.
+    runs-on: illumos
+    steps:
+      - run: >
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          --default-toolchain nightly-2026-04-16 --component rust-src --no-modify-path
+      - run: >
+          export PATH="$HOME/.cargo/bin:$PATH" && export SCCACHE_STARTUP_TIMEOUT=60 &&
+          cargo +nightly-2026-04-16 build -p rdrmnull --release
+          --target targets/x86_64-illumos-kmod.json
+          -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
+      - run: >
+          ld -ztype=kmod -z allextract
+          target/x86_64-illumos-kmod/release/rdrmnull.a -o target/rdrmnull &&
+          elfdump -d target/rdrmnull | grep SUNW_KMOD && nm -u target/rdrmnull

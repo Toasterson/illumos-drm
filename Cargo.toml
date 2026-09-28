@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull", "xtask"]
+default-members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://code.aopc.cloud/illumos/illumos-drm"
+rust-version = "1.97"
+
+[workspace.dependencies]
+drm-uapi = { path = "crates/drm-uapi" }
+drm = { path = "crates/drm" }
+# illumos-ddi at the drm-r0 branch: main (eb18ab93b7) plus clone-open support
+# in the CharDevice glue, which the DRM core needs for per-file state.
+ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "e019d5bd3c85b91a1e8758679e3504369bad378e" }
+ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "e019d5bd3c85b91a1e8758679e3504369bad378e", default-features = false }
+serde_json = "1"
+
+# Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug
+# info for mdb/DTrace; abort on panic (the target JSON enforces it too).
+[profile.release]
+debug = 2
+panic = "abort"
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
