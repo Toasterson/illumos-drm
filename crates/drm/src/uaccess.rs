@@ -47,6 +47,18 @@ unsafe impl Plain for uapi::drm_set_version {}
 unsafe impl Plain for uapi::drm_get_cap {}
 // SAFETY: as above.
 unsafe impl Plain for uapi::drm_set_client_cap {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_gem_close {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_gem_flink {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_gem_open {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_mode_create_dumb {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_mode_map_dumb {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_mode_destroy_dumb {}
 
 /// An ioctl argument structure held in the kernel.
 pub struct UserArg<T: Plain> {

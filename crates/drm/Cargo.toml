@@ -1,6 +1,6 @@
 [package]
 name = "drm"
-description = "The DRM core for illumos: device registration, card and render nodes, per-file state and core ioctls"
+description = "The DRM core for illumos: device registration, card and render nodes, per-file state, core ioctls, GEM objects and dumb buffers"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
