@@ -30,8 +30,9 @@ master, `drmGetClient`, `drmSetMaster`/`drmDropMaster`, and
 `drmOpenRender(128)` as root and as `nobody` all behave as on Linux. Eight
 unprivileged threads opening, authenticating and closing concurrently while
 the root master drops and retakes master, the 511-file limit, a 32-bit
-caller (refused with `ENOTSUP`) and the error paths were tested too, and
-the module unloaded cleanly with `rem_drv`. Every size, offset and
+caller (core commands refused with `ENOTSUP`, `ENOTTY` otherwise), the
+error paths, and the refusal to unload while a file is open were tested
+too, and the module unloaded cleanly with `rem_drv`. Every size, offset and
 ioctl number of the Rust uAPI matches what gcc computes on illumos from the
 same headers.
 
@@ -68,8 +69,9 @@ links, loads, tests and unloads `rdrmnull` on an illumos machine.
 <https://code.aopc.cloud/illumos/illumos-ddi.git>, pinned by revision in
 the workspace `Cargo.toml`. The pinned revision is the `drm-r0` branch:
 illumos-ddi `main` (`eb18ab93b7`) plus clone-open support in the
-`CharDevice` glue (`CharDevice::clone_open`, commits `8463d9da92` and
-`f36d47958e`). Per-file DRM
+`CharDevice` glue (`CharDevice::clone_open`, commits `8463d9da92`,
+`f36d47958e` and `e019d5bd3c`; illumos-ddi pull request
+<https://code.aopc.cloud/illumos/illumos-ddi/pulls/1>). Per-file DRM
 state is impossible without clone opens, because a character device
 otherwise sees only the last `close(9E)` of a device number, and the
 change belongs in the framework glue rather than in a copy of it. Anything
@@ -144,20 +146,24 @@ up to 63.
 | Ioctl | Allowed for | Notes |
 | --- | --- | --- |
 | `VERSION` | all files, render too | strings copied up to the caller's lengths, full lengths returned |
-| `GET_CAP` | all files, render too | `TIMESTAMP_MONOTONIC` 1; `PRIME`, `SYNCOBJ`, `SYNCOBJ_TIMELINE` 0 until R2; `DUMB_BUFFER` 0 until R1; vblank and page-flip capabilities 0 until R3; `CURSOR_WIDTH/HEIGHT` and `ADDFB2_MODIFIERS` from the driver's `ModeConfig`; everything else `EOPNOTSUPP` for a driver without `MODESET`, unknown `EINVAL` otherwise |
+| `GET_CAP` | all files, render too | `TIMESTAMP_MONOTONIC` 1; `PRIME`, `SYNCOBJ`, `SYNCOBJ_TIMELINE` 0 until R2; `DUMB_BUFFER` 0 until R1; vblank and page-flip capabilities 0 until R3; `CURSOR_WIDTH/HEIGHT` from the driver's `ModeConfig`; `ADDFB2_MODIFIERS`, `DUMB_PREFERRED_DEPTH` and `DUMB_PREFER_SHADOW` 0 until the ioctls they describe exist (R1/R3), whatever the `ModeConfig`; everything else `EOPNOTSUPP` for a driver without `MODESET`, unknown `EINVAL` otherwise |
 | `SET_CLIENT_CAP` | primary | `STEREO_3D`, `UNIVERSAL_PLANES`, `ATOMIC` (needs `Features::ATOMIC`, also sets universal planes and aspect ratio, values 0 to 2), `ASPECT_RATIO`, `WRITEBACK_CONNECTORS` (needs `ATOMIC` first), values 0 or 1; Linux's refusal of `ATOMIC` = 1 to processes named `X*` needs the process name and comes with R3 |
 | `GET_UNIQUE` | primary | empty until the master sets interface 1.1 or later or calls `SET_UNIQUE`, as `drmOpenByName` expects |
 | `SET_UNIQUE` | authenticated master with `PRIV_SYS_DEVICES` | only the device's own bus ID, once (`EBUSY` after) |
 | `SET_VERSION` | master | interface 1.0 to 1.4, driver version checked; versions reported back in every case |
 | `GET_MAGIC` | primary | per-master namespace; the number stays with the file |
 | `AUTH_MAGIC` | authenticated master | consumes the magic; unknown or consumed magic `EINVAL` |
-| `GET_CLIENT` | primary | index 0 only (the caller): authentication state, the caller's pid, the anonymous uid, as on Linux |
-| `SET_MASTER` | primary | needs `PRIV_SYS_DEVICES`, or a former master used by its opening process |
+| `GET_CLIENT` | primary | addition beyond the R0 work item, to make authentication observable: index 0 only (the caller), authentication state, the caller's pid, the anonymous uid, as on Linux |
+| `SET_MASTER` | primary | needs `PRIV_SYS_DEVICES`, or a former master used by its opening process (`PRIV_SYS_DEVICES` is checked only if the second condition fails) |
 | `DROP_MASTER` | primary | same permission, only by the current master |
 
 The first file opened on a card node while the device has no master
 becomes master. Files of openers with `PRIV_SYS_DEVICES` (the illumos
-counterpart of `CAP_SYS_ADMIN`) are authenticated from the start. Render
+counterpart of `CAP_SYS_ADMIN`) are authenticated from the start. As
+Linux calls `capable()` lazily, the core calls `drv_priv(9F)` on the ioctl
+path only for ioctls whose permission needs it (`SET_UNIQUE`, and
+`SET_MASTER`/`DROP_MASTER` by a file that is not a former master of the
+same process). Render
 nodes never need authentication and cannot use the primary-only ioctls
 (`EACCES`). Commands are matched on their complete 32-bit value, because
 the illumos encoding keeps only eight bits of the argument size; any other

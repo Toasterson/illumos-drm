@@ -339,8 +339,30 @@ stress_child(void)
 	exit(failures);
 }
 
+/*
+ * `drm_r0_test hold <path>`: open <path>, print the minor number, and keep
+ * the file open until stdin reaches end of file. run-r0-test.sh uses it to
+ * check that the driver cannot be unloaded while a file is open.
+ */
+static int
+hold(const char *path)
+{
+	char c;
+	int fd = open(path, O_RDWR);
+
+	if (fd < 0) {
+		perror(path);
+		return (1);
+	}
+	print_minor("holding", fd);
+	while (read(0, &c, 1) > 0)
+		;
+	(void) close(fd);
+	return (0);
+}
+
 int
-main(void)
+main(int argc, char **argv)
 {
 	struct rlimit rl = { 4096, 4096 };
 	drmSetVersion sv;
@@ -351,6 +373,8 @@ main(void)
 	static int fds[600];
 
 	(void) setvbuf(stdout, NULL, _IOLBF, 0);
+	if (argc == 3 && strcmp(argv[1], "hold") == 0)
+		return (hold(argv[2]));
 
 	/* drmOpen by name: first primary open, so this file is master. */
 	fd = drmOpen("rdrmnull", NULL);

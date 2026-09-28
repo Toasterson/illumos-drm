@@ -34,7 +34,9 @@ had_dri=no
 [ -d /dev/dri ] && had_dri=yes
 
 step uname -a
+step digest -a sha256 rdrmnull.a
 step ld -ztype=kmod -z allextract rdrmnull.a -o rdrmnull || exit 1
+step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo
 echo "\$ nm -u rdrmnull: every undefined symbol must resolve in the running kernel"
@@ -67,6 +69,46 @@ if [ $fail -eq 0 ]; then
 	step sh -c 'tail -3 /var/adm/messages'
 	step ./drm_r0_test || fail=1
 	step ./drm_r0_probe32 || fail=1
+
+	# The module must stay loaded while a file is open: modunload (the
+	# unload rem_drv would attempt, without rem_drv's removal of the driver
+	# configuration) has to fail, and succeed once the file is closed.
+	# rem_drv itself is not used for the refusal because it removes the
+	# /etc entries even when the unload fails.
+	echo
+	echo "\$ ./drm_r0_test hold /dev/dri/card0 & (open file held on a fifo)"
+	rm -f hold.fifo && mkfifo hold.fifo
+	./drm_r0_test hold /dev/dri/card0 < hold.fifo &
+	holder=$!
+	exec 9> hold.fifo
+	sleep 1
+	id=$(modinfo | awk '$6 == "rdrmnull" {print $1}')
+	echo "rdrmnull module id: $id"
+	if [ -z "$id" ]; then
+		echo "FAIL rdrmnull is not loaded"
+		fail=1
+	elif step modunload -i "$id"; then
+		echo "FAIL modunload succeeded while a file was open"
+		fail=1
+	else
+		echo "PASS modunload refused while /dev/dri/card0 is open"
+	fi
+	step sh -c 'modinfo | grep rdrmnull'
+	exec 9>&-
+	wait $holder
+	echo "holder exited with $?"
+	rm -f hold.fifo
+	if [ -n "$id" ] && step modunload -i "$id"; then
+		echo "PASS modunload succeeded after the file was closed"
+	else
+		echo "FAIL modunload failed after the file was closed"
+		fail=1
+	fi
+	step sh -c 'modinfo | grep rdrmnull || echo "rdrmnull not loaded"'
+	# Open the device once more so that the driver attaches again, and
+	# unload through rem_drv below.
+	step ./drm_r0_test hold /dev/dri/renderD128 < /dev/null || fail=1
+	step sh -c 'modinfo | grep rdrmnull'
 	step sh -c 'echo "::prtconf -d rdrmnull" | mdb -k'
 fi
 
