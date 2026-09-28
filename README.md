@@ -265,6 +265,8 @@ only with the test-only cargo feature `panic-drill` of `drm` and
 another node at all: it refuses `dma-mode="root-node"` at attach with a
 warning, and its module has no reference to `ddi_root_node`. The drill
 module is built with `cargo xtask build rdrmnull --features panic-drill`.
+The minor nodes are created from the same `OwnNode`, which illumos-ddi
+requires for them too.
 Object memory is locked, so a driver sets
 limits per object and per device (`MAX_OBJECT_SIZE`, `MAX_MEMORY`; 256 MiB
 and 1 GiB by default, 16 and 64 MiB in `rdrmnull`); requests above them are
