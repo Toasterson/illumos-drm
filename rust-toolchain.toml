@@ -1,0 +1,8 @@
+# Stable is enough to `cargo check`/`cargo test` every crate against the
+# hosted illumos target. Building an actual kernel module needs
+# `-Zbuild-std` (core/alloc without SSE), which is nightly-only; the xtask
+# selects the pinned nightly below for that step only.
+[toolchain]
+channel = "1.97.1"
+targets = ["x86_64-unknown-illumos"]
+components = ["rustfmt", "clippy"]
