@@ -23,6 +23,9 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy --target x86_64-unknown-illumos
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo check --workspace --target x86_64-unknown-illumos
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo clippy --workspace --target x86_64-unknown-illumos -- -D warnings
+      # The test-only DMA drill (rdrmnull dma-mode "root-node") must keep
+      # compiling although it is off by default.
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo clippy --workspace --target x86_64-unknown-illumos --features rdrmnull/panic-drill -- -D warnings
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo fmt --all -- --check
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude xtask --no-deps --target x86_64-unknown-illumos
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo test -p drm -p drm-uapi
