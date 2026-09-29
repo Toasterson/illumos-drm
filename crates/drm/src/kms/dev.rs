@@ -63,7 +63,7 @@ use super::legacy::SetCrtc;
 use super::modes::DisplayMode;
 use super::objects::{FbRequest, ObjKind};
 use super::props::{Prop, PropKind};
-use super::state::{AtomicState, CommitFlags, FbBacking, KmsDriver};
+use super::state::{AtomicState, CommitFlags, DirtyRect, FbBacking, KmsDriver};
 use crate::caps::{ClientCaps, EOPNOTSUPP};
 use crate::gem::{GemCore, GemObject, GemRef};
 use crate::karc::KArc;
@@ -102,6 +102,8 @@ unsafe impl Plain for uapi::drm_mode_modeinfo {}
 unsafe impl Plain for uapi::drm_mode_crtc_page_flip {}
 // SAFETY: as above.
 unsafe impl Plain for uapi::drm_mode_fb_dirty_cmd {}
+// SAFETY: four u16 fields, no padding.
+unsafe impl Plain for uapi::drm_clip_rect {}
 // SAFETY: as above.
 unsafe impl Plain for uapi::drm_mode_get_plane_res {}
 // SAFETY: as above.
@@ -930,9 +932,29 @@ impl<O: GemObject> Kms<O> {
                 {
                     return Err(Errno::EINVAL);
                 }
-                // No driver of this core needs damage reports: scanout reads
-                // the framebuffer itself. Linux answers ENOSYS then.
-                Err(ENOSYS)
+                let raw = crate::uaccess::copy_in_array::<uapi::drm_clip_rect>(
+                    arg,
+                    v.clips_ptr as usize,
+                    v.num_clips as usize,
+                    ctx,
+                )?;
+                let clips: Vec<DirtyRect> = raw
+                    .iter()
+                    .map(|c| DirtyRect { x1: c.x1.into(), y1: c.y1.into(), x2: c.x2.into(), y2: c.y2.into() })
+                    .collect();
+                // A driver whose scanout reads the framebuffer itself keeps
+                // the default hook, which answers ENOSYS as Linux does.
+                let core = self.core.lock();
+                let fb = core.fb(v.fb_id).ok_or(Errno::ENOENT)?;
+                let planes: Vec<usize> = core
+                    .cur
+                    .planes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.crtc.is_some() && p.fb.as_ref().is_some_and(|f| Arc::ptr_eq(f, fb)))
+                    .map(|(i, _)| i)
+                    .collect();
+                drv.dirty_fb(fb, &planes, &clips, ctx)
             }
             KmsOp::GetPlane => {
                 let mut a = UserArg::<uapi::drm_mode_get_plane>::read(arg)?;
@@ -1332,12 +1354,6 @@ impl<O: GemObject> Kms<O> {
         result
     }
 }
-
-/// `ENOSYS`, which `ddi::Errno` has no constant for.
-const ENOSYS: Errno = match Errno::new(sys::errno::ENOSYS) {
-    Some(e) => e,
-    None => Errno::EINVAL,
-};
 
 /// The bytes of a slice of padding-free plain values (`u16`, `u32`, `u64`,
 /// `drm_mode_modeinfo`).

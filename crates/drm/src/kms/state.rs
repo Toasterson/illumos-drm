@@ -422,6 +422,32 @@ pub trait KmsDriver<B: FbBacking>: Send + Sync {
     fn set_gamma(&self, crtc: usize, r: &[u16], g: &[u16], b: &[u16]) {
         let _ = (crtc, r, g, b);
     }
+
+    /// Flushes changes of framebuffer `fb` to the display (`DIRTYFB`,
+    /// Linux's `drm_framebuffer_funcs.dirty`), for a device whose scanout
+    /// does not read the framebuffer memory itself. `planes` are the planes
+    /// that show `fb` on a CRTC now, `clips` the changed rectangles in
+    /// framebuffer coordinates (empty: all of it). Called with the
+    /// mode-setting lock held. The default fails with `ENOSYS`, which is
+    /// what Linux answers for a driver without damage handling.
+    fn dirty_fb(&self, fb: &FbRef<B>, planes: &[usize], clips: &[DirtyRect], ctx: &Sleepable) -> Result<(), Errno> {
+        let _ = (fb, planes, clips, ctx);
+        Err(Errno::new(ddi::sys::errno::ENOSYS).unwrap_or(Errno::EINVAL))
+    }
+}
+
+/// A changed rectangle of a framebuffer (`struct drm_clip_rect`), from
+/// `x1`, `y1` up to but not including `x2`, `y2`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirtyRect {
+    /// Left edge.
+    pub x1: u32,
+    /// Top edge.
+    pub y1: u32,
+    /// Right edge, exclusive.
+    pub x2: u32,
+    /// Bottom edge, exclusive.
+    pub y2: u32,
 }
 
 /// A plane check for drivers, after Linux's

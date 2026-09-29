@@ -41,5 +41,6 @@ mod tests;
 pub use dev::{Kms, VblankHandle};
 pub use objects::{ConnectorDesc, CrtcDesc, EncoderDesc, Framebuffer, Layout, PlaneDesc, PlaneType};
 pub use state::{
-    ConnectorState, ConnectorStatus, CrtcState, FbBacking, KmsDriver, PlaneState, Probe, StateView, check_plane_helper,
+    ConnectorState, ConnectorStatus, CrtcState, DirtyRect, FbBacking, KmsDriver, PlaneState, Probe, StateView,
+    check_plane_helper,
 };

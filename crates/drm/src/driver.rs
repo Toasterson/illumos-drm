@@ -264,6 +264,14 @@ pub trait Driver: Send + Sync + Sized + 'static {
         None
     }
 
+    /// Called in `close(9E)` of file `file` after the core released the
+    /// file's mode-setting state, GEM handles and sync objects, before its
+    /// clone id is freed (Linux's `postclose`): a driver drops its
+    /// per-file state here (virtio-gpu destroys the file's rendering
+    /// context).
+    #[cfg(not(test))]
+    fn file_close(&self, _dev: &crate::Device<Self>, _file: crate::minor::CloneId, _ctx: &ddi::Sleepable) {}
+
     /// Called in `detach(9E)` once no file is open, before the core checks
     /// whether the detach can proceed: the driver drops the references it
     /// holds on its own that would keep GEM objects alive (timers, work in

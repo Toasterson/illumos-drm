@@ -456,6 +456,7 @@ impl<D: Driver> CharDevice for Device<D> {
                 g.file_close(c, ctx);
             }
             self.sync.file_close(c, ctx);
+            self.driver.file_close(self, c, ctx);
             self.state.lock().close(c);
         }
         Ok(())

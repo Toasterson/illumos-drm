@@ -311,9 +311,11 @@ impl<O: GemObject> SyncCore<O> {
         self.anon.export(&self.dev, AnonObj::SyncFile(sf), flags, arg, write_fd, &self.domain.stats, ctx)
     }
 
-    /// Returns the fence of sync file descriptor `fd`; `EINVAL` for another
-    /// kind of file.
-    pub(crate) fn sync_file_fence(&self, fd: i32, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<Fence, Errno> {
+    /// Returns the fence of sync file descriptor `fd` of the calling
+    /// process, from inside an ioctl; `EINVAL` for another kind of file or
+    /// a sync file of another driver. For drivers whose submissions take an
+    /// in-fence.
+    pub fn sync_file_fence(&self, fd: i32, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<Fence, Errno> {
         match self.lookup(fd, arg, false, ctx)? {
             AnonObj::SyncFile(sf) => {
                 let f = sf.fence().clone();
