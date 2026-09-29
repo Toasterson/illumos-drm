@@ -19,7 +19,7 @@
 //!
 //! # Vblanks and events
 //!
-//! A driver reports each vblank with [`VblankHandle::vblank`], from thread
+//! A driver reports each vblank with [`KmsEvents::vblank`] (through its [`VblankHandle`]), from thread
 //! context, a task queue, a level-0 `ddi_periodic(9F)` callback or a
 //! `timeout(9F)` callback; the event lock is an adaptive mutex without an
 //! interrupt priority, so hardware interrupt handlers must pass vblanks on
