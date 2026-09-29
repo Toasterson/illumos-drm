@@ -1493,6 +1493,111 @@ leave_pending(void)
 	return (0);
 }
 
+/*
+ * The refused detach (run-r1-test.sh). "pending-hold": a 10 s fence is left
+ * pending in the reservation of a buffer that rdrmnull keeps a reference
+ * to (RDRMNULL_IOCTL_HOLD) after every file is closed; the detach cancels
+ * the fence, then is refused, because the buffer and the fence in its
+ * reservation are still alive. "after-refusal": the sync paths still work
+ * (the test timeline signals from its soft interrupt, a sync file wakes
+ * poll(2)). "release": rdrmnull drops the buffer, and fences and buffers
+ * are gone.
+ */
+struct rdrmnull_hold {
+	uint32_t handle, hold;
+};
+#define	RDRMNULL_IOCTL_HOLD DRM_IOW(DRM_COMMAND_BASE + 0x04, struct rdrmnull_hold)
+
+static uint64_t
+gem_objects(void)
+{
+	static const char *const k[] = { "objects" };
+	uint64_t v = UINT64_MAX;
+
+	(void) kstat_values("gem", k, &v, 1);
+	return (v);
+}
+
+static int
+pending_hold(void)
+{
+	struct rdrmnull_hold hd;
+	int fd = open_node(CARD);
+	uint32_t h;
+
+	check(fd >= 0, "pending-hold: open card0");
+	if (fd < 0)
+		return (failures);
+	h = dumb(fd, 64, 64, NULL);
+	check(h != 0, "pending-hold: a 64x64 dumb buffer");
+	check(null_fence(fd, 10000, FENCE_BO_WRITE, 0, 0, h, 0, NULL) == 0,
+	    "a 10 s fence pending in its reservation (writer)");
+	(void) memset(&hd, 0, sizeof (hd));
+	hd.handle = h;
+	hd.hold = 1;
+	check(xioctl_err(fd, RDRMNULL_IOCTL_HOLD, &hd) == 0,
+	    "rdrmnull keeps a reference to the buffer (RDRMNULL_IOCTL_HOLD)");
+	(void) close(fd);
+	(void) usleep(100000);
+	check(gem_objects() == 1 && sync_counter("fences") == 1,
+	    "with no file open, the buffer and its pending fence are alive");
+	(void) printf("drm_r2_test pending-hold: %d failures\n", failures);
+	return (failures);
+}
+
+static int
+after_refusal(void)
+{
+	int fd = open_node(RENDER), sfd = -1;
+	uint32_t so = 0;
+	struct pollfd pf;
+	int64_t t0;
+
+	check(fd >= 0, "after-refusal: open renderD128");
+	if (fd < 0)
+		return (failures);
+	check(gem_objects() == 1 && sync_counter("fences") == 1,
+	    "the held buffer and the fence in its reservation are still alive");
+	check(drmSyncobjCreate(fd, 0, &so) == 0, "a sync object");
+	t0 = now_ns();
+	check(null_fence(fd, 100, FENCE_SYNCOBJ, so, 0, 0, 0, NULL) == 0,
+	    "a 100 ms fence of the test timeline into it");
+	check(drmSyncobjWait(fd, &so, 1, now_ns() + ms_ns(5000), 0, NULL) == 0 &&
+	    now_ns() - t0 >= ms_ns(90),
+	    "the timeline still signals it from its soft interrupt");
+	check(null_fence(fd, 100, FENCE_SYNC_FILE, 0, 0, 0, 0, &sfd) == 0 && sfd >= 0,
+	    "a 100 ms fence as a sync file");
+	pf.fd = sfd;
+	pf.events = POLLIN;
+	pf.revents = 0;
+	check(poll(&pf, 1, 5000) == 1 && (pf.revents & POLLIN) != 0,
+	    "poll(2) of the sync file wakes when it signals");
+	(void) close(sfd);
+	(void) drmSyncobjDestroy(fd, so);
+	(void) close(fd);
+	(void) printf("drm_r2_test after-refusal: %d failures\n", failures);
+	return (failures);
+}
+
+static int
+release_hold(void)
+{
+	struct rdrmnull_hold hd;
+	int fd = open_node(CARD);
+
+	check(fd >= 0, "release: open card0");
+	if (fd < 0)
+		return (failures);
+	(void) memset(&hd, 0, sizeof (hd));
+	check(xioctl_err(fd, RDRMNULL_IOCTL_HOLD, &hd) == 0,
+	    "release: rdrmnull drops the buffer it kept");
+	(void) close(fd);
+	check(sync_idle(1) && gem_objects() == 0,
+	    "the buffer and its cancelled fence are gone");
+	(void) printf("drm_r2_test release: %d failures\n", failures);
+	return (failures);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1506,6 +1611,12 @@ main(int argc, char **argv)
 		return (syncobj_child(atoi(argv[2])));
 	if (argc == 2 && strcmp(argv[1], "pending") == 0)
 		return (leave_pending());
+	if (argc == 2 && strcmp(argv[1], "pending-hold") == 0)
+		return (pending_hold());
+	if (argc == 2 && strcmp(argv[1], "after-refusal") == 0)
+		return (after_refusal());
+	if (argc == 2 && strcmp(argv[1], "release") == 0)
+		return (release_hold());
 
 	card = open_node(CARD);
 	render = open_node(RENDER);

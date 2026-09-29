@@ -15,7 +15,11 @@
 #   drm_r1_test.c    tools/test/drm_r1_test.c
 #   drm_r2_test.c    tools/test/drm_r2_test.c (optional: the R2 test runs
 #                    when it is present; fences, sync objects, sync files,
-#                    PRIME, with the sync kstat recorded before unload)
+#                    PRIME, with the sync kstat recorded before unload,
+#                    and a refused detach that must leave the display and
+#                    the sync paths working, checked with modetest from
+#                    $MODETEST, default /opt/drm-tests/amd64/modetest,
+#                    package system/test/libdrm)
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #
 # RDRMNULL_CONF names another .conf to install instead of rdrmnull.conf:
@@ -77,6 +81,58 @@ case $(sed -e 's/#.*//' "$CONF" | tr -d ' \t') in
 *) RDRMNULL_DMA=0 ;;
 esac
 export RDRMNULL_DMA
+
+MODETEST=${MODETEST:-/opt/drm-tests/amd64/modetest}
+
+# A refused detach must leave the device working (R2). drm_r2_test
+# pending-hold leaves a 10 s fence pending in the reservation of a buffer
+# that rdrmnull keeps a reference to after every file is closed; the detach
+# cancels the fence (ECANCELED), then is refused, because the buffer and
+# the fence are alive. Every detach check runs before anything is torn
+# down, so the display (modetest, from package system/test/libdrm) and the
+# sync paths (drm_r2_test after-refusal) must still work; drm_r2_test
+# release then drops the buffer.
+refused_detach_steps() {
+	step ./drm_r2_test pending-hold || fail=1
+	refusals=$(grep -c 'detach refused' /var/adm/messages)
+	cancels=$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)
+	if step modunload -i "$id"; then
+		echo "FAIL modunload succeeded while rdrmnull held a buffer with a pending fence"
+		fail=1
+	else
+		echo "PASS modunload refused while rdrmnull holds a buffer with a pending fence"
+	fi
+	step sh -c 'grep "detach" /var/adm/messages | tail -3'
+	if [ "$(grep -c 'detach refused: GEM state in use' /var/adm/messages)" -gt 0 ] &&
+	    [ "$(grep -c 'detach refused' /var/adm/messages)" -gt "$refusals" ]; then
+		echo "PASS detach(9E) refused it: GEM state in use"
+	else
+		echo "FAIL no detach(9E) refusal was logged"
+		fail=1
+	fi
+	if [ "$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)" -gt "$cancels" ]; then
+		echo "PASS the refused detach cancelled the pending fence first"
+	else
+		echo "FAIL the refused detach did not cancel the pending fence"
+		fail=1
+	fi
+	step sh -c 'modinfo | grep rdrmnull'
+	gemstat "after the refused detach"
+	if [ ! -x "$MODETEST" ]; then
+		echo "FAIL modetest not found at $MODETEST"
+		fail=1
+	elif step sh -c "$MODETEST -M rdrmnull -c > modetest-refused.out 2>&1" &&
+	    grep -q '^Connectors:' modetest-refused.out && grep -q 'connected' modetest-refused.out &&
+	    grep -q '1024x768' modetest-refused.out; then
+		echo "PASS after the refused detach, modetest lists the connector and its modes"
+	else
+		cat modetest-refused.out
+		echo "FAIL after the refused detach, modetest listing"
+		fail=1
+	fi
+	step ./drm_r2_test after-refusal || fail=1
+	step ./drm_r2_test release || fail=1
+}
 
 fail=0
 had_dri=no
@@ -188,11 +244,15 @@ if [ $fail -eq 0 ]; then
 	wait $holder
 	echo "holder exited with $?"
 	rm -f hold.fifo
+	if [ $R2 = yes ] && [ -n "$id" ]; then
+		refused_detach_steps
+	fi
 	if [ $R2 = yes ]; then
 		# A fence left pending with no file open: the detach must cancel
 		# it (ECANCELED) instead of waiting 10 s or refusing.
 		step ./drm_r2_test pending || fail=1
 	fi
+	cancels=$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)
 	gemstat "before unload"
 	if [ -n "$id" ] && step modunload -i "$id"; then
 		echo "PASS modunload succeeded after the file was closed"
@@ -201,7 +261,7 @@ if [ $fail -eq 0 ]; then
 		fail=1
 	fi
 	if [ $R2 = yes ]; then
-		if tail -20 /var/adm/messages | grep -q "detach cancelled 1 pending test fences"; then
+		if [ "$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)" -gt "$cancels" ]; then
 			echo "PASS the detach cancelled the pending fence"
 		else
 			echo "FAIL no cancelled fence was reported by the detach"
