@@ -47,6 +47,8 @@ pub mod ioctl;
 pub mod kms;
 pub mod object;
 pub mod proto;
+#[cfg(test)]
+mod tests;
 
 use core::ffi::CStr;
 use core::fmt;

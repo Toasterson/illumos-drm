@@ -32,7 +32,9 @@
 //! device answers it only when the work is done (for virgl, when the host
 //! renderer signalled the fence). Fence ids are taken and requests queued
 //! under one mutex, so the ids of a fence context reach the device in
-//! order, and the device completes them in that order. The request's
+//! order, and the device completes the fences of one context (its own, or
+//! one ring of a context) in that order; nothing orders two contexts, so
+//! an in-fence of another context is waited for before a submission. The request's
 //! completion signals its [`Fence`], on the device's fence context or on a
 //! ring context of the file (`CONTEXT_INIT` with rings).
 
@@ -126,6 +128,21 @@ pub struct Cmd {
     fence: Mutex<Option<Fence>>,
     /// GEM objects the device uses for this request.
     objs: Mutex<KVec<GemRef<VgObject>>>,
+}
+
+impl Drop for Cmd {
+    /// A request is dropped after its completion took the fence, or when
+    /// its submission failed (which signals it). A fenced request still in
+    /// flight at detach would be evacuated with its fence unsignalled, but
+    /// the DRM core refuses the detach while any fence of the device is
+    /// alive, and the request holds one; so this only reports a broken
+    /// invariant.
+    fn drop(&mut self) {
+        if let Some(f) = self.fence.get_mut().take() {
+            ddi::kwarn!("virtio_gpu: a fenced request was dropped unsignalled (seqno {})", f.seqno());
+            drop(f);
+        }
+    }
 }
 
 impl Cmd {
@@ -242,6 +259,75 @@ pub struct FileCtx {
     pub ring_base: u64,
     /// `CONTEXT_INIT`: the debug name.
     pub name: Vec<u8>,
+}
+
+/// The parameters of `CONTEXT_INIT`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextParams {
+    /// `VIRTGPU_CONTEXT_PARAM_CAPSET_ID`, 0 if not given.
+    pub capset: u32,
+    /// `VIRTGPU_CONTEXT_PARAM_NUM_RINGS`.
+    pub rings: u32,
+    /// `VIRTGPU_CONTEXT_PARAM_DEBUG_NAME`, without its NUL.
+    pub name: Vec<u8>,
+}
+
+/// One parameter of `CONTEXT_INIT` as userland sent it; the debug name
+/// is already read from user memory.
+pub enum ContextParam {
+    /// `VIRTGPU_CONTEXT_PARAM_CAPSET_ID`.
+    Capset(u64),
+    /// `VIRTGPU_CONTEXT_PARAM_NUM_RINGS`.
+    Rings(u64),
+    /// `VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK`.
+    PollRings(u64),
+    /// `VIRTGPU_CONTEXT_PARAM_DEBUG_NAME`.
+    Name(Vec<u8>),
+}
+
+/// The most rings of a context (Linux's `VIRTGPU_MAX_RINGS`... 64).
+pub const MAX_RINGS: u64 = 64;
+
+/// Checks the parameters of `CONTEXT_INIT` against the device's
+/// capability sets (`capset_mask`), as Linux does: each parameter at most
+/// once, a capability set the device has, at most 64 rings. A polled ring
+/// mask other than 0 is refused, because its fence events would need a
+/// per-file event queue outside mode setting.
+pub fn parse_context_params(params: Vec<ContextParam>, capset_mask: u64) -> Result<ContextParams, Errno> {
+    let mut out = ContextParams::default();
+    let (mut capset, mut rings, mut poll, mut name) = (false, false, false, false);
+    let once = |seen: &mut bool| -> Result<(), Errno> {
+        if core::mem::replace(seen, true) { Err(Errno::EINVAL) } else { Ok(()) }
+    };
+    for p in params {
+        match p {
+            ContextParam::Capset(v) => {
+                once(&mut capset)?;
+                if v == 0 || v >= 64 || capset_mask & (1 << v) == 0 {
+                    return Err(Errno::EINVAL);
+                }
+                out.capset = v as u32;
+            }
+            ContextParam::Rings(v) => {
+                once(&mut rings)?;
+                if v > MAX_RINGS {
+                    return Err(Errno::EINVAL);
+                }
+                out.rings = v as u32;
+            }
+            ContextParam::PollRings(v) => {
+                once(&mut poll)?;
+                if v != 0 {
+                    return Err(Errno::EINVAL);
+                }
+            }
+            ContextParam::Name(n) => {
+                once(&mut name)?;
+                out.name = n;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Counters for the `virtio_gpu` kstat and the log.
@@ -374,13 +460,12 @@ impl Gpu {
 
     /// A new resource id (never 0).
     pub fn resource_id(&self) -> Result<u32, Errno> {
-        let id = self.next_resource.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-        if id == 0 || id == u32::MAX {
-            // Four billion resources: refuse rather than reuse ids the
-            // device may still know.
-            return Err(Errno::ENOSPC);
-        }
-        Ok(id)
+        // After four billion resources, refuse rather than reuse ids the
+        // device may still know: the counter stops at its maximum.
+        self.next_resource
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1).filter(|&m| m < u32::MAX))
+            .map(|n| n + 1)
+            .map_err(|_| Errno::ENOSPC)
     }
 
     // --- requests ---
@@ -629,8 +714,12 @@ impl Gpu {
         Ok(Some(edid))
     }
 
-    /// `GET_CAPSET_INFO` for every capability set.
+    /// `GET_CAPSET_INFO` for every capability set (the first 64; ids fit
+    /// in `SUPPORTED_CAPSET_IDs`, a 64-bit mask, only below 64 anyway).
     pub fn capset_infos(&self, dev: &Dev, n: u32, ctx: &Sleepable) -> Result<Vec<CapsetInfo>, Errno> {
+        if n > 64 {
+            dev_warn(self.instance, format_args!("the device reports {n} capability sets; using the first 64"));
+        }
         let mut v = Vec::new();
         for i in 0..n.min(64) {
             let req =
@@ -682,6 +771,34 @@ impl Gpu {
             return Ok(id);
         }
         let _g = self.ctx_lock.lock();
+        self.create_context_locked(dev, id, ctx)
+    }
+
+    /// `CONTEXT_INIT`: sets the capability set, the rings and the name of
+    /// the context of `file` and creates it, all under the context lock,
+    /// so that of two concurrent calls the second finds the context and
+    /// fails with `EEXIST`, as Linux's `context_lock` makes it.
+    pub fn init_context(&self, dev: &Dev, file: CloneId, p: &ContextParams, ctx: &Sleepable) -> Result<(), Errno> {
+        let id = Self::ctx_id(file);
+        let domain = self.domain()?;
+        let _g = self.ctx_lock.lock();
+        {
+            let mut files = self.files.lock();
+            let f = files.entry(id).or_default();
+            if f.created {
+                return Err(Errno::EEXIST);
+            }
+            f.capset = p.capset;
+            f.num_rings = p.rings;
+            f.ring_base = if p.rings > 0 { domain.alloc_contexts(u64::from(p.rings)) } else { 0 };
+            f.name = p.name.clone();
+        }
+        self.create_context_locked(dev, id, ctx).map(drop)
+    }
+
+    /// Sends `CTX_CREATE` for context `id` unless it exists; the caller
+    /// holds `ctx_lock`.
+    fn create_context_locked(&self, dev: &Dev, id: u32, ctx: &Sleepable) -> Result<u32, Errno> {
         let (capset, name) = {
             let files = self.files.lock();
             match files.get(&id) {
@@ -715,14 +832,6 @@ impl Gpu {
         Ok(id)
     }
 
-    /// Runs `f` on the (possibly new) state of file `file` under the
-    /// context creation lock, for `CONTEXT_INIT`.
-    pub fn with_file<R>(&self, file: CloneId, f: impl FnOnce(&mut FileCtx) -> R) -> R {
-        let _g = self.ctx_lock.lock();
-        let mut files = self.files.lock();
-        f(files.entry(Self::ctx_id(file)).or_default())
-    }
-
     /// The fence request of a submission of `file` on `ring` (`None`: the
     /// device's own context).
     pub fn file_fence(&self, file: CloneId, ring: Option<u32>) -> Result<FenceReq, Errno> {
@@ -737,18 +846,6 @@ impl Gpu {
                 Ok(FenceReq { context: f.ring_base + u64::from(r), ring: Some(r as u8) })
             }
         }
-    }
-
-    /// Whether `context` is one of this device's fence contexts, whose
-    /// fences the device orders itself.
-    pub fn own_context(&self, file: CloneId, context: u64) -> bool {
-        if context == self.fence_context() {
-            return true;
-        }
-        let files = self.files.lock();
-        files.get(&Self::ctx_id(file)).is_some_and(|f| {
-            f.num_rings > 0 && context >= f.ring_base && context < f.ring_base + u64::from(f.num_rings)
-        })
     }
 
     /// Destroys the context of a closing file.
@@ -788,7 +885,7 @@ fn build_chain<'a>(c: &'a Cmd, ch: &mut Chain<'a>) -> Result<(), VirtioError> {
 /// `ok` is 0), `ENOMEM` for the device's out-of-memory, `EINVAL` for a
 /// parameter the device refused, `EIO` otherwise.
 pub fn check(t: u32, ok: u32) -> Result<(), Errno> {
-    if (ok == 0 && proto::resp_ok(t)) || t == ok {
+    if (ok == 0 && proto::resp_ok(t)) || (ok != 0 && t == ok) {
         return Ok(());
     }
     Err(match t {

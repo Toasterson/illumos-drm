@@ -649,19 +649,3 @@ pub fn resp_name(t: u32) -> &'static str {
         _ => "unknown response",
     }
 }
-
-/// The virtio-gpu format of a DRM fourcc format that a 2D resource can
-/// scan out, as Linux's `virtio_gpu_translate_format` maps them on a
-/// little-endian guest.
-pub fn format_of(fourcc: u32) -> Option<u32> {
-    use drm::kms::formats::{ARGB8888, XRGB8888};
-    const BGRX8888: u32 = u32::from_le_bytes(*b"BX24");
-    const BGRA8888: u32 = u32::from_le_bytes(*b"BA24");
-    match fourcc {
-        XRGB8888 => Some(FORMAT_B8G8R8X8_UNORM),
-        ARGB8888 => Some(FORMAT_B8G8R8A8_UNORM),
-        BGRX8888 => Some(FORMAT_X8R8G8B8_UNORM),
-        BGRA8888 => Some(FORMAT_A8R8G8B8_UNORM),
-        _ => None,
-    }
-}

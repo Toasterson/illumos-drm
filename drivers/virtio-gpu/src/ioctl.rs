@@ -25,14 +25,12 @@ use drm::uaccess::{UserArg, copy_in_array, copy_in_bytes, copy_out_bytes};
 use drm_uapi as uapi;
 
 use crate::VirtioGpu;
-use crate::gpu::{self, Dev, Q};
+use crate::gpu::{self, ContextParam, Dev, FenceReq, Q, parse_context_params};
 use crate::object::{self, Create, Kind, VgObject};
 use crate::proto::{self, CtrlHdr};
 
 /// `VIRTGPU_CONTEXT_PARAM_DEBUG_NAME`.
 const CONTEXT_PARAM_DEBUG_NAME: u64 = 4;
-/// The most rings of a context (Linux's `VIRTGPU_MAX_RINGS`... 64).
-const MAX_RINGS: u64 = 64;
 /// The largest command stream of one `EXECBUFFER` or blob creation. Linux
 /// has no limit but memory; Mesa 21.3 sends at most 266,240 bytes.
 const MAX_COMMAND: u32 = gpu::MAX_DATA as u32;
@@ -401,39 +399,22 @@ impl VirtioGpu {
         if !caps.context_init {
             return Err(Errno::EINVAL);
         }
-        if v.num_params == 0 || v.num_params > 16 {
+        // Four parameters exist, each allowed once.
+        if v.num_params > 4 {
             return Err(Errno::EINVAL);
         }
-        let params = copy_in_array::<uapi::drm_virtgpu_context_set_param>(
+        let raw = copy_in_array::<uapi::drm_virtgpu_context_set_param>(
             arg,
             v.ctx_set_params as usize,
             v.num_params as usize,
             ctx,
         )?;
-        let mut capset = 0u32;
-        let mut rings = 0u32;
-        let mut name: Vec<u8> = Vec::new();
-        for p in params.iter() {
-            match p.param {
-                x if x == u64::from(uapi::VIRTGPU_CONTEXT_PARAM_CAPSET_ID) => {
-                    if p.value >= 64 || caps.capset_mask() & (1 << p.value) == 0 || capset != 0 {
-                        return Err(Errno::EINVAL);
-                    }
-                    capset = p.value as u32;
-                }
-                x if x == u64::from(uapi::VIRTGPU_CONTEXT_PARAM_NUM_RINGS) => {
-                    if p.value > MAX_RINGS {
-                        return Err(Errno::EINVAL);
-                    }
-                    rings = p.value as u32;
-                }
-                // Signalled-fence events on a polled ring need a driver event
-                // queue per file, which the core has for mode setting only.
-                x if x == u64::from(uapi::VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK) => {
-                    if p.value != 0 {
-                        return Err(Errno::EINVAL);
-                    }
-                }
+        let mut params = Vec::new();
+        for p in raw.iter() {
+            params.push(match p.param {
+                x if x == u64::from(uapi::VIRTGPU_CONTEXT_PARAM_CAPSET_ID) => ContextParam::Capset(p.value),
+                x if x == u64::from(uapi::VIRTGPU_CONTEXT_PARAM_NUM_RINGS) => ContextParam::Rings(p.value),
+                x if x == u64::from(uapi::VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK) => ContextParam::PollRings(p.value),
                 CONTEXT_PARAM_DEBUG_NAME => {
                     let mut b = [0u8; 64];
                     copy_in_bytes(arg, p.value as usize, &mut b[..63]).or_else(|_| {
@@ -442,26 +423,13 @@ impl VirtioGpu {
                         read_cstr(arg, p.value as usize, &mut b[..63])
                     })?;
                     let n = b.iter().position(|&c| c == 0).unwrap_or(63);
-                    name = b[..n].to_vec();
+                    ContextParam::Name(b[..n].to_vec())
                 }
                 _ => return Err(Errno::EINVAL),
-            }
+            });
         }
-        let domain = gpu.domain()?;
-        let r = gpu.with_file(file, |f| {
-            if f.created {
-                return Err(Errno::EEXIST);
-            }
-            f.capset = capset;
-            f.num_rings = rings;
-            if rings > 0 {
-                f.ring_base = domain.alloc_contexts(u64::from(rings));
-            }
-            f.name = name;
-            Ok(())
-        });
-        r?;
-        gpu.ensure_context(self.dev(), file, ctx).map(drop)
+        let parsed = parse_context_params(params, caps.capset_mask())?;
+        gpu.init_context(self.dev(), file, &parsed, ctx)
     }
 
     /// `DRM_IOCTL_VIRTGPU_EXECBUFFER`, in any of its three layouts (`size`
@@ -486,7 +454,7 @@ impl VirtioGpu {
         }
         let ring = (x.flags & uapi::VIRTGPU_EXECBUF_RING_IDX != 0).then_some(x.ring_idx);
         // Checks the ring before anything is created (EINVAL).
-        gpu.file_fence(file, ring)?;
+        let own = gpu.file_fence(file, ring)?;
         let sync = dev.sync();
         let gem = dev.gem().ok_or(Errno::ENXIO)?;
         if (x.num_in_syncobjs != 0 || x.num_out_syncobjs != 0)
@@ -531,7 +499,7 @@ impl VirtioGpu {
                 }
             }
         }
-        let r = self.execbuffer_locked(dev, file, &x, ring, &ins, &out_objs, &bos, arg, ctx);
+        let r = self.execbuffer_locked(dev, file, &x, (ring, own), &ins, &out_objs, &bos, arg, ctx);
         put_all(bos, ctx);
         for (s, _) in out_objs {
             drop(s);
@@ -545,7 +513,7 @@ impl VirtioGpu {
         dev: &drm::Device<Self>,
         file: CloneId,
         x: &uapi::drm_virtgpu_execbuffer,
-        ring: Option<u32>,
+        (ring, own): (Option<u32>, FenceReq),
         ins: &KVec<uapi::drm_virtgpu_execbuffer_syncobj>,
         outs: &[(Syncobj, u64)],
         bos: &KVec<GemRef<VgObject>>,
@@ -558,7 +526,7 @@ impl VirtioGpu {
         // for here, interruptibly, as Linux does.
         if x.flags & uapi::VIRTGPU_EXECBUF_FENCE_FD_IN != 0 {
             let f = sync.sync_file_fence(x.fence_fd, arg, ctx)?;
-            let r = self.wait_foreign(file, &f, ctx);
+            let r = self.wait_foreign(own, &f, ctx);
             f.put(Ctx::Sleep(ctx));
             r?;
         }
@@ -566,7 +534,7 @@ impl VirtioGpu {
         for s in ins.iter() {
             let so = sync.syncobj(file, s.handle)?;
             let f = so.find_fence(s.point, false, ctx)?;
-            let r = self.wait_foreign(file, &f, ctx);
+            let r = self.wait_foreign(own, &f, ctx);
             f.put(Ctx::Sleep(ctx));
             r?;
             if s.flags & uapi::VIRTGPU_EXECBUF_SYNCOBJ_RESET != 0 {
@@ -604,10 +572,12 @@ impl VirtioGpu {
         r
     }
 
-    /// Waits for fence `f` unless it is one of the device's own contexts,
-    /// whose order the device keeps.
-    fn wait_foreign(&self, file: CloneId, f: &Fence, ctx: &Sleepable) -> Result<(), Errno> {
-        if self.dev().state().own_context(file, f.context()) {
+    /// Waits for fence `f` unless it is on `own`, the fence context of the
+    /// submission, whose order the device keeps (Linux's
+    /// `dma_fence_match_context`); fences of other contexts, other rings of
+    /// the same file included, are waited for here, interruptibly.
+    fn wait_foreign(&self, own: FenceReq, f: &Fence, ctx: &Sleepable) -> Result<(), Errno> {
+        if f.context() == own.context {
             return Ok(());
         }
         f.wait(true, None, ctx)

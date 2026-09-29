@@ -196,8 +196,10 @@ fn fb_fits(fb: &Fb) -> bool {
         Some(Kind::Res2d { width, height }) => {
             fb.pitches[0] == width.saturating_mul(4) && fb.offsets[0] == 0 && fb.width <= width && fb.height <= height
         }
-        Some(Kind::Res3d | Kind::Blob { .. }) => true,
-        Some(Kind::None) | None => false,
+        Some(Kind::Res3d) => true,
+        // A blob needs SET_SCANOUT_BLOB, which this driver does not send;
+        // with HOST_VISIBLE 0, Mesa does not scan out blobs.
+        Some(Kind::Blob { .. } | Kind::None) | None => false,
     }
 }
 
@@ -430,26 +432,31 @@ impl KmsDriver<GemRef<VgObject>> for GpuKms {
         }
     }
 
+    /// Transfers and flushes the bounding box of the damage once, as
+    /// Linux merges plane damage (`drm_atomic_helper_damage_merged`): one
+    /// `RESOURCE_FLUSH` updates every scanout that shows the resource. A
+    /// cursor is sent again by its next update.
     fn dirty_fb(&self, fb: &Fb, planes: &[usize], clips: &[DirtyRect], ctx: &Sleepable) -> Result<(), Errno> {
         let Some(obj) = fb_object(fb) else { return Ok(()) };
-        let full = [DirtyRect { x1: 0, y1: 0, x2: fb.width, y2: fb.height }];
-        let clips = if clips.is_empty() { &full[..] } else { clips };
-        for &p in planes {
-            if p % 2 == 1 {
-                // A cursor is re-sent by its next update.
-                continue;
-            }
-            for c in clips {
-                let (x1, y1) = (c.x1.min(fb.width), c.y1.min(fb.height));
-                let (x2, y2) = (c.x2.min(fb.width), c.y2.min(fb.height));
-                if x2 <= x1 || y2 <= y1 {
-                    continue;
-                }
-                let r = Rect { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
-                let offset = matches!(obj.kind(), Kind::Res2d { .. }).then(|| pixel_offset(fb, x1, y1));
-                self.flush(obj.res(), r, offset, ctx)?;
-            }
+        if !planes.iter().any(|p| p % 2 == 0) {
+            return Ok(());
         }
-        Ok(())
+        let Some(b) = merge_clips(clips, fb.width, fb.height) else { return Ok(()) };
+        let r = Rect { x: b.x1, y: b.y1, width: b.x2 - b.x1, height: b.y2 - b.y1 };
+        let offset = matches!(obj.kind(), Kind::Res2d { .. }).then(|| pixel_offset(fb, b.x1, b.y1));
+        self.flush(obj.res(), r, offset, ctx)
     }
+}
+
+/// The bounding box of `clips` clamped to a `w` by `h` framebuffer (all
+/// of it for no clips), `None` if nothing of it is left.
+pub fn merge_clips(clips: &[DirtyRect], w: u32, h: u32) -> Option<DirtyRect> {
+    if clips.is_empty() {
+        return (w > 0 && h > 0).then_some(DirtyRect { x1: 0, y1: 0, x2: w, y2: h });
+    }
+    clips
+        .iter()
+        .map(|c| DirtyRect { x1: c.x1.min(w), y1: c.y1.min(h), x2: c.x2.min(w), y2: c.y2.min(h) })
+        .filter(|c| c.x2 > c.x1 && c.y2 > c.y1)
+        .reduce(|a, c| DirtyRect { x1: a.x1.min(c.x1), y1: a.y1.min(c.y1), x2: a.x2.max(c.x2), y2: a.y2.max(c.y2) })
 }
