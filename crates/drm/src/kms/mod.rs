@@ -6,13 +6,25 @@
 
 pub mod atomic;
 pub mod core;
+#[cfg(not(test))]
+pub mod dev;
 pub mod edid;
 pub mod events;
 pub mod formats;
+pub mod ioctl;
 pub mod legacy;
 pub mod modes;
 pub mod objects;
 pub mod props;
+#[cfg(not(test))]
+pub mod soft;
 pub mod state;
 #[cfg(test)]
 mod tests;
+
+#[cfg(not(test))]
+pub use dev::{Kms, VblankHandle};
+pub use objects::{ConnectorDesc, CrtcDesc, EncoderDesc, Framebuffer, Layout, PlaneDesc, PlaneType};
+pub use state::{
+    ConnectorState, ConnectorStatus, CrtcState, FbBacking, KmsDriver, PlaneState, Probe, StateView, check_plane_helper,
+};

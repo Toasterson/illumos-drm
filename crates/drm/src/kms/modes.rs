@@ -22,11 +22,8 @@ use drm_uapi as uapi;
 /// (`DRM_DISPLAY_MODE_LEN`).
 pub const NAME_LEN: usize = uapi::DRM_DISPLAY_MODE_LEN as usize;
 
-/// `ERANGE`, which `ddi::Errno` has no constant for.
-pub const ERANGE: Errno = match Errno::new(ddi::sys::errno::ERANGE) {
-    Some(e) => e,
-    None => Errno::EINVAL,
-};
+/// `ERANGE`, for the checks that Linux answers with it.
+pub const ERANGE: Errno = Errno::ERANGE;
 
 /// The picture aspect ratio of a mode (`HDMI_PICTURE_ASPECT_*`), which the
 /// uAPI carries in `DRM_MODE_FLAG_PIC_AR_*` for clients that set

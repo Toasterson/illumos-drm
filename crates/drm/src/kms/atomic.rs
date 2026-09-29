@@ -44,11 +44,8 @@ use super::objects::{FbRef, ObjKind, PlaneType};
 use super::props::Prop;
 use super::state::{AtomicState, CommitFlags, FbBacking, KmsDriver, OldState, StateView};
 
-/// `ENOSPC`, which `ddi::Errno` has no constant for.
-pub const ENOSPC: Errno = match Errno::new(ddi::sys::errno::ENOSPC) {
-    Some(e) => e,
-    None => Errno::EINVAL,
-};
+/// `ENOSPC`, for source rectangles outside their framebuffer.
+pub const ENOSPC: Errno = Errno::ENOSPC;
 
 /// A vblank on/off change of a CRTC for the event layer: the CRTC index,
 /// whether it is now active, and the frame length of its mode in ns.

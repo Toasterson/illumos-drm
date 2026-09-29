@@ -50,6 +50,8 @@ use crate::dumb::DumbRequest;
 use crate::gem::{GemCore, registry};
 use crate::ioctl::{self, Entry, Op};
 use crate::karc::KArc;
+use crate::kms::dev::{Caller, Kms};
+use crate::kms::ioctl as kmsioctl;
 use crate::minor::{self, CloneId, MAX_DEVICES, NodeKind};
 use crate::offsets::PAGE_SIZE;
 use crate::state::{DeviceState, IF_MAJOR, IF_MINOR, Opener, SetVersion};
@@ -71,6 +73,8 @@ pub struct Device<D: Driver> {
     has_render: bool,
     /// The GEM state, for drivers with [`Features::GEM`].
     gem: Option<KArc<GemCore<D::Object>>>,
+    /// The mode-setting state, for drivers with a [`Driver::kms`].
+    kms: Option<Kms<D::Object>>,
     // Dropping these removes the minor nodes.
     _card: MinorNode,
     _render: Option<MinorNode>,
@@ -131,6 +135,23 @@ impl<D: Driver> Device<D> {
             dev.warn(format_args!("device {index} is registered twice"));
             return Err(DdiError);
         }
+        let kms = match driver.kms() {
+            Some(k) if gem.is_some() && D::FEATURES.contains(Features::MODESET) => {
+                let modifiers = D::MODE_CONFIG.fb_modifiers;
+                match Kms::new(dev, k, D::FEATURES.contains(Features::ATOMIC), modifiers, ctx) {
+                    Ok(k) => Some(k),
+                    Err(e) => {
+                        dev.warn(format_args!("cannot set up mode setting: {e:?}"));
+                        return Err(DdiError);
+                    }
+                }
+            }
+            Some(_) => {
+                dev.warn(format_args!("mode setting needs MODESET and GEM"));
+                return Err(DdiError);
+            }
+            None => None,
+        };
         dev.report();
         Ok(Device {
             driver,
@@ -140,6 +161,7 @@ impl<D: Driver> Device<D> {
             state: Mutex::new(DeviceState::new()),
             has_render: render.is_some(),
             gem,
+            kms,
             _card: card,
             _render: render,
         })
@@ -172,6 +194,9 @@ impl<D: Driver> Device<D> {
             return Err((self, DdiError));
         }
         self.driver.before_detach(ctx);
+        if let Some(k) = &self.kms {
+            k.teardown(ctx);
+        }
         if let Some(g) = &self.gem {
             if let Err(s) = GemCore::quiesce(g, ctx) {
                 self.dev.warn(format_args!("detach refused: GEM state in use: {s:?}"));
@@ -185,6 +210,11 @@ impl<D: Driver> Device<D> {
     /// Returns the GEM state, if the driver has [`Features::GEM`].
     pub fn gem(&self) -> Option<&KArc<GemCore<D::Object>>> {
         self.gem.as_ref()
+    }
+
+    /// Returns the mode-setting state, if the driver has a [`Driver::kms`].
+    pub fn kms(&self) -> Option<&Kms<D::Object>> {
+        self.kms.as_ref()
     }
 
     /// Returns the driver's state.
@@ -338,6 +368,9 @@ impl<D: Driver> CharDevice for Device<D> {
             self.state.lock().close(clone);
             return Err(e);
         }
+        if let Some(k) = &self.kms {
+            k.file_open(clone, ctx);
+        }
         Ok(Some(Minor(m)))
     }
 
@@ -347,11 +380,25 @@ impl<D: Driver> CharDevice for Device<D> {
         // clone_open, so there is no file to forget.
         if let Some(c) = d.clone {
             self.state.lock().close(c);
+            // Framebuffers hold GEM references: release them first.
+            if let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) {
+                k.file_close(c, drv, ctx);
+            }
             if let Some(g) = &self.gem {
                 g.file_close(c, ctx);
             }
         }
         Ok(())
+    }
+
+    fn read(&self, minor: Minor, uio: &mut Uio<'_>, _cred: &Cred<'_>, ctx: &Sleepable) -> Result<()> {
+        let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
+        self.kms.as_ref().ok_or(Errno::ENXIO)?.read(c, uio, ctx)
+    }
+
+    fn chpoll(&self, minor: Minor, _events: PollEvents, _anyyet: bool) -> Result<(PollEvents, PollRegistration)> {
+        let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
+        self.kms.as_ref().ok_or(Errno::ENXIO)?.chpoll(c)
     }
 
     fn devmap(
@@ -375,7 +422,7 @@ impl<D: Driver> CharDevice for Device<D> {
         // anything else, as any caller would.
         let cmd = cmd.0 as u32;
         if arg.model() == DataModel::Ilp32 {
-            let known = ioctl::is_core_nr(cmd) || ioctl::is_driver_nr(D::IOCTLS, cmd);
+            let known = ioctl::is_core_nr(cmd) || ioctl::is_driver_nr(D::IOCTLS, cmd) || kmsioctl::is_kms_nr(cmd);
             return Err(if known { Errno::ENOTSUP } else { Errno::ENOTTY });
         }
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
@@ -383,6 +430,10 @@ impl<D: Driver> CharDevice for Device<D> {
         let privileged = &|| cred.has_sys_devices_priv();
         if let Some(entry) = ioctl::lookup(cmd) {
             self.core_ioctl(entry, c, privileged, &arg, ctx)?;
+            return Ok(0);
+        }
+        if let Some(entry) = kmsioctl::lookup(cmd) {
+            self.kms_ioctl(entry, c, privileged, &arg, ctx)?;
             return Ok(0);
         }
         let entry = ioctl::lookup_driver(D::IOCTLS, cmd).ok_or(Errno::ENOTTY)?;
@@ -393,6 +444,26 @@ impl<D: Driver> CharDevice for Device<D> {
 }
 
 impl<D: Driver> Device<D> {
+    /// A mode-setting ioctl: the permission check under the device mutex,
+    /// then the KMS layer (`EOPNOTSUPP` for a device without display).
+    fn kms_ioctl(
+        &self,
+        entry: &kmsioctl::KmsEntry,
+        c: CloneId,
+        privileged: &dyn Fn() -> bool,
+        arg: &IoctlArg<'_>,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        let (caps, master) = {
+            let s = self.state.lock();
+            s.permit(c, entry.perm, privileged)?;
+            (s.file(c).ok_or(Errno::ENXIO)?.caps, s.is_current_master(c))
+        };
+        let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) else { return Err(caps::EOPNOTSUPP) };
+        let who = Caller { file: c, caps, master, privileged };
+        k.ioctl(entry.op, &who, arg, self.gem.as_ref(), drv, ctx)
+    }
+
     fn gem_or(&self, e: Errno) -> Result<&KArc<GemCore<D::Object>>, Errno> {
         self.gem.as_ref().ok_or(e)
     }

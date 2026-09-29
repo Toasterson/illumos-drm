@@ -52,10 +52,8 @@ impl Features {
 /// Mode-setting properties that `GET_CAP` reports. Fields left at their
 /// defaults report what the core itself provides.
 ///
-/// The cursor size, `preferred_depth` and `prefer_shadow` are reported as
-/// given. `fb_modifiers` takes effect when the core implements `ADDFB2`
-/// (R3); until then `GET_CAP` reports 0 for it, because the ioctl it
-/// describes does not exist.
+/// The cursor size, `preferred_depth`, `prefer_shadow` and `fb_modifiers`
+/// are reported as given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModeConfig {
     /// A valid cursor width (`DRM_CAP_CURSOR_WIDTH`); 0 reports the Linux
@@ -69,7 +67,8 @@ pub struct ModeConfig {
     /// dumb buffer directly (`DRM_CAP_DUMB_PREFER_SHADOW`).
     pub prefer_shadow: bool,
     /// Whether `ADDFB2` accepts format modifiers
-    /// (`DRM_CAP_ADDFB2_MODIFIERS`), reported from R3 on.
+    /// (`DRM_CAP_ADDFB2_MODIFIERS`); the planes' `IN_FORMATS` blobs list
+    /// them.
     pub fb_modifiers: bool,
 }
 
@@ -232,6 +231,18 @@ pub trait Driver: Send + Sync + Sized + 'static {
         _ctx: &ddi::Sleepable,
     ) -> Result<(), Errno> {
         Err(Errno::ENOTTY)
+    }
+
+    /// The display side of the driver (milestone R3): for a driver with
+    /// [`Features::MODESET`] and display hardware, its CRTCs, planes,
+    /// encoders and connectors and the hooks that check and apply their
+    /// state ([`crate::kms::KmsDriver`]). The core asks once, when the
+    /// device attaches, and needs [`Features::GEM`] for framebuffers. The
+    /// default, `None`, is a device without display (render-only), for which
+    /// every mode-setting ioctl fails with `EOPNOTSUPP`.
+    #[cfg(not(test))]
+    fn kms(&self) -> Option<&dyn crate::kms::KmsDriver<crate::gem::GemRef<Self::Object>>> {
+        None
     }
 
     /// Called in `detach(9E)` once no file is open, before the core checks
