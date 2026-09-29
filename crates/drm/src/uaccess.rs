@@ -59,6 +59,10 @@ unsafe impl Plain for uapi::drm_mode_create_dumb {}
 unsafe impl Plain for uapi::drm_mode_map_dumb {}
 // SAFETY: as above.
 unsafe impl Plain for uapi::drm_mode_destroy_dumb {}
+// SAFETY: integers.
+unsafe impl Plain for u32 {}
+// SAFETY: integers.
+unsafe impl Plain for u64 {}
 
 /// An ioctl argument structure held in the kernel.
 pub struct UserArg<T: Plain> {
@@ -127,6 +131,48 @@ pub fn copy_out_bytes(arg: &IoctlArg<'_>, addr: usize, src: &[u8]) -> Result<(),
     }
     // SAFETY: src is a valid slice; ddi_copyout checks the destination.
     let r = unsafe { sys::ddi_copyout(src.as_ptr() as *const c_void, addr as *mut c_void, src.len(), arg.mode()) };
+    if r != 0 { Err(Errno::EFAULT) } else { Ok(()) }
+}
+
+/// The most elements [`copy_in_array`] copies: a larger count is `EINVAL`
+/// rather than a large locked allocation.
+pub const MAX_ARRAY: usize = 1 << 16;
+
+/// Copies `n` values of `T` from the caller's array at `addr` into kernel
+/// memory (`KM_SLEEP`). `EINVAL` for more than [`MAX_ARRAY`] values,
+/// `EFAULT` for an unreadable array.
+pub fn copy_in_array<T: Plain + Default>(
+    arg: &IoctlArg<'_>,
+    addr: usize,
+    n: usize,
+    ctx: &ddi::Sleepable,
+) -> Result<crate::kvec::KVec<T>, Errno> {
+    if n > MAX_ARRAY {
+        return Err(Errno::EINVAL);
+    }
+    let mut v = crate::kvec::KVec::new();
+    for _ in 0..n {
+        v.push(T::default(), ctx)?;
+    }
+    let bytes = n.checked_mul(size_of::<T>()).ok_or(Errno::EINVAL)?;
+    if bytes == 0 {
+        return Ok(v);
+    }
+    // SAFETY: the destination is the vector's initialised storage of
+    // exactly `bytes` bytes; every bit pattern is a valid T (Plain).
+    let r = unsafe { sys::ddi_copyin(addr as *const c_void, v.as_mut_ptr() as *mut c_void, bytes, arg.mode()) };
+    if r != 0 { Err(Errno::EFAULT) } else { Ok(v) }
+}
+
+/// Copies `src` to the caller's array at `addr`. Fails with `EFAULT`.
+pub fn copy_out_array<T: Plain>(arg: &IoctlArg<'_>, addr: usize, src: &[T]) -> Result<(), Errno> {
+    let bytes = core::mem::size_of_val(src);
+    if bytes == 0 {
+        return Ok(());
+    }
+    // SAFETY: src is a valid slice of plain values, which the struct
+    // definitions keep free of padding (asserted where they are declared).
+    let r = unsafe { sys::ddi_copyout(src.as_ptr() as *const c_void, addr as *mut c_void, bytes, arg.mode()) };
     if r != 0 { Err(Errno::EFAULT) } else { Ok(()) }
 }
 

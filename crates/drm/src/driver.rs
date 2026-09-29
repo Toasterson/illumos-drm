@@ -13,8 +13,8 @@ use crate::dumb::{self, DumbLayout, DumbRequest};
 use crate::ioctl::DriverIoctl;
 
 /// Driver feature flags, the counterpart of Linux's `DRIVER_*` bits. Only
-/// the features the core acts on exist; later milestones add PRIME and
-/// syncobj together with the code that implements them.
+/// the features the core acts on exist. PRIME has no flag: as in current
+/// Linux, every driver with [`Features::GEM`] exports and imports dma-bufs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Features(u32);
 
@@ -38,6 +38,16 @@ impl Features {
     /// which needs [`Features::GEM`]. Without it the dumb-buffer ioctls
     /// fail with `ENOSYS` and `DRM_CAP_DUMB_BUFFER` reports 0, as on Linux.
     pub const DUMB: Features = Features(1 << 4);
+
+    /// The driver supports sync objects (`DRIVER_SYNCOBJ`): the
+    /// `SYNCOBJ_*` ioctls and `DRM_CAP_SYNCOBJ`. Without it they fail with
+    /// `EOPNOTSUPP`, as on Linux.
+    pub const SYNCOBJ: Features = Features(1 << 5);
+    /// The driver supports timeline sync objects
+    /// (`DRIVER_SYNCOBJ_TIMELINE`): `SYNCOBJ_TIMELINE_WAIT`, `QUERY`,
+    /// `TRANSFER`, `TIMELINE_SIGNAL` and `DRM_CAP_SYNCOBJ_TIMELINE`; needs
+    /// [`Features::SYNCOBJ`].
+    pub const SYNCOBJ_TIMELINE: Features = Features(1 << 6);
 
     /// Combines two sets of features.
     pub const fn union(self, other: Features) -> Features {
@@ -232,6 +242,16 @@ pub trait Driver: Send + Sync + Sized + 'static {
         _ctx: &ddi::Sleepable,
     ) -> Result<(), Errno> {
         Err(Errno::ENOTTY)
+    }
+
+    /// The highest interrupt priority at which the driver signals fences
+    /// (a soft interrupt's, say), with which the core creates every lock
+    /// that signalling takes (see [`crate::fence`]). `None`, the default,
+    /// allows thread context and callouts (`timeout(9F)`) only. Called
+    /// once, in [`Device::attach`](crate::Device::attach).
+    #[cfg(not(test))]
+    fn fence_priority(&self) -> Option<ddi::IntrPriority> {
+        None
     }
 
     /// Called in `detach(9E)` once no file is open, before the core checks

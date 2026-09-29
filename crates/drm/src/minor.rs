@@ -114,10 +114,11 @@ pub const fn decode(minor: u32) -> Option<Decoded> {
 
 /// Maps a minor number to the driver instance that owns it. Drivers built
 /// on the core use this as their `ddi::Driver::instance_of_minor`, so that
-/// `getinfo(9E)` and the entry-point glue find the device for every node and
-/// every clone.
+/// `getinfo(9E)` and the entry-point glue find the device for every node,
+/// every clone and every anonymous file ([`crate::anon_fd`]).
 pub fn instance_of_minor(minor: Minor) -> Option<Instance> {
-    decode(minor.0).map(|d| Instance(d.index as i32))
+    let anon = || crate::anon_fd::decode(minor.0).map(|(index, _)| index);
+    decode(minor.0).map(|d| d.index).or_else(anon).map(|i| Instance(i as i32))
 }
 
 /// A NUL-terminated minor node name in a fixed buffer.

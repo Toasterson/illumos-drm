@@ -7,9 +7,10 @@
 //!
 //! The rules follow Linux's `drm_getcap` and `drm_setclientcap` of the
 //! libdrm 2.4.109 era, with one difference: a capability reports what this
-//! core implements today, not what Linux always implements. PRIME, syncobj,
-//! `ADDFB2` modifiers, vblank and page-flip events arrive in later
-//! milestones and report 0 until then. Dumb buffers exist since R1.
+//! core implements today, not what Linux always implements. `ADDFB2`
+//! modifiers, vblank and page-flip events arrive in later milestones and
+//! report 0 until then. Dumb buffers exist since R1, PRIME and sync objects
+//! since R2.
 
 use ddi::Errno;
 use drm_uapi as uapi;
@@ -34,8 +35,16 @@ pub fn get_cap(features: Features, mode: &ModeConfig, cap: u64) -> Result<u64, E
     // ones.
     match cap {
         uapi::DRM_CAP_TIMESTAMP_MONOTONIC => return Ok(1),
-        // PRIME import/export and sync objects are milestone R2.
-        uapi::DRM_CAP_PRIME | uapi::DRM_CAP_SYNCOBJ | uapi::DRM_CAP_SYNCOBJ_TIMELINE => return Ok(0),
+        // R2: PRIME for every GEM driver, as in current Linux; sync
+        // objects and timelines per driver feature.
+        uapi::DRM_CAP_PRIME => {
+            let both = u64::from(uapi::DRM_PRIME_CAP_IMPORT | uapi::DRM_PRIME_CAP_EXPORT);
+            return Ok(if features.contains(Features::GEM) { both } else { 0 });
+        }
+        uapi::DRM_CAP_SYNCOBJ => return Ok(u64::from(features.contains(Features::SYNCOBJ))),
+        uapi::DRM_CAP_SYNCOBJ_TIMELINE => {
+            return Ok(u64::from(features.contains(Features::SYNCOBJ.union(Features::SYNCOBJ_TIMELINE))));
+        }
         _ => {}
     }
     // Everything else is about mode setting; Linux answers EOPNOTSUPP for
@@ -159,8 +168,19 @@ mod tests {
         let m = ModeConfig::DEFAULT;
         assert_eq!(get_cap(Features::NONE, &m, uapi::DRM_CAP_TIMESTAMP_MONOTONIC as u64), Ok(1));
         assert_eq!(get_cap(Features::NONE, &m, uapi::DRM_CAP_PRIME as u64), Ok(0));
+        assert_eq!(get_cap(Features::GEM, &m, uapi::DRM_CAP_PRIME as u64), Ok(3), "import and export");
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_SYNCOBJ as u64), Ok(0));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_SYNCOBJ_TIMELINE as u64), Ok(0));
+        let so = Features::SYNCOBJ;
+        let tl = Features::SYNCOBJ.union(Features::SYNCOBJ_TIMELINE);
+        assert_eq!(get_cap(so, &m, uapi::DRM_CAP_SYNCOBJ as u64), Ok(1));
+        assert_eq!(get_cap(so, &m, uapi::DRM_CAP_SYNCOBJ_TIMELINE as u64), Ok(0));
+        assert_eq!(get_cap(tl, &m, uapi::DRM_CAP_SYNCOBJ_TIMELINE as u64), Ok(1));
+        assert_eq!(
+            get_cap(Features::SYNCOBJ_TIMELINE, &m, uapi::DRM_CAP_SYNCOBJ_TIMELINE as u64),
+            Ok(0),
+            "needs SYNCOBJ"
+        );
         assert_eq!(get_cap(Features::NONE, &m, uapi::DRM_CAP_CURSOR_WIDTH as u64), Err(EOPNOTSUPP));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_CURSOR_WIDTH as u64), Ok(64));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_CURSOR_HEIGHT as u64), Ok(64));
