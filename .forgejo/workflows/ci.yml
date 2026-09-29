@@ -53,7 +53,7 @@ jobs:
       # the virtio framework (misc/virtio) and specfs.
       - run: >
           export PATH="$HOME/.cargo/bin:$PATH" && export SCCACHE_STARTUP_TIMEOUT=60 &&
-          cargo +nightly-2026-04-16 build -p virtio_gpu --release
+          cargo +nightly-2026-04-16 build --locked -p virtio_gpu --release
           --target targets/x86_64-illumos-kmod.json
           -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
       - run: >

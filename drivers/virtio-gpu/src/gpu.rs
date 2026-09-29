@@ -806,6 +806,8 @@ impl Gpu {
             if f.created {
                 return Err(Errno::EEXIST);
             }
+            // Kept if CTX_CREATE fails below, as Linux keeps them; a retry
+            // sets them again and takes fresh ring contexts.
             f.capset = p.capset;
             f.num_rings = p.rings;
             f.ring_base = if p.rings > 0 { domain.alloc_contexts(u64::from(p.rings)) } else { 0 };
