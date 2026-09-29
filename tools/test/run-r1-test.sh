@@ -229,8 +229,8 @@ if [ -d /dev/dri ]; then
 		# Every link to an rdrmnull node (card1 and renderD129 too with
 		# rdrmnull-two.conf).
 		for l in /dev/dri/*; do
-			case $(readlink "$l" 2>/dev/null) in
-			*/rdrmnull@*) step rm -f "$l" ;;
+			case $(ls -l "$l" 2>/dev/null) in
+			*"-> "*/rdrmnull@*) step rm -f "$l" ;;
 			esac
 		done
 		step rmdir /dev/dri
