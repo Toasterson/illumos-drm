@@ -13,6 +13,9 @@
 #   rdrmnull.conf    examples/rdrmnull/rdrmnull.conf
 #   drm_r0_test.c    tools/test/drm_r0_test.c
 #   drm_r1_test.c    tools/test/drm_r1_test.c
+#   drm_r2_test.c    tools/test/drm_r2_test.c (optional: the R2 test runs
+#                    when it is present; fences, sync objects, sync files,
+#                    PRIME, with the sync kstat recorded before unload)
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #
 # RDRMNULL_CONF names another .conf to install instead of rdrmnull.conf:
@@ -62,6 +65,8 @@ gemstat() {
 	echo
 	echo "\$ kstat -p rdrmnull:0:gem ($1)"
 	kstat -p rdrmnull:0:gem
+	echo "\$ kstat -p rdrmnull:0:sync ($1)"
+	kstat -p rdrmnull:0:sync
 }
 
 CONF=${RDRMNULL_CONF:-rdrmnull.conf}
@@ -108,6 +113,13 @@ step gcc -m32 -Wall -DPROBE32 -I drm -o drm_r0_probe32 drm_r0_test.c || exit 1
 step gcc -m64 -Wall -I drm -o drm_r1_test drm_r1_test.c \
     -L/usr/lib/xorg/amd64 -R/usr/lib/xorg/amd64 -ldrm -lkstat -lpthread || exit 1
 step gcc -m32 -Wall -DPROBE32 -I drm -o drm_r1_probe32 drm_r1_test.c || exit 1
+R2=no
+if [ -f drm_r2_test.c ]; then
+	R2=yes
+	step gcc -m64 -Wall -I drm -o drm_r2_test drm_r2_test.c \
+	    -L/usr/lib/xorg/amd64 -R/usr/lib/xorg/amd64 -ldrm -lkstat -lpthread -lsocket || exit 1
+	step gcc -m32 -Wall -DPROBE32 -I drm -o drm_r2_probe32 drm_r2_test.c || exit 1
+fi
 
 step cp rdrmnull /usr/kernel/drv/amd64/rdrmnull || exit 1
 echo
@@ -139,6 +151,10 @@ if [ $fail -eq 0 ]; then
 	step ./drm_r0_probe32 || fail=1
 	step ./drm_r1_test || fail=1
 	step ./drm_r1_probe32 || fail=1
+	if [ $R2 = yes ]; then
+		step ./drm_r2_test || fail=1
+		step ./drm_r2_probe32 || fail=1
+	fi
 	gemstat "after the tests"
 	step sh -c 'echo "::vmem" | mdb -k | awk "NR == 1 || /rdrmnull|umem_np/"'
 	step sh -c 'tail -5 /var/adm/messages'
