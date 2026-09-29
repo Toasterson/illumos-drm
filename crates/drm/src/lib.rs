@@ -79,6 +79,7 @@ mod device;
 pub mod dmaerr;
 pub mod driver;
 pub mod dumb;
+pub mod fence;
 #[cfg(not(test))]
 pub mod gem;
 pub mod idmap;
@@ -86,6 +87,7 @@ pub mod ioctl;
 pub mod karc;
 mod kmem;
 pub mod kms;
+pub mod ksync;
 pub mod kvec;
 pub mod minor;
 pub mod objects;
