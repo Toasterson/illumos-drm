@@ -787,6 +787,18 @@ impl Fence {
     /// `false` if it has run (this waits until a running callback has
     /// finished) or was never registered with this fence.
     pub fn remove_callback<T: FenceCallback>(&self, cb: &FenceCb<T>, ctx: &Sleepable) -> bool {
+        self.remove_callback_with(cb, || ksync::yield_briefly(ctx))
+    }
+
+    /// As [`Fence::remove_callback`], for a caller without the token, such
+    /// as a destructor that runs in thread context: while the callback
+    /// runs on another processor, this spins. Callbacks do not block, so
+    /// the spin is short. Never call it from the fence's own callback.
+    pub fn remove_callback_spin<T: FenceCallback>(&self, cb: &FenceCb<T>) -> bool {
+        self.remove_callback_with(cb, core::hint::spin_loop)
+    }
+
+    fn remove_callback_with<T: FenceCallback>(&self, cb: &FenceCb<T>, pause: impl Fn()) -> bool {
         let inner = self.inner();
         let h = cb.hdr();
         // SAFETY: the handle keeps the node alive.
@@ -815,7 +827,7 @@ impl Fence {
             }
         }
         while hdr.state.load(Ordering::Acquire) == CB_RUNNING {
-            ksync::yield_briefly(ctx);
+            pause();
         }
         false
     }

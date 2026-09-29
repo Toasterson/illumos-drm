@@ -17,8 +17,8 @@ use drm_uapi::ioc;
 
 use crate::state::Perm;
 
-/// The core ioctls: those of milestone R0 and the GEM and dumb-buffer
-/// ioctls of R1.
+/// The core ioctls: those of milestone R0, the GEM and dumb-buffer ioctls
+/// of R1, and the PRIME and sync object ioctls of R2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     /// `DRM_IOCTL_VERSION`.
@@ -55,6 +55,57 @@ pub enum Op {
     MapDumb,
     /// `DRM_IOCTL_MODE_DESTROY_DUMB`.
     DestroyDumb,
+    // Milestone R2: PRIME and sync objects.
+    /// `DRM_IOCTL_PRIME_HANDLE_TO_FD`.
+    PrimeHandleToFd,
+    /// `DRM_IOCTL_PRIME_FD_TO_HANDLE`.
+    PrimeFdToHandle,
+    /// `DRM_IOCTL_SYNCOBJ_CREATE`.
+    SyncobjCreate,
+    /// `DRM_IOCTL_SYNCOBJ_DESTROY`.
+    SyncobjDestroy,
+    /// `DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD`.
+    SyncobjHandleToFd,
+    /// `DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE`.
+    SyncobjFdToHandle,
+    /// `DRM_IOCTL_SYNCOBJ_WAIT`.
+    SyncobjWait,
+    /// `DRM_IOCTL_SYNCOBJ_RESET`.
+    SyncobjReset,
+    /// `DRM_IOCTL_SYNCOBJ_SIGNAL`.
+    SyncobjSignal,
+    /// `DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT`.
+    SyncobjTimelineWait,
+    /// `DRM_IOCTL_SYNCOBJ_QUERY`.
+    SyncobjQuery,
+    /// `DRM_IOCTL_SYNCOBJ_TRANSFER`.
+    SyncobjTransfer,
+    /// `DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL`.
+    SyncobjTimelineSignal,
+}
+
+impl Op {
+    /// Reports whether the operation is one of the sync object ioctls.
+    pub const fn is_syncobj(self) -> bool {
+        matches!(
+            self,
+            Op::SyncobjCreate
+                | Op::SyncobjDestroy
+                | Op::SyncobjHandleToFd
+                | Op::SyncobjFdToHandle
+                | Op::SyncobjWait
+                | Op::SyncobjReset
+                | Op::SyncobjSignal
+                | Op::SyncobjTimelineWait
+                | Op::SyncobjQuery
+                | Op::SyncobjTransfer
+                | Op::SyncobjTimelineSignal
+        )
+    }
+    /// Reports whether the operation is one of the PRIME ioctls.
+    pub const fn is_prime(self) -> bool {
+        matches!(self, Op::PrimeHandleToFd | Op::PrimeFdToHandle)
+    }
 }
 
 const NONE: Perm = Perm { auth: false, master: false, root_only: false, render_allow: false };
@@ -96,6 +147,21 @@ pub const TABLE: &[Entry] = &[
     Entry { cmd: uapi::DRM_IOCTL_MODE_CREATE_DUMB, op: Op::CreateDumb, perm: NONE },
     Entry { cmd: uapi::DRM_IOCTL_MODE_MAP_DUMB, op: Op::MapDumb, perm: NONE },
     Entry { cmd: uapi::DRM_IOCTL_MODE_DESTROY_DUMB, op: Op::DestroyDumb, perm: NONE },
+    // R2: render nodes may use all of them, without authentication, as in
+    // current Linux (DRM_RENDER_ALLOW).
+    Entry { cmd: uapi::DRM_IOCTL_PRIME_HANDLE_TO_FD, op: Op::PrimeHandleToFd, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_PRIME_FD_TO_HANDLE, op: Op::PrimeFdToHandle, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_CREATE, op: Op::SyncobjCreate, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_DESTROY, op: Op::SyncobjDestroy, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, op: Op::SyncobjHandleToFd, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, op: Op::SyncobjFdToHandle, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_WAIT, op: Op::SyncobjWait, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_RESET, op: Op::SyncobjReset, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_SIGNAL, op: Op::SyncobjSignal, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, op: Op::SyncobjTimelineWait, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_QUERY, op: Op::SyncobjQuery, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_TRANSFER, op: Op::SyncobjTransfer, perm: RENDER },
+    Entry { cmd: uapi::DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, op: Op::SyncobjTimelineSignal, perm: RENDER },
 ];
 
 /// The first command number of driver-private ioctls (`DRM_COMMAND_BASE`).
@@ -166,8 +232,9 @@ mod tests {
         assert_eq!(lookup(uapi::DRM_IOCTL_VERSION ^ 0x0100), None);
         assert_eq!(lookup(uapi::DRM_IOCTL_GEM_CLOSE).map(|e| e.op), Some(Op::GemClose));
         assert_eq!(lookup(uapi::DRM_IOCTL_MODE_DESTROY_DUMB).map(|e| e.op), Some(Op::DestroyDumb));
+        assert_eq!(lookup(uapi::DRM_IOCTL_PRIME_HANDLE_TO_FD).map(|e| e.op), Some(Op::PrimeHandleToFd));
+        assert_eq!(lookup(uapi::DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL).map(|e| e.op), Some(Op::SyncobjTimelineSignal));
         // Ioctls of later milestones are not in the table yet.
-        assert_eq!(lookup(uapi::DRM_IOCTL_PRIME_HANDLE_TO_FD), None);
         assert_eq!(lookup(uapi::DRM_IOCTL_MODE_ATOMIC), None);
     }
 
@@ -178,7 +245,8 @@ mod tests {
         assert!(is_core_nr(ioc::drm_iowr::<[u8; 36]>(0x00)));
         assert!(is_core_nr(uapi::DRM_IOCTL_SET_MASTER));
         assert!(is_core_nr(uapi::DRM_IOCTL_GEM_CLOSE));
-        assert!(!is_core_nr(uapi::DRM_IOCTL_PRIME_HANDLE_TO_FD));
+        assert!(is_core_nr(uapi::DRM_IOCTL_PRIME_HANDLE_TO_FD));
+        assert!(!is_core_nr(uapi::DRM_IOCTL_MODE_ATOMIC));
         // TCGETA ('T' << 8 | 1), which isatty(3C) issues.
         assert!(!is_core_nr(0x5401));
     }
@@ -194,8 +262,14 @@ mod tests {
         // authentication; the dumb-buffer ioctls are primary-node only.
         let render: [Op; 3] = [Op::Version, Op::GetCap, Op::GemClose];
         for e in TABLE {
-            assert_eq!(e.perm.render_allow, render.contains(&e.op), "{:?}", e.op);
+            let r2 = e.op.is_prime() || e.op.is_syncobj();
+            assert_eq!(e.perm.render_allow, render.contains(&e.op) || r2, "{:?}", e.op);
+            if r2 {
+                assert_eq!(e.perm, RENDER, "{:?}", e.op);
+            }
         }
+        assert_eq!(TABLE.iter().filter(|e| e.op.is_syncobj()).count(), 11);
+        assert_eq!(TABLE.iter().filter(|e| e.op.is_prime()).count(), 2);
         let auth: [Op; 4] = [Op::SetUnique, Op::AuthMagic, Op::GemFlink, Op::GemOpen];
         for e in TABLE {
             assert_eq!(e.perm.auth, auth.contains(&e.op), "{:?}", e.op);

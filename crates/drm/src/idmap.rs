@@ -60,6 +60,11 @@ impl<V, A: IdAlloc> IdMap<V, A> {
         self.map.get(&id)
     }
 
+    /// Returns the value stored under `id` for modification.
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut V> {
+        self.map.get_mut(&id)
+    }
+
     /// Removes the value stored under `id` and frees the number.
     pub fn remove(&mut self, id: u32) -> Option<V> {
         let v = self.map.remove(&id)?;

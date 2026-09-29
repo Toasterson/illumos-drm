@@ -16,7 +16,11 @@ rust-version.workspace = true
 panic-drill = []
 
 [dependencies]
-ddi.workspace = true
+# unstable-gate-cda5b9a49f: ddi::private::fd, the anonymous file
+# descriptors of dma-bufs, sync object files and sync files, over the
+# private tier of illumos-ddi pinned to gate cda5b9a49f (see
+# docs/anon-fd.md).
+ddi = { workspace = true, features = ["unstable-gate-cda5b9a49f"] }
 drm-uapi.workspace = true
 
 [package.metadata.kmod]

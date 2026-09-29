@@ -82,7 +82,7 @@ use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::num::NonZeroU32;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use ddi::prelude::*;
 use ddi::sys;
@@ -96,6 +96,7 @@ use crate::kvec::KVec;
 use crate::minor::{self, CloneId};
 use crate::objects::{self, ObjCommon, ObjRef};
 use crate::offsets::{self, OFFSET_SIZE, OFFSET_START, OffsetMap, PAGE_SIZE, RangeAlloc};
+use crate::resv::Resv;
 
 // From sys/mman.h; stable ABI values that ddi-sys does not declare.
 /// `PROT_ALL`: every protection a mapping may ever be given.
@@ -110,19 +111,19 @@ const MAP_SHARED: sys::uint_t = 1;
 /// A NUL-terminated name built at run time, for `id_space_create(9F)` and
 /// `vmem_create(9F)`, which copy it. A name that does not fit is an error,
 /// never truncated.
-struct NameBuf {
+pub(crate) struct NameBuf {
     buf: [u8; 32],
     len: usize,
 }
 
 impl NameBuf {
-    fn new(args: fmt::Arguments<'_>) -> Result<NameBuf, Errno> {
+    pub(crate) fn new(args: fmt::Arguments<'_>) -> Result<NameBuf, Errno> {
         let mut n = NameBuf { buf: [0; 32], len: 0 };
         // Only a driver with an absurdly long name can overflow the buffer.
         fmt::write(&mut n, args).map_err(|_| Errno::EINVAL)?;
         Ok(n)
     }
-    fn as_cstr(&self) -> &CStr {
+    pub(crate) fn as_cstr(&self) -> &CStr {
         // The buffer is zeroed beyond `len` and `len` < 32.
         CStr::from_bytes_until_nul(&self.buf).unwrap_or(c"drm")
     }
@@ -155,9 +156,17 @@ unsafe impl Send for KIdSpace {}
 unsafe impl Sync for KIdSpace {}
 
 impl KIdSpace {
-    fn new(name: &CStr, _ctx: &Sleepable) -> Result<KIdSpace, Errno> {
+    fn new(name: &CStr, ctx: &Sleepable) -> Result<KIdSpace, Errno> {
+        Self::with_range(name, 1, i32::MAX, ctx)
+    }
+
+    /// A space of the numbers from `low` to `high - 1`; `low` at least 1.
+    pub(crate) fn with_range(name: &CStr, low: i32, high: i32, _ctx: &Sleepable) -> Result<KIdSpace, Errno> {
+        if low < 1 || high <= low {
+            return Err(Errno::EINVAL);
+        }
         // SAFETY: may block, which the token allows; the name is copied.
-        let p = unsafe { sys::id_space_create(name.as_ptr(), 1, i32::MAX) };
+        let p = unsafe { sys::id_space_create(name.as_ptr(), low, high) };
         NonNull::new(p).map(KIdSpace).ok_or(Errno::ENOMEM)
     }
 }
@@ -765,18 +774,21 @@ struct MapPriv<O: GemObject> {
     obj: Option<GemRef<O>>,
     dhp: sys::devmap_cookie_t,
     uoff: u64,
+    /// The user offset of the object's first byte in this mapping: the
+    /// fake offset for a mapping of a DRM file, 0 for a dma-buf file.
+    base: u64,
     len: usize,
     /// See [`Mapping::is_settled`]. Set only with the mapping list locked.
     settled: AtomicBool,
 }
 
 impl<O: GemObject> MapPriv<O> {
-    fn mapping(&self, obj: &GemRef<O>) -> Mapping {
+    fn mapping(&self, _obj: &GemRef<O>) -> Mapping {
         Mapping {
             dhp: self.dhp,
             uoff: self.uoff,
             len: self.len,
-            obj_off: self.uoff.wrapping_sub(obj.common().offset()),
+            obj_off: self.uoff.wrapping_sub(self.base),
             settled: self.settled.load(Ordering::Acquire),
         }
     }
@@ -794,6 +806,12 @@ pub struct GemInner<O: GemObject> {
     common: ObjCommon,
     core: KArc<GemCore<O>>,
     maps: Mutex<MapList<O>>,
+    /// The fences of the work using the object.
+    resv: Resv,
+    /// The anonymous-file number of the object's dma-buf, 0 for none; set
+    /// and cleared with the device's dma-buf table locked
+    /// ([`crate::anon_fd`]).
+    dmabuf: AtomicU32,
     obj: O,
 }
 
@@ -859,6 +877,21 @@ impl<O: GemObject> GemRef<O> {
     /// Returns the size in bytes.
     pub fn size(&self) -> usize {
         self.common().size()
+    }
+
+    /// Returns the object's reservation: the fences of the work using it.
+    pub fn resv(&self) -> &Resv {
+        &self.inner().resv
+    }
+
+    /// The object's dma-buf number, 0 for none ([`crate::anon_fd`]).
+    pub(crate) fn dmabuf(&self) -> &AtomicU32 {
+        &self.inner().dmabuf
+    }
+
+    /// Returns the device's GEM state.
+    pub fn core(&self) -> &KArc<GemCore<O>> {
+        &self.inner().core
     }
 
     /// Drops the reference in thread context; the object is destroyed now
@@ -1050,12 +1083,22 @@ pub(crate) struct FileGem<O: GemObject> {
 /// An `mmap(2)` between `devmap(9E)` and `devmap_map(9E)`.
 struct Pending<O: GemObject> {
     dhp: usize,
-    clone: CloneId,
+    owner: MapOwner,
     /// The thread in `mmap(2)` (`ddi_get_kt_did(9F)`): both entry points
     /// run in it, one after the other, so an entry that the same thread
     /// left behind belongs to an `mmap(2)` that failed in between.
     thread: sys::kt_did_t,
     obj: GemRef<O>,
+}
+
+/// The file an `mmap(2)` maps through: a DRM file (by clone id) or a
+/// dma-buf file (by its anonymous-file number).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MapOwner {
+    /// A DRM file, which must hold a handle to the object.
+    File(CloneId),
+    /// A dma-buf file, which stands for the object itself.
+    DmaBuf(u32),
 }
 
 fn current_thread() -> sys::kt_did_t {
@@ -1334,7 +1377,7 @@ impl<O: GemObject> GemCore<O> {
         loop {
             let p = {
                 let mut l = self.pending.lock();
-                let i = l.iter().position(|p| p.clone == clone);
+                let i = l.iter().position(|p| p.owner == MapOwner::File(clone));
                 i.and_then(|i| l.swap_remove(i))
             };
             let Some(p) = p else { break };
@@ -1409,6 +1452,8 @@ impl<O: GemObject> GemCore<O> {
             common: ObjCommon::new(size),
             core: KArc::clone(this),
             maps: Mutex::new(MapList(KVec::new())),
+            resv: Resv::new(),
+            dmabuf: AtomicU32::new(0),
             obj,
         };
         let r = KArc::new(inner, ctx).map(GemRef::from_arc);
@@ -1562,6 +1607,47 @@ impl<O: GemObject> GemCore<O> {
             obj.put(ctx);
             return Err(Errno::EINVAL);
         };
+        self.setup(MapOwner::File(clone), obj, dhp, 0, maplen, ctx)?;
+        Ok(maplen)
+    }
+
+    /// The `devmap(9E)` entry point for the dma-buf file `id` of `obj`: the
+    /// object is mapped from offset `off` (page-aligned) for `len` bytes,
+    /// which must lie within it (Linux's `dma_buf_mmap_internal`). The
+    /// reference moves into the mapping machinery.
+    pub(crate) fn devmap_dmabuf(
+        &self,
+        id: u32,
+        obj: GemRef<O>,
+        dhp: &DevmapHandle<'_>,
+        off: u64,
+        len: usize,
+        ctx: &Sleepable,
+    ) -> Result<usize, Errno> {
+        self.housekeeping(ctx);
+        let size = obj.size() as u64;
+        let maplen = offsets::page_round(len as u64);
+        let fits =
+            maplen.is_some_and(|l| off.is_multiple_of(PAGE_SIZE) && off.checked_add(l).is_some_and(|e| e <= size));
+        let (true, Some(maplen)) = (fits, maplen.and_then(|l| usize::try_from(l).ok())) else {
+            obj.put(ctx);
+            return Err(Errno::EINVAL);
+        };
+        self.setup(MapOwner::DmaBuf(id), obj, dhp, off, maplen, ctx)?;
+        Ok(maplen)
+    }
+
+    /// Describes `maplen` bytes of the object from `obj_off` with
+    /// `devmap_umem_setup(9F)` and parks the reference for `devmap_map(9E)`.
+    fn setup(
+        &self,
+        owner: MapOwner,
+        obj: GemRef<O>,
+        dhp: &DevmapHandle<'_>,
+        obj_off: u64,
+        maplen: usize,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
         // A movable object changes its memory with the mapping list locked.
         let cookie = {
             let _maps = obj.inner().maps.lock();
@@ -1584,14 +1670,14 @@ impl<O: GemObject> GemCore<O> {
         // SAFETY: called from devmap(9E) with its handle; the callback
         // structure is copied; the cookie belongs to the object, which the
         // reference parked below keeps alive until the mapping holds its
-        // own; the range lies within the object.
+        // own; the range lies within the object (checked by the callers).
         let r = unsafe {
             sys::devmap_umem_setup(
                 dhp.as_raw(),
                 self.dev.as_raw(),
                 &mut cb,
                 cookie.as_raw(),
-                0,
+                obj_off as sys::offset_t,
                 maplen,
                 PROT_ALL,
                 flags,
@@ -1602,17 +1688,72 @@ impl<O: GemObject> GemCore<O> {
             obj.put(ctx);
             return Err(Errno::ENXIO);
         }
-        self.park(dhp.as_raw() as usize, clone, obj, ctx)?;
-        Ok(maplen)
+        self.park(dhp.as_raw() as usize, owner, obj, ctx)
     }
 
-    fn park(&self, dhp: usize, clone: CloneId, obj: GemRef<O>, ctx: &Sleepable) -> Result<(), Errno> {
+    /// Drops what `mmap(2)` calls through the dma-buf file `id` left
+    /// parked; its `close(9E)` calls this.
+    pub(crate) fn dmabuf_closed(&self, id: u32, ctx: &Sleepable) {
+        loop {
+            let p = {
+                let mut l = self.pending.lock();
+                let i = l.iter().position(|p| p.owner == MapOwner::DmaBuf(id));
+                i.and_then(|i| l.swap_remove(i))
+            };
+            let Some(p) = p else { break };
+            self.stats.pending.fetch_sub(1, Ordering::Relaxed);
+            p.obj.put(ctx);
+        }
+        self.publish();
+    }
+
+    /// Returns the handle file `clone` has for `obj`, creating one if it
+    /// has none (the same-device path of `PRIME_FD_TO_HANDLE`, Linux's
+    /// prime lookup). Scans the file's handles with the name table and the
+    /// file's table locked, as `handle_create` locks them, so that two
+    /// concurrent imports of one object give one handle. The reference
+    /// moves into the table or is dropped.
+    pub fn handle_find_or_create(&self, clone: CloneId, obj: GemRef<O>, ctx: &Sleepable) -> Result<u32, Errno> {
+        let fg = match self.file(clone) {
+            Ok(f) => f,
+            Err(e) => {
+                obj.put(ctx);
+                return Err(e);
+            }
+        };
+        let r = {
+            let mut names = self.names.lock();
+            let mut handles = fg.handles.lock();
+            let found = handles.iter().find(|(_, r)| r.same(&obj)).map(|(n, _)| n);
+            match found {
+                Some(h) => Ok(Err((h, obj))),
+                None => objects::handle_create(&mut names, &mut handles, obj, ctx).map(Ok),
+            }
+        };
+        match r {
+            Ok(Ok(h)) => {
+                self.stats.handles.fetch_add(1, Ordering::Relaxed);
+                self.publish();
+                Ok(h)
+            }
+            Ok(Err((h, obj))) => {
+                obj.put(ctx);
+                Ok(h)
+            }
+            Err((obj, e)) => {
+                obj.put(ctx);
+                Err(e)
+            }
+        }
+    }
+
+    fn park(&self, dhp: usize, owner: MapOwner, obj: GemRef<O>, ctx: &Sleepable) -> Result<(), Errno> {
         let stale = {
             let mut l = self.pending.lock();
             // A handle address can recur once the framework has freed an
             // earlier handle whose mapping failed; the new call replaces it.
             let stale = l.iter().position(|p| p.dhp == dhp).and_then(|i| l.swap_remove(i));
-            match l.push(Pending { dhp, clone, thread: current_thread(), obj }, ctx) {
+            match l.push(Pending { dhp, owner, thread: current_thread(), obj }, ctx) {
                 Ok(()) => {}
                 Err(_) => {
                     drop(l);
@@ -1633,7 +1774,7 @@ impl<O: GemObject> GemCore<O> {
         Ok(())
     }
 
-    fn unpark(&self, dhp: usize) -> Option<(CloneId, GemRef<O>)> {
+    fn unpark(&self, dhp: usize) -> Option<(MapOwner, GemRef<O>)> {
         let p = {
             let mut l = self.pending.lock();
             let i = l.iter().position(|p| p.dhp == dhp)?;
@@ -1641,7 +1782,7 @@ impl<O: GemObject> GemCore<O> {
         };
         self.stats.pending.fetch_sub(1, Ordering::Relaxed);
         self.publish();
-        Some((p.clone, p.obj))
+        Some((p.owner, p.obj))
     }
 
     fn file_holds(&self, clone: CloneId, obj: &GemRef<O>) -> bool {
@@ -1653,7 +1794,7 @@ impl<O: GemObject> GemCore<O> {
     /// `devmap_map(9E)`.
     fn map(
         &self,
-        clone: CloneId,
+        via: MapOwner,
         dhp: sys::devmap_cookie_t,
         flags: sys::uint_t,
         off: sys::offset_t,
@@ -1661,20 +1802,28 @@ impl<O: GemObject> GemCore<O> {
         ctx: &Sleepable,
     ) -> Result<NonNull<MapPriv<O>>, Errno> {
         let (owner, obj) = self.unpark(dhp as usize).ok_or(Errno::ENXIO)?;
-        let refuse = if owner != clone {
+        let refuse = if owner != via {
             Some(Errno::ENXIO)
         } else if flags & MAP_TYPE != MAP_SHARED {
             // A private mapping would have to copy on write; the devmap
             // framework maps the object's pages themselves.
             Some(Errno::EINVAL)
-        } else if !self.file_holds(clone, &obj) {
+        } else if let MapOwner::File(clone) = via
+            && !self.file_holds(clone, &obj)
+        {
             Some(Errno::EACCES)
         } else {
             None
         };
         let uoff = u64::try_from(off).ok();
+        // The user offset of the object's start: its fake offset through a
+        // DRM file, 0 through its dma-buf.
+        let base = match via {
+            MapOwner::File(_) => obj.common().offset(),
+            MapOwner::DmaBuf(_) => 0,
+        };
         match (refuse, uoff) {
-            (None, Some(uoff)) => record(obj, dhp, uoff, len, ctx),
+            (None, Some(uoff)) => record(obj, dhp, uoff, base, len, ctx),
             (e, _) => {
                 obj.put(ctx);
                 Err(e.unwrap_or(Errno::EINVAL))
@@ -1690,10 +1839,11 @@ fn record<O: GemObject>(
     obj: GemRef<O>,
     dhp: sys::devmap_cookie_t,
     uoff: u64,
+    base: u64,
     len: usize,
     ctx: &Sleepable,
 ) -> Result<NonNull<MapPriv<O>>, Errno> {
-    let p = alloc_piece(obj, dhp, uoff, len, true, ctx);
+    let p = alloc_piece(obj, dhp, uoff, base, len, true, ctx);
     // SAFETY: we own the box until the pointer is handed to the framework.
     let m = unsafe { p.as_ref() };
     let res = match m.obj.as_ref() {
@@ -1731,10 +1881,11 @@ fn record_split<O: GemObject>(
     obj: GemRef<O>,
     dhp: sys::devmap_cookie_t,
     uoff: u64,
+    base: u64,
     len: usize,
     ctx: &Sleepable,
 ) -> NonNull<MapPriv<O>> {
-    let p = alloc_piece(obj, dhp, uoff, len, false, ctx);
+    let p = alloc_piece(obj, dhp, uoff, base, len, false, ctx);
     // SAFETY: we own the box until the pointer is handed to the framework.
     let m = unsafe { p.as_ref() };
     if let Some(obj) = m.obj.as_ref() {
@@ -1752,11 +1903,12 @@ fn alloc_piece<O: GemObject>(
     obj: GemRef<O>,
     dhp: sys::devmap_cookie_t,
     uoff: u64,
+    base: u64,
     len: usize,
     settled: bool,
     ctx: &Sleepable,
 ) -> NonNull<MapPriv<O>> {
-    let b = KBox::new(MapPriv { obj: Some(obj), dhp, uoff, len, settled: AtomicBool::new(settled) }, ctx);
+    let b = KBox::new(MapPriv { obj: Some(obj), dhp, uoff, base, len, settled: AtomicBool::new(settled) }, ctx);
     // SAFETY: into_raw never returns null.
     unsafe { NonNull::new_unchecked(KBox::into_raw(b)) }
 }
@@ -1876,12 +2028,14 @@ unsafe extern "C" fn map_cb<O: GemObject>(
     let ctx = unsafe { Sleepable::assume() };
     // SAFETY: a device number from the framework.
     let minor = unsafe { sys::getminor(dev) };
-    let Some((index, clone)) = minor::decode(minor).and_then(|d| Some((d.index, d.clone?))) else {
+    let file = minor::decode(minor).and_then(|d| Some((d.index, MapOwner::File(d.clone?))));
+    let dmabuf = || crate::anon_fd::decode(minor).map(|(i, id)| (i, MapOwner::DmaBuf(id)));
+    let Some((index, via)) = file.or_else(dmabuf) else {
         return sys::errno::ENXIO;
     };
     // SAFETY: an mmap(2) of an open file of this device is in progress.
     let Some(core) = (unsafe { registry::get::<O>(index) }) else { return sys::errno::ENXIO };
-    match core.map(clone, dhp, flags, off, len, &ctx) {
+    match core.map(via, dhp, flags, off, len, &ctx) {
         Ok(p) => {
             // SAFETY: the framework passes a writable pointer.
             unsafe { *pvtp = p.as_ptr().cast() };
@@ -1904,7 +2058,7 @@ unsafe extern "C" fn dup_cb<O: GemObject>(
     // SAFETY: our private data, recorded and alive while its mapping is.
     let m = unsafe { p.as_ref() };
     let Some(obj) = m.obj.as_ref() else { return sys::errno::ENXIO };
-    match record(obj.clone(), new_dhp, m.uoff, m.len, &ctx) {
+    match record(obj.clone(), new_dhp, m.uoff, m.base, m.len, &ctx) {
         Ok(q) => {
             // SAFETY: the framework passes a writable pointer.
             unsafe { *new_pvtp = q.as_ptr().cast() };
@@ -1931,7 +2085,7 @@ unsafe extern "C" fn unmap_cb<O: GemObject>(
     let Some(p) = NonNull::new(pvtp.cast::<MapPriv<O>>()) else { return };
     // SAFETY: our private data; the framework hands it back once.
     let m = unsafe { p.as_ref() };
-    let (uoff, mlen) = (m.uoff, m.len as u64);
+    let (uoff, base, mlen) = (m.uoff, m.base, m.len as u64);
     let off = off as u64;
     let end = off.saturating_add(len as u64);
     if let Some(obj) = m.obj.as_ref() {
@@ -1947,7 +2101,7 @@ unsafe extern "C" fn unmap_cb<O: GemObject>(
             if ndhp.is_null() || npvtp.is_null() {
                 continue;
             }
-            let q = record_split(obj.clone(), ndhp, start, plen as usize, &ctx);
+            let q = record_split(obj.clone(), ndhp, start, base, plen as usize, &ctx);
             // SAFETY: the framework passes a writable pointer.
             unsafe { *npvtp = q.as_ptr().cast() };
         }
