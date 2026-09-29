@@ -85,9 +85,11 @@ pub mod kvec;
 pub mod minor;
 pub mod objects;
 pub mod offsets;
+pub mod resv;
 pub mod state;
 #[cfg(not(test))]
 pub mod uaccess;
+pub mod wwmutex;
 
 #[cfg(not(test))]
 pub use device::Device;
