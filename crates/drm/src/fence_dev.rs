@@ -50,42 +50,6 @@ const ENODEV: Errno = match Errno::new(ddi::sys::errno::ENODEV) {
     None => Errno::EINVAL,
 };
 
-ddi::named_kstat! {
-    /// The `sync` kstat of a DRM device (`kstat -m <driver> -n sync`).
-    pub struct SyncKstat {
-        /// Live fences.
-        pub fences: u64,
-        /// Fences signalled so far.
-        pub signaled: u64,
-        /// Fences signalled with an error so far.
-        pub errors: u64,
-        /// Registered fence callbacks.
-        pub callbacks: u64,
-        /// Live fence arrays.
-        pub arrays: u64,
-        /// Live timeline points.
-        pub chains: u64,
-        /// Fences released by the task queue so far.
-        pub deferred: u64,
-        /// Runs of the release task so far.
-        pub drains: u64,
-        /// Blocking waits so far.
-        pub waits: u64,
-        /// Waits that timed out so far.
-        pub timeouts: u64,
-        /// Waits a signal interrupted so far.
-        pub interrupted: u64,
-        /// Live sync objects.
-        pub syncobjs: u64,
-        /// Live sync files.
-        pub sync_files: u64,
-        /// Live dma-bufs.
-        pub dmabufs: u64,
-        /// Anonymous minors in use.
-        pub anon_files: u64,
-    }
-}
-
 /// The sync object handles of one open file.
 pub(crate) struct FileSync {
     pub(crate) objs: KMutex<IdMap<Syncobj, KIdSpace>>,
@@ -101,7 +65,6 @@ pub struct SyncCore<O: GemObject> {
     /// always ready (sync object files), for pollers that asked for other
     /// events.
     idle: PollBox,
-    kstat: Option<TypedKstat<SyncKstat>>,
 }
 
 impl<O: GemObject> SyncCore<O> {
@@ -116,15 +79,8 @@ impl<O: GemObject> SyncCore<O> {
     ) -> Result<KArc<SyncCore<O>>, Errno> {
         let domain = FenceDomain::new(dev, pri, ctx)?;
         let anon = AnonFiles::new(&dev, index, ctx)?;
-        let kstat = TypedKstat::<SyncKstat>::new(
-            ddi::KstatId { module: dev.driver_name(), instance: dev.instance(), name: c"sync", class: c"misc" },
-            ctx,
-        );
-        if kstat.is_err() {
-            dev.warn(format_args!("cannot create the sync kstat; statistics are unavailable"));
-        }
         let idle = PollBox::new(ctx);
-        KArc::new(SyncCore { domain, dev, files: KMutex::new(KVec::new()), anon, idle, kstat: kstat.ok() }, ctx)
+        KArc::new(SyncCore { domain, dev, files: KMutex::new(KVec::new()), anon, idle }, ctx)
     }
 
     /// Returns the fence domain, for drivers that create fences.
@@ -132,27 +88,9 @@ impl<O: GemObject> SyncCore<O> {
         &self.domain
     }
 
-    /// Copies the counters to the kstat. Thread context.
+    /// Copies the counters to the `sync` kstat. Thread context.
     pub fn publish(&self) {
-        let Some(k) = &self.kstat else { return };
-        let s = &self.domain.stats;
-        let l = |a: &core::sync::atomic::AtomicU64| a.load(core::sync::atomic::Ordering::Relaxed);
-        let mut g = k.lock();
-        g.fences.set(l(&s.fences));
-        g.signaled.set(l(&s.signaled));
-        g.errors.set(l(&s.errors));
-        g.callbacks.set(l(&s.callbacks));
-        g.arrays.set(l(&s.arrays));
-        g.chains.set(l(&s.chains));
-        g.deferred.set(l(&s.deferred));
-        g.drains.set(l(&s.drains));
-        g.waits.set(l(&s.waits));
-        g.timeouts.set(l(&s.timeouts));
-        g.interrupted.set(l(&s.interrupted));
-        g.syncobjs.set(l(&s.syncobjs));
-        g.sync_files.set(l(&s.sync_files));
-        g.dmabufs.set(l(&s.dmabufs));
-        g.anon_files.set(l(&s.anon_files));
+        self.domain.publish();
     }
 
     /// The work every thread-context entry point does first.
