@@ -226,7 +226,13 @@ if [ -d /dev/dri ]; then
 	if [ $had_dri = no ]; then
 		# devfsadm -C only removes links that a link module claims; the
 		# directory itself did not exist before the test.
-		step rm -f /dev/dri/card0 /dev/dri/renderD128
+		# Every link to an rdrmnull node (card1 and renderD129 too with
+		# rdrmnull-two.conf).
+		for l in /dev/dri/*; do
+			case $(readlink "$l" 2>/dev/null) in
+			*/rdrmnull@*) step rm -f "$l" ;;
+			esac
+		done
 		step rmdir /dev/dri
 	fi
 fi
