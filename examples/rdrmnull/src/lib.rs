@@ -64,6 +64,10 @@
 //! instance, and map minor numbers with [`drm::minor::instance_of_minor`].
 #![no_std]
 
+extern crate alloc;
+
+mod kms;
+
 use core::ffi::{CStr, c_int, c_void};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -147,6 +151,13 @@ pub const RDRMNULL_IOCTL_CREATE_MOVABLE: u32 = ioc::drm_iowr::<CreateMovable>(0x
 pub const RDRMNULL_IOCTL_MOVE: u32 = ioc::drm_iowr::<Move>(0x41);
 /// `DRM_IOW(DRM_COMMAND_BASE + 2, struct rdrmnull_put_later)`.
 pub const RDRMNULL_IOCTL_PUT_LATER: u32 = ioc::drm_iow::<PutLater>(0x42);
+/// `DRM_IOR(DRM_COMMAND_BASE + 3, struct rdrmnull_scanout)`: what the
+/// software scanout shows and its checksum (see the `kms` module).
+pub const RDRMNULL_IOCTL_SCANOUT: u32 = ioc::drm_ior::<kms::ScanoutInfo>(0x43);
+
+// SAFETY: integer fields only, no padding (asserted below).
+unsafe impl Plain for kms::ScanoutInfo {}
+const _: () = assert!(size_of::<kms::ScanoutInfo>() == 56);
 
 /// Primary node, no authentication: the tests run as root on `card0`.
 const TEST_ONLY: Perm = Perm { auth: false, master: false, root_only: false, render_allow: false };
@@ -380,8 +391,10 @@ fn drill_dma_attr(dev: &DevInfo, drill: DmaDrill, ctx: &Sleepable) -> Result<Dma
     }
 }
 
-/// The DRM driver: no hardware, only the test timer and the DMA drill.
+/// The DRM driver: no hardware, only the test timer, the DMA drill and a
+/// virtual display.
 pub struct NullDriver {
+    kms: kms::NullKms,
     timer: Mutex<Option<LaterTimer>>,
     dma: DmaDrill,
     /// The DMA attributes of the drill, from [`drill_dma_attr`].
@@ -509,7 +522,8 @@ impl drm::Driver for NullDriver {
     const PATCHLEVEL: i32 = 0;
     const FEATURES: Features =
         Features::MODESET.union(Features::ATOMIC).union(Features::RENDER).union(Features::GEM).union(Features::DUMB);
-    const MODE_CONFIG: ModeConfig = ModeConfig { preferred_depth: 24, prefer_shadow: true, ..ModeConfig::DEFAULT };
+    const MODE_CONFIG: ModeConfig =
+        ModeConfig { preferred_depth: 24, prefer_shadow: true, fb_modifiers: true, ..ModeConfig::DEFAULT };
     // Small limits, so that the tests reach them without exhausting the
     // test machine: 16 MiB per object (a 2048 by 2048 dumb buffer of 32-bit
     // pixels), 64 MiB for the device.
@@ -519,6 +533,7 @@ impl drm::Driver for NullDriver {
         DriverIoctl { cmd: RDRMNULL_IOCTL_CREATE_MOVABLE, perm: TEST_ONLY },
         DriverIoctl { cmd: RDRMNULL_IOCTL_MOVE, perm: TEST_ONLY },
         DriverIoctl { cmd: RDRMNULL_IOCTL_PUT_LATER, perm: TEST_ONLY },
+        DriverIoctl { cmd: RDRMNULL_IOCTL_SCANOUT, perm: TEST_ONLY },
     ];
     type Object = NullObject;
 
@@ -534,6 +549,14 @@ impl drm::Driver for NullDriver {
             RDRMNULL_IOCTL_CREATE_MOVABLE => self.create_movable(dev, file, arg, ctx),
             RDRMNULL_IOCTL_MOVE => self.move_object(dev, file, arg, ctx),
             RDRMNULL_IOCTL_PUT_LATER => self.put_later(dev, file, arg, ctx),
+            RDRMNULL_IOCTL_SCANOUT => {
+                let mut a = UserArg::<kms::ScanoutInfo>::zeroed();
+                let info = self.kms.scanout();
+                // SAFETY: a whole-value assignment of a padding-free
+                // structure of integers: every byte is written.
+                *unsafe { a.get_mut() } = info;
+                a.write(arg)
+            }
             _ => Err(Errno::ENOTTY),
         }
     }
@@ -553,7 +576,12 @@ impl drm::Driver for NullDriver {
         }
     }
 
+    fn kms(&self) -> Option<&dyn drm::kms::KmsDriver<GemRef<NullObject>>> {
+        Some(&self.kms)
+    }
+
     fn before_detach(&self, ctx: &Sleepable) {
+        self.kms.shutdown();
         // Cancel or finish the timer, then drop a reference it never got to.
         let t = self.timer.lock().take();
         drop(t);
@@ -571,7 +599,12 @@ impl Driver for RDrmNull {
     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
         let dma = DmaDrill::from_conf(&node, ctx)?;
         let dma_attr = drill_dma_attr(&node, dma, ctx)?;
-        drm::Device::attach(node, NullDriver { timer: Mutex::new(None), dma, dma_attr }, ctx)
+        let kms = kms::NullKms::new(ctx).map_err(|_| DdiError)?;
+        let dev = drm::Device::attach(node, NullDriver { kms, timer: Mutex::new(None), dma, dma_attr }, ctx)?;
+        if let Some(k) = dev.kms() {
+            dev.driver().kms.set_vblank(k.vblank_handle());
+        }
+        Ok(dev)
     }
 
     fn detach(inst: Self::Instance, _dev: DevInfo, ctx: &Sleepable) -> Result<(), (Self::Instance, DdiError)> {
