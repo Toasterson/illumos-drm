@@ -373,8 +373,8 @@ test_caps(int fd, const char *node)
 	(void) snprintf(what, sizeof (what), "%s: DRM_CAP_DUMB_PREFER_SHADOW is 1", node);
 	check(drmGetCap(fd, DRM_CAP_DUMB_PREFER_SHADOW, &v) == 0 && v == 1, what);
 	v = 0xdead;
-	(void) snprintf(what, sizeof (what), "%s: DRM_CAP_ADDFB2_MODIFIERS stays 0 until R3", node);
-	check(drmGetCap(fd, DRM_CAP_ADDFB2_MODIFIERS, &v) == 0 && v == 0, what);
+	(void) snprintf(what, sizeof (what), "%s: DRM_CAP_ADDFB2_MODIFIERS is 1 since R3", node);
+	check(drmGetCap(fd, DRM_CAP_ADDFB2_MODIFIERS, &v) == 0 && v == 1, what);
 }
 
 /* --- dumb buffers: arguments --- */

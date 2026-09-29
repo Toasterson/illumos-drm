@@ -566,8 +566,25 @@ test_framebuffers(int fd, int fd2)
 	}
 	drmModeFreeFB(info);
 	info = drmModeGetFB(fd2, fb);
-	check(info != NULL && info->handle == 0, "GETFB from a non-master file: no handle");
+	check(info != NULL && info->handle != 0, "GETFB from a non-master root file: a handle (PRIV_SYS_DEVICES)");
+	if (info != NULL && info->handle != 0) {
+		struct drm_gem_close gc = { info->handle, 0 };
+		(void) xioctl(fd2, DRM_IOCTL_GEM_CLOSE, &gc);
+	}
 	drmModeFreeFB(info);
+	{
+		pid_t pid = fork();
+		int st = -1;
+		if (pid == 0) {
+			int nfd;
+			if (setuid(60001) != 0 || (nfd = open(CARD, O_RDWR)) < 0)
+				_exit(2);
+			info = drmModeGetFB(nfd, fb);
+			_exit(info != NULL && info->handle == 0 && info->width == 256 ? 0 : 1);
+		}
+		(void) waitpid(pid, &st, 0);
+		check(WIFEXITED(st) && WEXITSTATUS(st) == 0, "GETFB from an unprivileged non-master: no handle");
+	}
 	(void) memset(&f2, 0, sizeof (f2));
 	f2.fb_id = fb2;
 	check(xioctl(fd, DRM_IOCTL_MODE_GETFB2, &f2) == 0 && f2.pixel_format == XRGB8888 &&
@@ -655,7 +672,7 @@ static void
 test_legacy(int fd, int fd2)
 {
 	struct rdrmnull_scanout s;
-	struct buf a, b, c16, cur, big;
+	struct buf a, b, cur, big;
 	uint32_t fa = 0, fb = 0, f16 = 0, conn = conn_id;
 	struct drm_mode_crtc_page_flip pf;
 	drmModeCrtcPtr crtc;
@@ -670,13 +687,13 @@ test_legacy(int fd, int fd2)
 	buf_fill(&b, 0x2222);
 	check(addfb2(fd, 1024, 768, XRGB8888, a.handle, a.pitch, 0, 0, &fa) == 0 &&
 	    addfb2(fd, 1024, 768, XRGB8888, b.handle, b.pitch, 0, 0, &fb) == 0, "ADDFB2 of both");
-	check(drmModeSetCrtc(fd2, crtc_id, fa, 0, 0, &conn, 1, &mode1024) == -1 && errno == EACCES,
+	check(drmModeSetCrtc(fd2, crtc_id, fa, 0, 0, &conn, 1, &mode1024) == -EACCES,
 	    "SETCRTC from a non-master file is EACCES");
-	check(drmModeSetCrtc(fd, crtc_id, 0xffffffff, 0, 0, &conn, 1, &mode1024) == -1 && errno == EINVAL,
+	check(drmModeSetCrtc(fd, crtc_id, 0xffffffff, 0, 0, &conn, 1, &mode1024) == -EINVAL,
 	    "SETCRTC with fb -1 and no current framebuffer is EINVAL");
-	check(drmModeSetCrtc(fd, crtc_id, fa, 1, 0, &conn, 1, &mode1024) == -1 && errno == ENOSPC,
+	check(drmModeSetCrtc(fd, crtc_id, fa, 1, 0, &conn, 1, &mode1024) == -ENOSPC,
 	    "SETCRTC with a viewport past the framebuffer is ENOSPC");
-	check(drmModeSetCrtc(fd, crtc_id, fa, 0, 0, NULL, 0, &mode1024) == -1 && errno == EINVAL,
+	check(drmModeSetCrtc(fd, crtc_id, fa, 0, 0, NULL, 0, &mode1024) == -EINVAL,
 	    "SETCRTC with a mode and no connectors is EINVAL");
 	check(drmModeSetCrtc(fd, crtc_id, fa, 0, 0, &conn, 1, &mode1024) == 0, "SETCRTC 1024x768 with framebuffer A");
 	crtc = drmModeGetCrtc(fd, crtc_id);
@@ -693,7 +710,7 @@ test_legacy(int fd, int fd2)
 
 	/* A page flip with an event: poll, read, then the scanout shows B. */
 	check(drmModePageFlip(fd, crtc_id, fb, DRM_MODE_PAGE_FLIP_EVENT, (void *)0x1234) == 0, "PAGE_FLIP to B");
-	check(drmModePageFlip(fd, crtc_id, fa, 0, NULL) == -1 && errno == EBUSY,
+	check(drmModePageFlip(fd, crtc_id, fa, 0, NULL) == -EBUSY,
 	    "a second PAGE_FLIP before the first completed is EBUSY");
 	n = read_event(fd, 1000, ev, sizeof (ev));
 	check(n == 32 && v->base.type == DRM_EVENT_FLIP_COMPLETE && v->base.length == 32 &&
@@ -703,16 +720,16 @@ test_legacy(int fd, int fd2)
 	    "after the event the scanout shows B");
 	/* Page flip argument errors. */
 	check(addfb2(fd, 1024, 768, RGB565, a.handle, a.pitch, 0, 0, &f16) == 0, "ADDFB2 RGB565");
-	check(drmModePageFlip(fd, crtc_id, f16, 0, NULL) == -1 && errno == EINVAL,
+	check(drmModePageFlip(fd, crtc_id, f16, 0, NULL) == -EINVAL,
 	    "PAGE_FLIP to another format is EINVAL");
-	check(drmModePageFlip(fd, crtc_id, fa, DRM_MODE_PAGE_FLIP_ASYNC, NULL) == -1 && errno == EINVAL,
+	check(drmModePageFlip(fd, crtc_id, fa, DRM_MODE_PAGE_FLIP_ASYNC, NULL) == -EINVAL,
 	    "PAGE_FLIP_ASYNC is EINVAL");
 	(void) memset(&pf, 0, sizeof (pf));
 	pf.crtc_id = crtc_id;
 	pf.fb_id = fa;
 	pf.flags = 0x80;
 	check(xioctl(fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf) == EINVAL, "PAGE_FLIP with unknown flags is EINVAL");
-	check(drmModePageFlip(fd, crtc_id, 4242, 0, NULL) == -1 && errno == ENOENT,
+	check(drmModePageFlip(fd, crtc_id, 4242, 0, NULL) == -ENOENT,
 	    "PAGE_FLIP to an unknown framebuffer is ENOENT");
 	(void) rmfb(fd, f16);
 
@@ -730,23 +747,23 @@ test_legacy(int fd, int fd2)
 		check(x == 100 && fbid != 0, "the cursor plane is at x 100 with an internal framebuffer");
 	}
 	check(drmModeSetCursor2(fd, crtc_id, cur.handle, 64, 64, 3, 4) == 0, "CURSOR2 with a hotspot");
-	check(drmModeSetCursor(fd, crtc_id, big.handle, 128, 128) == -1 && errno == EINVAL,
+	check(drmModeSetCursor(fd, crtc_id, big.handle, 128, 128) == -EINVAL,
 	    "CURSOR: 128x128 is refused by the driver (EINVAL)");
 	check(drmModeSetCursor(fd, crtc_id, 0, 0, 0) == 0, "CURSOR: hide");
-	check(drmModeSetCursor(fd, 4242, 0, 0, 0) == -1 && errno == ENOENT, "CURSOR on an unknown CRTC is ENOENT");
+	check(drmModeSetCursor(fd, 4242, 0, 0, 0) == -ENOENT, "CURSOR on an unknown CRTC is ENOENT");
 	buf_destroy(fd, &big);
 	buf_destroy(fd, &cur);
 
 	/* Gamma. */
 	check(drmModeCrtcGetGamma(fd, crtc_id, 256, red, green, blue) == 0 && red[0] == 0 && red[255] == 0xffff,
 	    "GETGAMMA: a linear ramp of 256");
-	check(drmModeCrtcGetGamma(fd, crtc_id, 255, red, green, blue) == -1 && errno == EINVAL,
+	check(drmModeCrtcGetGamma(fd, crtc_id, 255, red, green, blue) == -EINVAL,
 	    "GETGAMMA with the wrong size is EINVAL");
 	red[10] = 7;
 	check(drmModeCrtcSetGamma(fd, crtc_id, 256, red, green, blue) == 0, "SETGAMMA");
 	(void) memset(red, 0, sizeof (red));
 	check(drmModeCrtcGetGamma(fd, crtc_id, 256, red, green, blue) == 0 && red[10] == 7, "GETGAMMA reads it back");
-	check(drmModeCrtcSetGamma(fd2, crtc_id, 256, red, green, blue) == -1 && errno == EACCES,
+	check(drmModeCrtcSetGamma(fd2, crtc_id, 256, red, green, blue) == -EACCES,
 	    "SETGAMMA from a non-master file is EACCES");
 
 	/* DPMS through the legacy property. */
@@ -760,7 +777,7 @@ test_legacy(int fd, int fd2)
 		check(drmModeConnectorSetProperty(fd, conn_id, dpms, DRM_MODE_DPMS_ON) == 0, "SETPROPERTY DPMS On");
 		(void) prop_id(fd, conn_id, DRM_MODE_OBJECT_CONNECTOR, "DPMS", &val);
 		check(val == DRM_MODE_DPMS_ON && scanout(fd, &s) && s.active, "DPMS reads back On and the CRTC is active");
-		check(drmModeConnectorSetProperty(fd, conn_id, find_prop(fd, "EDID"), 0) == -1 && errno == EINVAL,
+		check(drmModeConnectorSetProperty(fd, conn_id, find_prop(fd, "EDID"), 0) == -EINVAL,
 		    "SETPROPERTY of the immutable EDID is EINVAL");
 	}
 
@@ -949,10 +966,10 @@ test_atomic(int fd, int fd2)
 		(void) prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y", &val);
 		check(val == 400, "CRTC_Y reads back 400");
 		check(drmModeObjectSetProperty(fd, cursor_id, DRM_MODE_OBJECT_CRTC,
-		    P(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y"), 1) == -1 && errno == ENOENT,
+		    P(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y"), 1) == -ENOENT,
 		    "OBJ_SETPROPERTY with the wrong object type is ENOENT");
 		check(drmModeObjectSetProperty(fd, cursor_id, DRM_MODE_OBJECT_PLANE,
-		    P(fd, crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE"), 1) == -1 && errno == EINVAL,
+		    P(fd, crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE"), 1) == -EINVAL,
 		    "OBJ_SETPROPERTY of a property the object lacks is EINVAL");
 		check(drmModeObjectSetProperty(fd, conn_id, DRM_MODE_OBJECT_CONNECTOR,
 		    P(fd, conn_id, DRM_MODE_OBJECT_CONNECTOR, "link-status"), DRM_MODE_LINK_STATUS_GOOD) == 0,

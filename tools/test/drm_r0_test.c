@@ -149,12 +149,13 @@ test_caps(int fd, const char *node)
 		{ DRM_CAP_SYNCOBJ_TIMELINE, 0, "SYNCOBJ_TIMELINE" },
 		{ DRM_CAP_CURSOR_WIDTH, 64, "CURSOR_WIDTH" },
 		{ DRM_CAP_CURSOR_HEIGHT, 64, "CURSOR_HEIGHT" },
-		{ DRM_CAP_ADDFB2_MODIFIERS, 0, "ADDFB2_MODIFIERS" },
+		/* ADDFB2 with modifiers and vblank events exist since R3. */
+		{ DRM_CAP_ADDFB2_MODIFIERS, 1, "ADDFB2_MODIFIERS" },
 		/* Dumb buffers exist since R1; rdrmnull prefers 24 bits and a shadow. */
 		{ DRM_CAP_DUMB_BUFFER, 1, "DUMB_BUFFER" },
 		{ DRM_CAP_DUMB_PREFERRED_DEPTH, 24, "DUMB_PREFERRED_DEPTH" },
 		{ DRM_CAP_DUMB_PREFER_SHADOW, 1, "DUMB_PREFER_SHADOW" },
-		{ DRM_CAP_CRTC_IN_VBLANK_EVENT, 0, "CRTC_IN_VBLANK_EVENT" },
+		{ DRM_CAP_CRTC_IN_VBLANK_EVENT, 1, "CRTC_IN_VBLANK_EVENT" },
 	};
 	char what[128];
 	uint64_t val;
