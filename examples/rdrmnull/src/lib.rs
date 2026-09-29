@@ -8,9 +8,10 @@
 //! (`rdrmnull.conf` asks for instance 0), with
 //! the primary node `card0` and the render node `renderD128`. It declares
 //! mode setting and atomic support so that every client capability and
-//! every mode-setting capability path of the core can be exercised; it has
-//! no CRTCs, planes or connectors, and the mode-setting ioctls that would
-//! list them arrive with milestone R3.
+//! every mode-setting capability path of the core can be exercised. Since
+//! milestone R3 it has a virtual display (the `kms` module): one connector
+//! with a fixed EDID, one encoder, one CRTC with a primary and a cursor
+//! plane, a software vblank and a software scanout.
 //!
 //! Since milestone R1 it has GEM objects and dumb buffers in system memory.
 //! As a pseudo device it does no DMA (the pseudo nexus refuses DMA
@@ -42,9 +43,9 @@
 //!   built without it refuses `root-node` at attach and cannot name another
 //!   node at all.
 //!
-//! It also has three driver-private ioctls that exist only for the kernel
-//! tests (`tools/test/drm_r1_test.c`) and are not an interface for anything
-//! else:
+//! It also has four driver-private ioctls that exist only for the kernel
+//! tests (`tools/test/drm_r1_test.c`, `drm_r3_test.c`) and are not an
+//! interface for anything else:
 //!
 //! * `RDRMNULL_IOCTL_CREATE_MOVABLE` creates an object with two backings,
 //!   the stand-in for an object that the memory manager of a real GPU moves
@@ -58,6 +59,9 @@
 //! * `RDRMNULL_IOCTL_PUT_LATER` takes a reference to an object and drops it
 //!   from a `timeout(9F)` callback, in interrupt context, which exercises
 //!   the deferred release of the core.
+//! * `RDRMNULL_IOCTL_SCANOUT` reports the framebuffer the software scanout
+//!   shows, the vblank and latch counts, and a checksum of the visible
+//!   pixels.
 //!
 //! It is the kernel module the core is tested with, and the template for a
 //! real driver: implement [`drm::Driver`], use [`drm::Device`] as the
