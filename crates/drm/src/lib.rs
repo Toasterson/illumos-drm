@@ -78,6 +78,7 @@ pub mod gem;
 pub mod idmap;
 pub mod ioctl;
 pub mod karc;
+pub mod kms;
 mod kmem;
 pub mod kvec;
 pub mod minor;
