@@ -148,7 +148,8 @@ object files are always ready, as on Linux.
 decode the minor, look the entry up in the table of the device the minor
 names (it exists while the held file is open, and the held file keeps
 that device attached), `releasef()`. Sync object files and sync files of
-any device of the driver are accepted; a dma-buf of another device is
+any device of the driver whose fences are signalled at the same interrupt
+priority are accepted (`ENOTSUP` otherwise); a dma-buf of another device is
 `ENOTSUP` (cross-device import needs attach and a scatter/gather mapping,
 which no driver has yet); any other file is `EINVAL`, including files of
 other drivers built on this core, which link their own copy of it.
