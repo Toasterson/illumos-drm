@@ -33,6 +33,10 @@
  *   gcc -m32 -Wall -DPROBE32 -I$INC -o drm_r2_probe32 drm_r2_test.c
  */
 
+/* msg_control and the CMSG_* macros of SCM_RIGHTS need the XPG4.2 socket API. */
+#define	_XOPEN_SOURCE	600
+#define	__EXTENSIONS__
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
