@@ -750,6 +750,14 @@ impl NullDriver {
         } else {
             None
         };
+        // A detach that failed after before_detach cleared the slot: the
+        // device is in use again, so its timers must reach it again.
+        if let Some(slot) = SOFTS.get(self.index) {
+            slot.store(
+                &*self.soft as *const SoftInterrupt<Timeline> as *mut SoftInterrupt<Timeline>,
+                Ordering::Release,
+            );
+        }
         let seqno = self.seqno.fetch_add(1, Ordering::AcqRel) + 1;
         let f = Fence::new(domain, self.context.load(Ordering::Acquire), seqno, ctx)?;
         if let Some(e) = err {
