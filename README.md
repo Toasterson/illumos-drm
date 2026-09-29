@@ -107,7 +107,10 @@ and three test-only private ioctls (movable objects for the refault
 experiment, and a reference dropped from a timer), and is the kernel
 module the core is tested with, as well as the template for a real driver.
 Since R3 it also has a virtual display (`examples/rdrmnull/src/kms.rs`)
-and a fourth test-only ioctl that reports what its software scanout shows.
+and two more test-only ioctls: one reports what its software scanout
+shows, the other keeps a reference to an object across the close of every
+file, so that the R3 test can check that a refused detach leaves the
+device working.
 
 `xtask` builds and links kernel modules and checks interfaces (see below).
 `tools/uapi` regenerates `drm-uapi` and holds the C half of the layout

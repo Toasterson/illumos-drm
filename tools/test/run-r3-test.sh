@@ -9,8 +9,9 @@
 # vblanks, events through read(2) and poll(2), the software scanout), and
 # libdrm's modetest against the null driver (listing, a legacy mode set
 # with a dumb framebuffer, page flips with vblank events, an atomic mode
-# set), with the gem and kms kstats and the vmem arenas recorded before
-# unload. Run as root in a directory that holds:
+# set), a detach that is refused while rdrmnull holds a GEM object and
+# must leave the display working, with the gem and kms kstats and the vmem
+# arenas recorded before unload. Run as root in a directory that holds:
 #
 #   rdrmnull.a       from `cargo xtask build rdrmnull`
 #   rdrmnull.conf    examples/rdrmnull/rdrmnull.conf
@@ -130,6 +131,57 @@ modetest_steps() {
 	fi
 }
 
+# A refused detach must leave the device working. rdrmnull keeps a
+# reference to a GEM object after every file is closed (drm_r3_test hold),
+# so detach(9E) refuses; before the core checked everything ahead of any
+# teardown, the refused device had lost its mode-setting state and its
+# vblank source. modetest must still list the display and page-flip with
+# vblank events; drm_r3_test release drops the reference, and the unload
+# at the end must succeed.
+refused_detach_steps() {
+	step ./drm_r3_test hold || fail=1
+	refusals=$(grep -c 'detach refused: GEM state in use' /var/adm/messages)
+	id=$(modinfo | awk '$6 == "rdrmnull" {print $1}')
+	echo "rdrmnull module id: $id"
+	if [ -z "$id" ]; then
+		echo "FAIL rdrmnull is not loaded"
+		fail=1
+	elif step modunload -i "$id"; then
+		echo "FAIL modunload succeeded while rdrmnull held a GEM object"
+		fail=1
+	else
+		echo "PASS modunload refused while rdrmnull holds a GEM object"
+	fi
+	step sh -c 'grep "detach refused" /var/adm/messages | tail -2'
+	if [ "$(grep -c 'detach refused: GEM state in use' /var/adm/messages)" -gt "$refusals" ]; then
+		echo "PASS detach(9E) refused it: GEM state in use"
+	else
+		echo "FAIL no detach(9E) refusal was logged"
+		fail=1
+	fi
+	step sh -c 'modinfo | grep rdrmnull'
+	gemstat "after the refused detach"
+	if [ -x "$MODETEST" ]; then
+		if modetest_run refused-list 0 -M rdrmnull &&
+		    grep -q '^Connectors:' modetest-refused-list.out &&
+		    grep -q '1024x768' modetest-refused-list.out; then
+			echo "PASS after the refused detach, modetest lists the display (1024x768)"
+		else
+			echo "FAIL after the refused detach, modetest listing"
+			fail=1
+		fi
+		if modetest_run refused-vsync 5 -M rdrmnull -s "$conn@$crtc:1024x768" -v &&
+		    awk '/freq:/ {f = $2 + 0; if (f > 55 && f < 65) ok++} END {exit !(ok >= 2)}' modetest-refused-vsync.out; then
+			echo "PASS after the refused detach, modetest -v page-flips with vblank events at about 60 Hz"
+		else
+			echo "FAIL after the refused detach, modetest -v"
+			fail=1
+		fi
+	fi
+	step ./drm_r3_test release || fail=1
+	gemstat "after the release"
+}
+
 CONF=${RDRMNULL_CONF:-rdrmnull.conf}
 case $(sed -e 's/#.*//' "$CONF" | tr -d ' \t') in
 *'dma-mode="self"'* | *'dma-mode="root-node"'*) RDRMNULL_DMA=1 ;;
@@ -215,6 +267,7 @@ if [ $fail -eq 0 ]; then
 	gemstat "after the R3 test"
 	modetest_steps
 	gemstat "after the tests"
+	refused_detach_steps
 	step sh -c 'echo "::vmem" | mdb -k | awk "NR == 1 || /rdrmnull|umem_np/"'
 	step sh -c 'tail -5 /var/adm/messages'
 

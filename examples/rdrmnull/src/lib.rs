@@ -43,7 +43,7 @@
 //!   built without it refuses `root-node` at attach and cannot name another
 //!   node at all.
 //!
-//! It also has four driver-private ioctls that exist only for the kernel
+//! It also has five driver-private ioctls that exist only for the kernel
 //! tests (`tools/test/drm_r1_test.c`, `drm_r3_test.c`) and are not an
 //! interface for anything else:
 //!
@@ -62,6 +62,10 @@
 //! * `RDRMNULL_IOCTL_SCANOUT` reports the framebuffer the software scanout
 //!   shows, the vblank and latch counts, and a checksum of the visible
 //!   pixels.
+//! * `RDRMNULL_IOCTL_HOLD` keeps a reference to an object in the driver
+//!   until it is asked to drop it, also across the close of every file, the
+//!   stand-in for a buffer a real driver still uses. `detach(9E)` is then
+//!   refused, and the test checks that the device still works.
 //!
 //! It is the kernel module the core is tested with, and the template for a
 //! real driver: implement [`drm::Driver`], use [`drm::Device`] as the
@@ -134,12 +138,26 @@ pub struct PutLater {
     pub delay_ms: u32,
 }
 
+/// `RDRMNULL_IOCTL_HOLD`: `handle` and `hold` in.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Hold {
+    /// With `hold` 1, the handle whose object the driver keeps a reference
+    /// to (`EBUSY` if it already keeps one); ignored with `hold` 0.
+    pub handle: u32,
+    /// 1 to take the reference, 0 to drop it (`ENOENT` if there is none).
+    pub hold: u32,
+}
+
 // SAFETY: integer fields only, no padding.
 unsafe impl Plain for CreateMovable {}
 // SAFETY: as above.
 unsafe impl Plain for Move {}
 // SAFETY: as above.
 unsafe impl Plain for PutLater {}
+// SAFETY: as above.
+unsafe impl Plain for Hold {}
+const _: () = assert!(size_of::<Hold>() == 8);
 
 const _: () = assert!(size_of::<CreateMovable>() == 16 && size_of::<Move>() == 16 && size_of::<PutLater>() == 8);
 
@@ -158,6 +176,8 @@ pub const RDRMNULL_IOCTL_PUT_LATER: u32 = ioc::drm_iow::<PutLater>(0x42);
 /// `DRM_IOR(DRM_COMMAND_BASE + 3, struct rdrmnull_scanout)`: what the
 /// software scanout shows and its checksum (see the `kms` module).
 pub const RDRMNULL_IOCTL_SCANOUT: u32 = ioc::drm_ior::<kms::ScanoutInfo>(0x43);
+/// `DRM_IOW(DRM_COMMAND_BASE + 4, struct rdrmnull_hold)`.
+pub const RDRMNULL_IOCTL_HOLD: u32 = ioc::drm_iow::<Hold>(0x44);
 
 // SAFETY: integer fields only, no padding (asserted below).
 unsafe impl Plain for kms::ScanoutInfo {}
@@ -400,6 +420,9 @@ fn drill_dma_attr(dev: &DevInfo, drill: DmaDrill, ctx: &Sleepable) -> Result<Dma
 pub struct NullDriver {
     kms: kms::NullKms,
     timer: Mutex<Option<LaterTimer>>,
+    /// The reference `RDRMNULL_IOCTL_HOLD` keeps; not dropped by
+    /// `before_detach`, so that the detach is refused while it exists.
+    held: Mutex<Option<GemRef<NullObject>>>,
     dma: DmaDrill,
     /// The DMA attributes of the drill, from [`drill_dma_attr`].
     dma_attr: DmaAttr,
@@ -515,6 +538,33 @@ impl NullDriver {
         drop(old);
         Ok(())
     }
+
+    fn hold(
+        &self,
+        dev: &drm::Device<NullDriver>,
+        file: CloneId,
+        arg: &IoctlArg<'_>,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        let a = UserArg::<Hold>::read(arg)?;
+        let g = dev.gem().ok_or(Errno::ENXIO)?;
+        match a.get().hold {
+            1 => {
+                let mut held = self.held.lock();
+                if held.is_some() {
+                    return Err(Errno::EBUSY);
+                }
+                *held = Some(g.lookup(file, a.get().handle)?);
+                Ok(())
+            }
+            0 => {
+                let r = self.held.lock().take().ok_or(Errno::ENOENT)?;
+                r.put(ctx);
+                Ok(())
+            }
+            _ => Err(Errno::EINVAL),
+        }
+    }
 }
 
 impl drm::Driver for NullDriver {
@@ -538,6 +588,7 @@ impl drm::Driver for NullDriver {
         DriverIoctl { cmd: RDRMNULL_IOCTL_MOVE, perm: TEST_ONLY },
         DriverIoctl { cmd: RDRMNULL_IOCTL_PUT_LATER, perm: TEST_ONLY },
         DriverIoctl { cmd: RDRMNULL_IOCTL_SCANOUT, perm: TEST_ONLY },
+        DriverIoctl { cmd: RDRMNULL_IOCTL_HOLD, perm: TEST_ONLY },
     ];
     type Object = NullObject;
 
@@ -553,6 +604,7 @@ impl drm::Driver for NullDriver {
             RDRMNULL_IOCTL_CREATE_MOVABLE => self.create_movable(dev, file, arg, ctx),
             RDRMNULL_IOCTL_MOVE => self.move_object(dev, file, arg, ctx),
             RDRMNULL_IOCTL_PUT_LATER => self.put_later(dev, file, arg, ctx),
+            RDRMNULL_IOCTL_HOLD => self.hold(dev, file, arg, ctx),
             RDRMNULL_IOCTL_SCANOUT => {
                 let mut a = UserArg::<kms::ScanoutInfo>::zeroed();
                 let info = self.kms.scanout();
@@ -586,7 +638,8 @@ impl drm::Driver for NullDriver {
 
     fn before_detach(&self, ctx: &Sleepable) {
         // Only references the driver holds for itself go here; the display
-        // keeps running, because the detach may still be refused.
+        // keeps running, because the detach may still be refused. The
+        // reference of RDRMNULL_IOCTL_HOLD stays, so that it is.
         // Cancel or finish the timer, then drop a reference it never got to.
         let t = self.timer.lock().take();
         drop(t);
@@ -609,7 +662,11 @@ impl Driver for RDrmNull {
         let dma = DmaDrill::from_conf(&node, ctx)?;
         let dma_attr = drill_dma_attr(&node, dma, ctx)?;
         let kms = kms::NullKms::new(ctx).map_err(|_| DdiError)?;
-        let dev = drm::Device::attach(node, NullDriver { kms, timer: Mutex::new(None), dma, dma_attr }, ctx)?;
+        let dev = drm::Device::attach(
+            node,
+            NullDriver { kms, timer: Mutex::new(None), held: Mutex::new(None), dma, dma_attr },
+            ctx,
+        )?;
         if let Some(k) = dev.kms() {
             dev.driver().kms.set_vblank(k.vblank_handle());
         }

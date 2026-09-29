@@ -1308,14 +1308,65 @@ test_close_turns_off(void)
 	(void) close(fd);
 }
 
+/*
+ * "hold": rdrmnull keeps a reference to a GEM object after every file is
+ * closed (RDRMNULL_IOCTL_HOLD), so that the next detach(9E) is refused;
+ * run-r3-test.sh then checks that the device still works. "release": the
+ * driver drops the reference again.
+ */
+struct rdrmnull_hold {
+	uint32_t handle, hold;
+};
+#define	RDRMNULL_IOCTL_HOLD DRM_IOW(DRM_COMMAND_BASE + 0x04, struct rdrmnull_hold)
+
+static int
+hold_mode(int hold)
+{
+	static const char *f[] = { "objects" };
+	struct drm_mode_create_dumb c;
+	struct rdrmnull_hold h;
+	uint64_t objects = 0;
+	int fd;
+
+	fd = open(CARD, O_RDWR);
+	check(fd >= 0, "open " CARD);
+	if (fd < 0)
+		return (failures);
+	(void) memset(&h, 0, sizeof (h));
+	if (hold) {
+		(void) memset(&c, 0, sizeof (c));
+		c.width = 64;
+		c.height = 64;
+		c.bpp = 32;
+		check(xioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &c) == 0, "hold: a 64x64 dumb buffer");
+		h.handle = c.handle;
+		h.hold = 1;
+		check(xioctl(fd, RDRMNULL_IOCTL_HOLD, &h) == 0,
+		    "rdrmnull keeps a reference to it (RDRMNULL_IOCTL_HOLD)");
+		check(xioctl(fd, RDRMNULL_IOCTL_HOLD, &h) == EBUSY, "a second hold is EBUSY");
+	} else {
+		check(xioctl(fd, RDRMNULL_IOCTL_HOLD, &h) == 0, "release: rdrmnull drops the reference it kept");
+		check(xioctl(fd, RDRMNULL_IOCTL_HOLD, &h) == ENOENT, "dropping it again is ENOENT");
+	}
+	(void) close(fd);
+	msleep(100);
+	check(kstat_get("gem", f, &objects, 1) && objects == (hold ? 1 : 0),
+	    hold ? "after the close, the gem kstat still counts the held object" :
+	    "the gem kstat counts no object");
+	(void) printf("drm_r3_test %s: %d failures\n", hold ? "hold" : "release", failures);
+	return (failures > 255 ? 255 : failures);
+}
+
 int
 main(int argc, char **argv)
 {
 	int fd, fd2, rfd;
 	struct kms k;
 
-	(void) argc;
-	(void) argv;
+	if (argc == 2 && strcmp(argv[1], "hold") == 0)
+		return (hold_mode(1));
+	if (argc == 2 && strcmp(argv[1], "release") == 0)
+		return (hold_mode(0));
 	check(kms_idle("at start"), "kstat rdrmnull:0:kms exists and is idle");
 	fd = open(CARD, O_RDWR);
 	check(fd >= 0, "open " CARD " (becomes master)");
