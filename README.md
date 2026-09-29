@@ -279,8 +279,8 @@ reached userland as `EFAULT`, which in a create ioctl reads as a bad user
 pointer. `tools/test/rdrmnull-dma-self-tiny.conf` lowers the largest DMA
 transfer of the `self` drill to one page, and
 `tools/test/drm_dma_errno_test.c` checks that a one-page dumb buffer binds
-and a four-page one fails with `ENOMEM`; it did on 28 September 2026
-(illumos `cda5b9a49f`).
+and a four-page one fails with `ENOMEM` and leaves nothing behind in the
+`gem` kstat; it did on 28 September 2026 (illumos `cda5b9a49f`).
 
 Object memory is locked, so a driver sets
 limits per object and per device (`MAX_OBJECT_SIZE`, `MAX_MEMORY`; 256 MiB
