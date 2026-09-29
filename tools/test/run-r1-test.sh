@@ -19,6 +19,8 @@
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #
 # RDRMNULL_CONF names another .conf to install instead of rdrmnull.conf:
+# tools/test/rdrmnull-two.conf (two devices, for the R2 cross-device
+# checks), or
 # the DMA drill variants tools/test/rdrmnull-dma-self.conf and
 # rdrmnull-dma-root-node.conf (see examples/rdrmnull/src/lib.rs). With
 # dma-mode "self" or "root-node" the R1 test expects every object to be
@@ -186,12 +188,25 @@ if [ $fail -eq 0 ]; then
 	wait $holder
 	echo "holder exited with $?"
 	rm -f hold.fifo
+	if [ $R2 = yes ]; then
+		# A fence left pending with no file open: the detach must cancel
+		# it (ECANCELED) instead of waiting 10 s or refusing.
+		step ./drm_r2_test pending || fail=1
+	fi
 	gemstat "before unload"
 	if [ -n "$id" ] && step modunload -i "$id"; then
 		echo "PASS modunload succeeded after the file was closed"
 	else
 		echo "FAIL modunload failed after the file was closed"
 		fail=1
+	fi
+	if [ $R2 = yes ]; then
+		if tail -20 /var/adm/messages | grep -q "detach cancelled 1 pending test fences"; then
+			echo "PASS the detach cancelled the pending fence"
+		else
+			echo "FAIL no cancelled fence was reported by the detach"
+			fail=1
+		fi
 	fi
 	step sh -c 'modinfo | grep rdrmnull || echo "rdrmnull not loaded"'
 	step sh -c 'echo "::vmem" | mdb -k | awk "NR == 1 || /rdrmnull/"; echo "(no rdrmnull arenas above: all were destroyed)"'
