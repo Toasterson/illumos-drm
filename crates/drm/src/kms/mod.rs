@@ -6,3 +6,8 @@
 
 pub mod edid;
 pub mod modes;
+pub mod events;
+pub mod formats;
+pub mod objects;
+pub mod props;
+pub mod state;
