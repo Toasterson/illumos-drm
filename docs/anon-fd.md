@@ -137,9 +137,13 @@ exits (`devmap_setup()` does not unmap it) and keeps the file open.
 **Poll.** A sync file registers a fence callback when it is created; the
 callback calls `pollwakeup(9F)` in the signaller's context (a soft
 interrupt in `rdrmnull`). `chpoll(9E)` reports `POLLIN` once the fence has
-signalled and registers the file's `pollhead` otherwise. The sync file
-removes the callback, waiting for a running one, before its `pollhead` is
-cleaned and freed in `close(9E)`. Polling a dma-buf (implicit
+signalled and hands the file's `pollhead` (a `ddi::PollBox`) to the glue,
+which registers it when the manual asks for it. The sync file removes the
+callback, waiting for a running one, before its `pollhead` is cleaned and
+freed in `close(9E)`; the head is registered with the `unsafe`
+`PollHead::registration_unchecked`, because the anonymous-file table, not
+the device instance, owns it, and that table keeps it until the polled
+file's `close(9E)`. Polling a dma-buf (implicit
 synchronisation through its reservation, `POLLIN` for the write fences,
 `POLLOUT` for all) is not implemented yet and fails with `ENOTSUP`; sync
 object files are always ready, as on Linux.
