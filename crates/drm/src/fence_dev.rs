@@ -20,7 +20,7 @@
 //! inside, never around, these.
 
 use ddi::prelude::*;
-use ddi::private::fd::FdFlags;
+use ddi::private::fd::{FdFlags, FileRef};
 
 use crate::anon_fd::{AnonFiles, AnonObj};
 use crate::defer::Ctx;
@@ -31,6 +31,7 @@ use crate::karc::KArc;
 use crate::ksync::KMutex;
 use crate::kvec::KVec;
 use crate::minor::CloneId;
+use crate::resv::Usage;
 use crate::sync_file::{self, DmaBufSync, SyncFenceInfo, SyncFile, SyncFileInfo, SyncMergeData};
 use crate::syncobj::Syncobj;
 use crate::uaccess::{Plain, UserArg, copy_out_array};
@@ -43,6 +44,9 @@ unsafe impl Plain for SyncFileInfo {}
 unsafe impl Plain for SyncFenceInfo {}
 // SAFETY: as above.
 unsafe impl Plain for DmaBufSync {}
+
+/// `ENOTSUP`, a dma-buf of another device.
+const ENOTSUP: Errno = Errno::ENOTSUP;
 
 /// `ENODEV`, `mmap(2)` of a file that cannot be mapped.
 const ENODEV: Errno = match Errno::new(ddi::sys::errno::ENODEV) {
@@ -59,6 +63,7 @@ pub(crate) struct FileSync {
 pub struct SyncCore<O: GemObject> {
     pub(crate) domain: KArc<FenceDomain>,
     pub(crate) dev: DevInfo,
+    index: u32,
     files: KMutex<KVec<Option<KArc<FileSync>>>>,
     pub(crate) anon: AnonFiles<O>,
     /// The poll head of the device's DRM files (no events before R3).
@@ -78,7 +83,45 @@ impl<O: GemObject> SyncCore<O> {
         let domain = FenceDomain::new(dev, pri, ctx)?;
         let anon = AnonFiles::new(&dev, index, ctx)?;
         let drm_poll = PollHead::new(ctx);
-        KArc::new(SyncCore { domain, dev, files: KMutex::new(KVec::new()), anon, drm_poll }, ctx)
+        let core = KArc::new(SyncCore { domain, dev, index, files: KMutex::new(KVec::new()), anon, drm_poll }, ctx)?;
+        if !registry::insert(index, &*core) {
+            return Err(Errno::EEXIST);
+        }
+        Ok(core)
+    }
+
+    /// Looks up descriptor `fd` of the calling process: the object if it
+    /// is an anonymous file of any device of this driver (they share this
+    /// code, so a sync object or sync file of one device can be imported
+    /// into another), `EINVAL` for any other file, `EBADF` for a closed
+    /// descriptor. With `local_only` (dma-bufs, whose import across
+    /// devices needs an attach the core does not have), another device's
+    /// file is `ENOTSUP`.
+    pub(crate) fn lookup(
+        &self,
+        fd: i32,
+        arg: &IoctlArg<'_>,
+        local_only: bool,
+        ctx: &Sleepable,
+    ) -> Result<AnonObj<O>, Errno> {
+        let f = FileRef::get(fd, arg)?;
+        let m = f.own_minor(&self.dev).ok_or(Errno::EINVAL)?;
+        let (index, id) = crate::anon_fd::decode(m.0).ok_or(Errno::EINVAL)?;
+        let obj = if index == self.index {
+            self.anon.get(id)
+        } else {
+            // SAFETY: the held file is an open file of device `index`, which
+            // therefore cannot detach (and unregister) during this call.
+            let other = unsafe { registry::get::<O>(index) }.ok_or(Errno::EINVAL)?;
+            other.anon.get(id)
+        };
+        drop(f);
+        let obj = obj.ok_or(Errno::EINVAL)?;
+        if index != self.index && local_only {
+            obj.put(ctx);
+            return Err(ENOTSUP);
+        }
+        Ok(obj)
     }
 
     /// Returns the fence domain, for drivers that create fences.
@@ -207,15 +250,21 @@ impl<O: GemObject> SyncCore<O> {
         let r = match (&obj, cmd) {
             (AnonObj::SyncFile(sf), sync_file::SYNC_IOC_MERGE) => self.sync_merge(sf, arg, ctx),
             (AnonObj::SyncFile(sf), sync_file::SYNC_IOC_FILE_INFO) => self.sync_info(sf, arg, ctx),
-            (AnonObj::DmaBuf(_), sync_file::DMA_BUF_IOCTL_SYNC) => {
+            (AnonObj::DmaBuf(g), sync_file::DMA_BUF_IOCTL_SYNC) => {
                 // The memory is cache-coherent system memory, so there is
-                // nothing to flush; the flags are checked as Linux does.
+                // nothing to flush. The start of CPU access waits for the
+                // GPU work on the buffer, as Linux's
+                // dma_buf_begin_cpu_access does: for reading, the writers;
+                // for writing, the readers too; interruptibly (EINTR).
                 let s = UserArg::<DmaBufSync>::read(arg)?;
                 let f = s.get().flags;
                 if f & !sync_file::DMA_BUF_SYNC_VALID != 0 || f & sync_file::DMA_BUF_SYNC_RW == 0 {
                     Err(Errno::EINVAL)
-                } else {
+                } else if f & sync_file::DMA_BUF_SYNC_END != 0 {
                     Ok(())
+                } else {
+                    let usage = if f & sync_file::DMA_BUF_SYNC_WRITE != 0 { Usage::Read } else { Usage::Write };
+                    g.resv().wait(usage, true, None, ctx)
                 }
             }
             _ => Err(Errno::ENOTTY),
@@ -260,7 +309,7 @@ impl<O: GemObject> SyncCore<O> {
     /// Returns the fence of sync file descriptor `fd`; `EINVAL` for another
     /// kind of file.
     pub(crate) fn sync_file_fence(&self, fd: i32, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<Fence, Errno> {
-        match self.anon.lookup(&self.dev, fd, arg)? {
+        match self.lookup(fd, arg, false, ctx)? {
             AnonObj::SyncFile(sf) => {
                 let f = sf.fence().clone();
                 SyncFile::put(sf, ctx);
@@ -375,5 +424,69 @@ impl<O: GemObject> SyncCore<O> {
     ) -> Result<usize, Errno> {
         let gem = gem.ok_or(Errno::ENXIO)?;
         self.anon.devmap(id, gem, dhp, off, len, ctx)
+    }
+}
+
+impl<O: GemObject> Drop for SyncCore<O> {
+    /// Leaves the registry, whatever happened (a failed attach drops the
+    /// state without a detach).
+    fn drop(&mut self) {
+        registry::remove(self.index, self);
+    }
+}
+
+/// The synchronisation state of each device of this driver, for imports
+/// across devices ([`SyncCore::lookup`]). Each kernel module links one DRM
+/// driver, so each index belongs to one object type; the type is recorded
+/// and a mismatch refused, as in `gem::registry`.
+mod registry {
+    use core::ffi::c_void;
+    use core::ptr;
+    use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
+    use super::SyncCore;
+    use crate::gem::GemObject;
+    use crate::minor::MAX_DEVICES;
+
+    static CORES: [AtomicPtr<c_void>; MAX_DEVICES as usize] =
+        [const { AtomicPtr::new(ptr::null_mut()) }; MAX_DEVICES as usize];
+    static TAGS: [AtomicUsize; MAX_DEVICES as usize] = [const { AtomicUsize::new(0) }; MAX_DEVICES as usize];
+
+    fn tag<O: GemObject>() -> usize {
+        get::<O> as *const () as usize
+    }
+
+    /// Records the state of device `index`; `false` if the slot is taken.
+    pub(super) fn insert<O: GemObject>(index: u32, core: &SyncCore<O>) -> bool {
+        let (Some(c), Some(t)) = (CORES.get(index as usize), TAGS.get(index as usize)) else { return false };
+        let p = core as *const SyncCore<O> as *mut c_void;
+        if c.compare_exchange(ptr::null_mut(), p, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+            return false;
+        }
+        t.store(tag::<O>(), Ordering::Release);
+        true
+    }
+
+    /// Forgets device `index` if `core` is what is recorded there.
+    pub(super) fn remove<O: GemObject>(index: u32, core: &SyncCore<O>) {
+        if let Some(c) = CORES.get(index as usize) {
+            let p = core as *const SyncCore<O> as *mut c_void;
+            let _ = c.compare_exchange(p, ptr::null_mut(), Ordering::AcqRel, Ordering::Relaxed);
+        }
+    }
+
+    /// Finds the state of device `index`.
+    ///
+    /// # Safety
+    /// The caller holds an open file of that device, which keeps it
+    /// attached for the duration of the use.
+    pub(super) unsafe fn get<'a, O: GemObject>(index: u32) -> Option<&'a SyncCore<O>> {
+        let p = CORES.get(index as usize)?.load(Ordering::Acquire);
+        if p.is_null() || TAGS.get(index as usize)?.load(Ordering::Acquire) != tag::<O>() {
+            return None;
+        }
+        // SAFETY: recorded by insert from a live SyncCore<O>; the caller's
+        // contract keeps it alive.
+        Some(unsafe { &*(p as *const SyncCore<O>) })
     }
 }

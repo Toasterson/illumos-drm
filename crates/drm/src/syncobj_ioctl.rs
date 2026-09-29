@@ -10,9 +10,16 @@
 //! * without [`Features::SYNCOBJ`] every one fails with `EOPNOTSUPP`, and
 //!   the timeline ones (`TIMELINE_WAIT`, `QUERY`, `TRANSFER`,
 //!   `TIMELINE_SIGNAL`) also without [`Features::SYNCOBJ_TIMELINE`];
-//! * unknown flags and non-zero `pad` fields are `EINVAL`, and so is a
-//!   count of zero handles; an unknown handle is `ENOENT` in the array
-//!   ioctls and `TRANSFER`, `EINVAL` in `DESTROY` and `HANDLE_TO_FD`;
+//! * unknown flags are `EINVAL`, and so is a count of zero handles;
+//!   non-zero `pad` fields are `EINVAL` where Linux checks them
+//!   (`DESTROY`, `HANDLE_TO_FD`, `FD_TO_HANDLE`, `RESET`, `SIGNAL`,
+//!   `TRANSFER`) and ignored where it does not (`WAIT`, `TIMELINE_WAIT`,
+//!   whose `pad` follows the output `first_signaled`); an unknown handle
+//!   is `ENOENT` in the array ioctls, `TRANSFER`, `EXPORT_SYNC_FILE` and
+//!   `IMPORT_SYNC_FILE`, `EINVAL` in `DESTROY` and plain `HANDLE_TO_FD`;
+//! * `FD_TO_HANDLE` accepts sync object files and sync files of any
+//!   device of this driver (they share this code), other files are
+//!   `EINVAL`;
 //! * `TRANSFER` passes its flags to the fence lookup; Linux does not check
 //!   them, here any flag but `WAIT_FOR_SUBMIT` is `EINVAL` (nothing else
 //!   has a meaning there, and userland passes 0);
@@ -181,7 +188,10 @@ impl<O: GemObject> SyncCore<O> {
         if a.get().pad != 0 || (flags != 0 && flags != EXPORT_SYNC_FILE) {
             return Err(Errno::EINVAL);
         }
-        let s = self.so_find(c, handle)?.ok_or(Errno::EINVAL)?;
+        // Linux: an unknown handle is ENOENT for EXPORT_SYNC_FILE
+        // (drm_syncobj_find_fence) and EINVAL for a sync object file.
+        let unknown = if flags == EXPORT_SYNC_FILE { Errno::ENOENT } else { Errno::EINVAL };
+        let s = self.so_find(c, handle)?.ok_or(unknown)?;
         let write = |fd: i32| {
             // SAFETY: a field assignment.
             unsafe { a.get_mut() }.fd = fd;
@@ -212,11 +222,7 @@ impl<O: GemObject> SyncCore<O> {
             s.replace_fence(Some(fence), ctx);
             return Ok(());
         }
-        let s = match self
-            .anon
-            .lookup(&self.dev, fd, arg)
-            .map_err(|e| if e == Errno::EBADF { Errno::EINVAL } else { e })?
-        {
+        let s = match self.lookup(fd, arg, false, ctx).map_err(|e| if e == Errno::EBADF { Errno::EINVAL } else { e })? {
             AnonObj::Syncobj(s) => s,
             o => {
                 o.put(ctx);

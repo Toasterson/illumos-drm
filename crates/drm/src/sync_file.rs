@@ -109,6 +109,10 @@ pub const DMA_BUF_IOCTL_SYNC: u32 = iow(b'b', 0, size_of::<DmaBufSync>());
 pub const DMA_BUF_SYNC_VALID: u64 = 0x7;
 /// `DMA_BUF_SYNC_RW`.
 pub const DMA_BUF_SYNC_RW: u64 = 0x3;
+/// `DMA_BUF_SYNC_WRITE`.
+pub const DMA_BUF_SYNC_WRITE: u64 = 0x2;
+/// `DMA_BUF_SYNC_END`.
+pub const DMA_BUF_SYNC_END: u64 = 0x4;
 
 /// Returns the status of `f` as sync files report it: 1 signalled, 0
 /// active, a negative errno for an error (Linux's `dma_fence_get_status`).
