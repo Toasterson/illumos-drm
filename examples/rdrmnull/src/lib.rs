@@ -83,8 +83,10 @@
 //! * `RDRMNULL_IOCTL_BO_WAIT` waits for a buffer's reservation, as a
 //!   driver's wait ioctl (virtio-gpu's `WAIT`) does.
 //!
-//! Detaching cancels the timers and signals the fences that are left with
-//! `ECANCELED`, because every fence must signal.
+//! A detach attempt cancels the timers and signals the fences that are
+//! left with `ECANCELED` (`before_detach`), because every fence must
+//! signal. The timeline itself stays connected until the detach is sure to
+//! complete (`before_teardown`), so a refused detach leaves it working.
 //!
 //! It is the kernel module the core is tested with, and the template for a
 //! real driver: implement [`drm::Driver`], use [`drm::Device`] as the
@@ -758,14 +760,6 @@ impl NullDriver {
         } else {
             None
         };
-        // A detach that failed after before_detach cleared the slot: the
-        // device is in use again, so its timers must reach it again.
-        if let Some(slot) = SOFTS.get(self.index) {
-            slot.store(
-                &*self.soft as *const SoftInterrupt<Timeline> as *mut SoftInterrupt<Timeline>,
-                Ordering::Release,
-            );
-        }
         let seqno = self.seqno.fetch_add(1, Ordering::AcqRel) + 1;
         let f = Fence::new(domain, self.context.load(Ordering::Acquire), seqno, ctx)?;
         if let Some(e) = err {
