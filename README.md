@@ -186,8 +186,11 @@ private tier, the crate `illumos-kernel-private-sys` pinned to gate commit
 `cda5b9a49f`, through the safe wrapper `ddi::private::fd`; the `drm`
 crate enables the `ddi` feature `unstable-gate-cda5b9a49f` for it, and no
 private symbol is declared anywhere else. R2 also needs from illumos-ddi
-the `chpoll(9E)` entry point (`module! { ops: [char, devmap, chpoll] }`,
-`ddi::PollHead`) and the `segmap(9E)` check (`CharDevice::segmap_check`).
+the `segmap(9E)` check (`CharDevice::segmap_check`), and, like R3, the
+`chpoll(9E)` entry point: a sync file keeps its `pollhead` in a
+`ddi::PollBox`, registered with `PollHead::registration_unchecked`
+because the file, not the device, owns it, and sync object files, which
+are always ready, register a head of the device that is never woken.
 `makespecvp` lives in the specfs module, so a driver module is linked with
 `-N fs/specfs` (`cargo xtask link` takes it from the private crate's kmod
 metadata; the test scripts and CI name it).
