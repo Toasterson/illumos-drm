@@ -235,6 +235,15 @@ impl<T> KArcLast<T> {
     }
 }
 
+impl<T> KArcLast<T> {
+    /// Returns the value for modification: the last reference is the only
+    /// one, so nobody else can see it.
+    pub fn get_mut(this: &mut KArcLast<T>) -> &mut T {
+        // SAFETY: sole owner of a live allocation.
+        unsafe { &mut (*this.ptr.as_ptr()).value }
+    }
+}
+
 impl<T> Deref for KArcLast<T> {
     type Target = T;
     fn deref(&self) -> &T {
