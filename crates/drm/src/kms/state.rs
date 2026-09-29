@@ -294,7 +294,11 @@ impl<B> StateView<'_, B> {
             return true;
         }
         let routed = |s: &ConnectorState| s.crtc == Some(i);
-        self.cur.connectors.iter().enumerate().any(|(c, old)| self.connector(c).is_some_and(|n| routed(old) != routed(n)))
+        self.cur
+            .connectors
+            .iter()
+            .enumerate()
+            .any(|(c, old)| self.connector(c).is_some_and(|n| routed(old) != routed(n)))
     }
     /// Whether plane `i` changes in this update.
     pub fn plane_changed(&self, i: usize) -> bool {

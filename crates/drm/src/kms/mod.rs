@@ -4,10 +4,15 @@
 
 //! Kernel mode setting (milestone R3).
 
+pub mod atomic;
+pub mod core;
 pub mod edid;
-pub mod modes;
 pub mod events;
 pub mod formats;
+pub mod legacy;
+pub mod modes;
 pub mod objects;
 pub mod props;
 pub mod state;
+#[cfg(test)]
+mod tests;

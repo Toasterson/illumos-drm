@@ -68,7 +68,7 @@ impl PropDef {
     /// of enums, the bit numbers of bitmasks, the object type of object
     /// properties, nothing for blobs.
     pub fn values(&self) -> impl Iterator<Item = u64> + '_ {
-        let (two, list, one): (Option<[u64; 2]>, &[(u64, &str)], Option<u64>) = match self.kind {
+        let (two, list, one): Values = match self.kind {
             PropKind::Range(a, b) => (Some([a, b]), &[], None),
             PropKind::SignedRange(a, b) => (Some([a as u64, b as u64]), &[], None),
             PropKind::Enum(l) | PropKind::Bitmask(l) => (None, l, None),
@@ -102,6 +102,9 @@ impl PropDef {
         }
     }
 }
+
+/// The parts of a `values` array: two bounds, enum values, an object type.
+type Values = (Option<[u64; 2]>, &'static [(u64, &'static str)], Option<u64>);
 
 /// DPMS states (`DRM_MODE_DPMS_*`).
 pub const DPMS_ENUM: &[(u64, &str)] = &[

@@ -206,7 +206,10 @@ impl Layout {
         if nc == 0 || nc > 32 || self.encoders.len() > 32 {
             return Err("between 1 and 32 CRTCs and at most 32 encoders");
         }
-        if self.min_width == 0 || self.min_height == 0 || self.max_width < self.min_width || self.max_height < self.min_height
+        if self.min_width == 0
+            || self.min_height == 0
+            || self.max_width < self.min_width
+            || self.max_height < self.min_height
         {
             return Err("bad framebuffer size limits");
         }
@@ -319,14 +322,17 @@ pub struct Framebuffer<B> {
     pub format: u32,
     /// The modifier of every plane.
     pub modifier: u64,
-    /// Whether the creator passed `DRM_MODE_FB_MODIFIERS` (`GETFB2` reports
-    /// it back).
-    pub with_modifiers: bool,
-    /// The GEM handles userland named, per plane (for `GETFB2` only the
-    /// objects matter; handles are per file).
+    /// The `DRM_MODE_FB_*` flags it was created with (`GETFB2` reports
+    /// them back).
+    pub flags: u32,
+    /// The pitch of each plane in bytes.
     pub pitches: [u32; 4],
     /// The offset of each plane in its object.
     pub offsets: [u32; 4],
+    /// The cursor hotspot of a legacy cursor framebuffer (`CURSOR2`).
+    pub hot_x: i32,
+    /// The cursor hotspot of a legacy cursor framebuffer (`CURSOR2`).
+    pub hot_y: i32,
     /// The buffer object of each plane.
     pub objs: [Option<B>; 4],
 }
@@ -375,7 +381,10 @@ pub fn check_fb_request(r: &FbRequest, layout: &Layout) -> Result<usize, Errno> 
         return Err(Errno::EINVAL);
     }
     let info = super::formats::lookup(r.format).ok_or(Errno::EINVAL)?;
-    if r.width < layout.min_width || r.width > layout.max_width || r.height < layout.min_height || r.height > layout.max_height
+    if r.width < layout.min_width
+        || r.width > layout.max_width
+        || r.height < layout.min_height
+        || r.height > layout.max_height
     {
         return Err(Errno::EINVAL);
     }
@@ -539,13 +548,8 @@ mod tests {
             "any modifier passes here; the planes decide"
         );
         assert_eq!(with(&|r| r.offsets[0] = u32::MAX), Err(crate::kms::modes::ERANGE));
-        let nv12 = FbRequest {
-            format: NV12,
-            handles: [1, 1, 0, 0],
-            pitches: [64, 64, 0, 0],
-            offsets: [0, 2048, 0, 0],
-            ..ok
-        };
+        let nv12 =
+            FbRequest { format: NV12, handles: [1, 1, 0, 0], pitches: [64, 64, 0, 0], offsets: [0, 2048, 0, 0], ..ok };
         assert_eq!(check_fb_request(&nv12, &l), Ok(2));
         assert_eq!(plane_min_size(&nv12, 1), Some(2048 + 64 * 15 + 64));
     }

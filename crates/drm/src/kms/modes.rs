@@ -155,7 +155,7 @@ impl DisplayMode {
     /// Linux's `drm_mode_vrefresh`.
     pub fn vrefresh(&self) -> u32 {
         let (num, den) = self.refresh_ratio();
-        if den == 0 { 0 } else { ((num * 1000 + den / 2) / den) as u32 }
+        (num * 1000 + den / 2).checked_div(den).unwrap_or(0) as u32
     }
 
     /// The refresh rate as the fraction `clock * 1000 / den`: numerator and
@@ -399,11 +399,7 @@ pub fn finish_list(modes: &mut Vec<DisplayMode>, limits: &ModeLimits) {
 fn mode_order(a: &DisplayMode, b: &DisplayMode) -> Ordering {
     let pref = |m: &DisplayMode| m.typ & uapi::DRM_MODE_TYPE_PREFERRED != 0;
     let area = |m: &DisplayMode| u32::from(m.hdisplay) * u32::from(m.vdisplay);
-    pref(b)
-        .cmp(&pref(a))
-        .then(area(b).cmp(&area(a)))
-        .then(b.vrefresh().cmp(&a.vrefresh()))
-        .then(b.clock.cmp(&a.clock))
+    pref(b).cmp(&pref(a)).then(area(b).cmp(&area(a))).then(b.vrefresh().cmp(&a.vrefresh())).then(b.clock.cmp(&a.clock))
 }
 
 // --- VESA DMT ----------------------------------------------------------------

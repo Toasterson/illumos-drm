@@ -85,7 +85,7 @@ fn byte(b: &[u8], i: usize) -> u8 {
 /// block (with its header repaired) and every extension whose checksum is
 /// right, up to [`MAX_EXTENSIONS`].
 pub fn blocks(edid: &[u8]) -> Result<Vec<[u8; BLOCK]>, EdidError> {
-    if edid.len() < BLOCK || edid.len() % BLOCK != 0 {
+    if edid.len() < BLOCK || !edid.len().is_multiple_of(BLOCK) {
         return Err(EdidError::Length);
     }
     let mut base = [0u8; BLOCK];
@@ -124,11 +124,7 @@ pub fn parse(edid: &[u8]) -> Result<EdidInfo, EdidError> {
     let blocks = blocks(edid)?;
     let base = blocks.first().ok_or(EdidError::Length)?;
     let v = u16::from_be_bytes([byte(base, 8), byte(base, 9)]);
-    let vendor = [
-        b'@' + ((v >> 10) & 0x1f) as u8,
-        b'@' + ((v >> 5) & 0x1f) as u8,
-        b'@' + (v & 0x1f) as u8,
-    ];
+    let vendor = [b'@' + ((v >> 10) & 0x1f) as u8, b'@' + ((v >> 5) & 0x1f) as u8, b'@' + (v & 0x1f) as u8];
     let version = (byte(base, 0x12), byte(base, 0x13));
     let mut info = EdidInfo {
         vendor,
@@ -373,9 +369,7 @@ mod tests {
         let mut m = info.modes.clone();
         let limits = ModeLimits { max_width: 4096, max_height: 4096, max_clock: 0, interlace: true, dblscan: false };
         modes::finish_list(&mut m, &limits);
-        m.iter()
-            .map(|x| (x.hdisplay, x.vdisplay, x.vrefresh(), x.typ & uapi::DRM_MODE_TYPE_PREFERRED != 0))
-            .collect()
+        m.iter().map(|x| (x.hdisplay, x.vdisplay, x.vrefresh(), x.typ & uapi::DRM_MODE_TYPE_PREFERRED != 0)).collect()
     }
 
     #[test]
