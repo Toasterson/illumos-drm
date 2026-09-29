@@ -1691,6 +1691,29 @@ impl<O: GemObject> GemCore<O> {
         self.park(dhp.as_raw() as usize, owner, obj, ctx)
     }
 
+    /// `segmap(9E)`: checks an `mmap(2)` of file `clone` before the devmap
+    /// framework creates the segment, with the rules `devmap_map(9E)`
+    /// applies again later: shared only (`EINVAL`), an object's exact
+    /// offset (`EINVAL`), and a file that holds a handle to it (`EACCES`).
+    /// Refusing only in `devmap_map(9E)` would leave the segment in the
+    /// process until it exits (see `ddi::CharDevice::segmap_check`).
+    pub(crate) fn map_check(&self, clone: CloneId, off: u64, len: usize, shared: bool) -> Result<(), Errno> {
+        if !shared {
+            return Err(Errno::EINVAL);
+        }
+        let obj = {
+            let offs = self.offsets.lock();
+            let (p, _) = offs.lookup_exact(off, len as u64).ok_or(Errno::EINVAL)?;
+            // SAFETY: as in devmap: the destructor removes the entry under
+            // this lock before the memory goes away.
+            unsafe { KArc::upgrade(p.0) }.map(GemRef::from_arc).ok_or(Errno::EINVAL)?
+        };
+        let held = self.file_holds(clone, &obj);
+        // Dropping here may destroy the object; no lock is held.
+        drop(obj);
+        if held { Ok(()) } else { Err(Errno::EACCES) }
+    }
+
     /// Drops what `mmap(2)` calls through the dma-buf file `id` left
     /// parked; its `close(9E)` calls this.
     pub(crate) fn dmabuf_closed(&self, id: u32, ctx: &Sleepable) {
