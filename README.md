@@ -14,12 +14,15 @@ nodes, authentication, capabilities, GEM, PRIME, syncobj, KMS), and a Rust
 virtio-gpu driver on top of it. Existing vendor drivers stay in C and would
 be carried later through a C interface of the core. The milestones are R0
 (uAPI, device registration, per-file state, core ioctls), R1 (GEM and dumb
-buffers), R2 (fences, syncobj, PRIME), all three done, R3 (KMS and
-atomic), R4 (virtio-gpu) and R5 (C interface).
+buffers), R2 (fences, syncobj, PRIME), R3 (KMS and atomic), all four
+done, R4 (virtio-gpu, written, verification in a guest pending) and R5
+(C interface).
 
 ## Where things stand
 
-Milestones R0, R1, R2 and R3 work.
+Milestones R0, R1, R2 and R3 work. R4, the virtio-gpu driver, is written
+and checked on the host and on illumos, but has not run in a guest yet
+(see *R4* below).
 
 R0 (uAPI, device registration, per-file state, core ioctls): on 28
 September 2026 the test driver `rdrmnull` was built for the kernel target,
@@ -117,6 +120,24 @@ working: after the refused `modunload`, `modetest` lists it and
 page-flips with vblank events at 60 Hz, and the module unloads once the
 object is released (29 September 2026, same guest image).
 
+R4 (virtio-gpu), 30 September 2026: `drivers/virtio-gpu` (module
+`virtio_gpu`, PCI `1af4:1050`) builds for the kernel target, links with
+`ld -ztype=kmod -N misc/virtio -N fs/specfs` on OpenIndiana Hipster
+2026.04 (illumos `cda5b9a49f`), where every one of its 127 undefined
+symbols is exported by the running kernel, and its IPS package passes
+`pkglint` and publishes. illumos-ddi's `xtask kernel-check` resolves all
+48 virtio framework symbols the driver binds from the `virtio` module of
+the same kernel. The uAPI layouts, including the older `EXECBUFFER` and
+transfer layouts, agree with gcc on illumos (111 sizes, 497 offsets, 121
+ioctl numbers). The host tests of the driver's logic pass. What has not
+happened yet is the run in a QEMU guest with a virtio-gpu device (the test
+host was unreachable): `tools/test/run-r4-test.sh` (attach, the
+`drm_r4_test` ioctl and virgl test, modetest, refused detaches), Xorg
+with the modesetting driver, and Mesa's virgl driver (built from
+oi-userland `hephaistos/virgl-gallium`, Mesa 21.3.9) with `glxinfo -B`
+and `glxgears`. Until then, nothing here claims that the driver works on
+a device.
+
 ## What is in the repository
 
 `crates/drm-uapi` is the DRM userland interface as Rust types: the
@@ -169,6 +190,18 @@ EDID test blobs and `gen_edid.py`, which synthesizes them.
 `docs/anon-fd.md` records how file descriptors are made for dma-bufs,
 sync objects and sync files.
 `packaging/devlink.tab` is the `/dev/dri` link rule for packages.
+
+`drivers/virtio-gpu` is the virtio-gpu driver of R4 (see *R4* under
+*Decisions*): `gpu` (requests, completions, fences, contexts), `object`
+(GEM objects with host resources), `ioctl` (the `DRM_IOCTL_VIRTGPU_*`
+ioctls), `kms` (the display), `proto` (the device protocol) and host
+tests of the pure logic (`cargo test -p virtio_gpu --no-default-features`).
+`tools/test/drm_r4_test.c` and `run-r4-test.sh` test it on a guest,
+`packaging/virtio-gpu.p5m` and `packaging/xorg.conf.d/20-virtio-gpu.conf`
+package it. `tools/uapi/include/virtgpu_drm.h` is the Linux v6.12 uAPI
+header the bindings come from, `crates/drm-uapi/src/virtgpu_compat.rs`
+the older layouts, and `tools/uapi/virtgpu_compat_layout.c` their gcc
+check.
 
 ## Decisions
 
@@ -660,8 +693,10 @@ no object carries them and setting them is `EINVAL`; connecting them to
 R2's sync files is open. Not implemented: leases, asynchronous and targeted page flips, the
 atomic colour-management properties (legacy `GETGAMMA`/`SETGAMMA` work),
 `VRR_ENABLED`, writeback connectors, rotation, `zpos`, `TILE`, damage
-clips, and `DIRTYFB` (`ENOSYS`, as Linux answers for a driver without
-damage tracking). The event lock has no interrupt priority, so
+clips. `DIRTYFB` goes to the driver (`KmsDriver::dirty_fb`, since R4)
+with the planes that show the framebuffer and the clip rectangles; a
+driver whose scanout reads the framebuffer itself keeps the default,
+`ENOSYS`, as Linux answers for a driver without damage tracking. The event lock has no interrupt priority, so
 `VblankHandle::vblank` demands the `Sleepable` token (thread, task queue or
 level-0 periodic context); a driver with a hardware vblank interrupt needs a
 priority-aware lock and an `Atomic` entry point, which come with the first
@@ -672,6 +707,83 @@ driver's `before_detach` has dropped what it holds for itself); a refused
 device keeps its mode-setting state and its vblank source and works on.
 Only when every check has passed does the driver stop its sources
 (`before_teardown`) and the core release the KMS and GEM state. The refusal of `ATOMIC` to Xorg by process name stays open.
+
+**R4: the virtio framework.** The driver runs the device through the
+gate's virtio framework (`misc/virtio`), a private interface, through
+illumos-ddi's private crate `illumos-kernel-private-virtio-sys` and its
+safe wrapper `ddi::private::virtio` (feature
+`unstable-gate-cda5b9a49f-virtio`), whose phases (setup, negotiated,
+running) make the framework's `VERIFY`s unreachable (illumos-ddi
+`docs/DESIGN.md` section 5.13). The framework calls queue handlers as
+hardware interrupt handlers; the wrapper records the queue and hands the
+work to the device's task queue, so every completion of this driver runs
+in thread context and no driver lock has an interrupt priority
+(`Driver::fence_priority` stays `None`). Negotiated features: `VIRGL`,
+`EDID`, `RESOURCE_BLOB`, `CONTEXT_INIT` when the device offers them; the
+control queue carries every request, the cursor queue the cursor.
+
+**R4: requests and fences.** A request is one DMA allocation (the request
+and room for the response) and, for memory entries and command streams,
+a second one; the queue owns a counted reference while the chain is in
+flight. Waiters also poll the queue themselves, so a slow task queue
+delays nothing. Fenced requests (`SUBMIT_3D`, the 3D transfers) carry a
+fence id taken under the submission lock and complete, in the device's
+order per fence context, the R2 `Fence` that the ioctl put into the
+objects' reservations, a sync file or sync objects. A completion drops the
+GEM references its request held through the interrupt-safe path, because
+destroying an object waits for `RESOURCE_UNREF`, which must never be
+awaited on the completing thread. `drivers/virtio-gpu/src/gpu.rs`
+documents the lock order.
+
+**R4: objects.** Every GEM object is R1 system memory bound for DMA
+against the device's node; its DMA cookies are the resource's memory
+entries (`RESOURCE_ATTACH_BACKING`, or the entries of
+`RESOURCE_CREATE_BLOB`). Dumb buffers are 2D resources in XRGB8888
+(32 bits per pixel only, rows exactly `width` pixels, as the device
+copies 2D resources with their own stride), through the new
+`Driver::dumb_object` hook. With virgl, `RESOURCE_CREATE` makes 3D
+resources; a handle attaches the resource to the file's rendering context
+and removing it detaches it (the new `GemObject::handle_opened` and
+`handle_closed` hooks, Linux's GEM open and close callbacks), and a file's
+context is destroyed in the new `Driver::file_close` hook. An object's
+destruction (the new `GemObject::release` hook) sends `RESOURCE_UNREF` and
+frees the memory only after the device answered; without an answer the
+memory is leaked with a warning.
+
+**R4: uAPI.** The ioctls are Linux 6.12's with its checks and errnos.
+`virtgpu_drm.h` of libdrm 2.4.109 lacks `RESOURCE_CREATE_BLOB`,
+`CONTEXT_INIT`, the later parameters and the sync object arrays, so the
+bindings come from Linux v6.12's header (MIT, `tools/uapi/include`).
+Because the illumos ioctl encoding carries the argument size, each older
+size of a grown structure is its own command number, and the driver
+accepts all of them, zero-extended as Linux does: `EXECBUFFER` in 32
+bytes (libdrm 2.4.109), 40 bytes (Mesa 21.3's own header, with
+`ring_idx`) and 64 bytes (sync object arrays), and the transfers in 36
+(libdrm 2.4.109) and 44 bytes. The driver reports version 0.1.0, which
+Mesa's virgl winsys requires.
+
+**R4: display.** A connector, encoder, CRTC, primary plane and cursor
+plane per scanout (up to 16), the connector connected when the device
+reports the scanout enabled, with the device's EDID or, without one, a
+CVT mode of the scanout's size plus the standard modes; `SET_SCANOUT`,
+`TRANSFER_TO_HOST_2D` for dumb buffers, `RESOURCE_FLUSH`, the cursor queue
+for the cursor plane, `DIRTYFB` as one transfer and flush of the damage's
+bounding box, and a software vblank per active CRTC for page-flip events.
+The bus ID is `pci:0000:BB:DD.F` from the node's `reg` property, which
+Xorg's modesetting driver matches.
+
+**R4: deviations from Linux.** Host-visible memory needs the shared
+memory regions of the virtio PCI transport, which the gate's framework
+does not implement: `HOST_VISIBLE` is 0 and `BLOB_MEM_HOST3D` blobs are
+`EINVAL`. `CROSS_DEVICE` is 0 (no resource UUIDs), a polled ring mask
+other than 0 is `EINVAL` (its fence events would need a per-file event
+queue outside mode setting), blob framebuffers are refused for scanout
+(no `SET_SCANOUT_BLOB`), and a command stream is limited to 1 MiB. In
+`EXECBUFFER`, adding the fence to the objects, to the out sync objects
+and to a new sync file can fail for lack of memory after the work was
+queued (Linux reserves those first); the ioctl then reports the error for
+work that runs anyway. A context is named after the process ID, because
+the DDI offers no process name.
 
 ## Building
 
@@ -710,15 +822,30 @@ it is closed, removes everything again with `rem_drv -C`, and fails
 unless `/etc` and `/devices` are as before. `tools/test/run-r0-test.sh`
 runs the R0 test alone.
 
+The virtio-gpu driver is built the same way and linked against the
+virtio framework too:
+
+```sh
+cargo xtask build virtio_gpu
+ld -ztype=kmod -N misc/virtio -N fs/specfs -z allextract virtio_gpu.a -o virtio_gpu   # on illumos
+```
+
+`tools/test/run-r4-test.sh` links, installs (`add_drv -i
+'"pci1af4,1050"'`), tests and removes it on a guest with a virtio-gpu
+device.
+
 ## Checks
 
 ```sh
 # uAPI layouts and ioctl numbers against gcc on illumos
 ILLUMOS_GATE=~/illumos-gate tools/uapi/generate.sh     # regenerate (bindgen)
 gcc -m64 -I<include/drm> -o drm_layout tools/uapi/drm_layout.c && ./drm_layout > out   # on illumos
+# the older virtio-gpu layouts, from libdrm 2.4.109's and Mesa 21.3's own headers
+gcc -m64 -DV1 -I<libdrm 2.4.109 include/drm> -o c1 tools/uapi/virtgpu_compat_layout.c && ./c1 >> out
+gcc -m64 -DV2 -I<mesa include/drm-uapi> -I<include/drm> -o c2 tools/uapi/virtgpu_compat_layout.c && ./c2 >> out
 cargo xtask uapi-check out
 
-# DDI layouts and symbols of the pinned ddi-sys and illumos-kernel-private-sys
+# DDI layouts and symbols of the pinned ddi-sys and the private crates
 # against a running kernel
 cargo xtask kernel-check --emit | ssh root@host 'mdb -k 2>&1' | cargo xtask kernel-check --verify -
 ```
@@ -728,8 +855,8 @@ cargo xtask kernel-check --emit | ssh root@host 'mdb -k 2>&1' | cargo xtask kern
 `.forgejo/workflows/ci.yml` follows illumos-ddi's Solstice CI setup: one
 job type-checks, lints, checks formatting, builds the documentation and
 runs the host tests against the hosted illumos target; a second job builds
-`rdrmnull` for the kernel target natively on illumos and links it with
-`ld -ztype=kmod`. Neither loads the module, which needs root on a kernel
+`rdrmnull` and `virtio_gpu` for the kernel target natively on illumos and
+links them with `ld -ztype=kmod`. Neither loads the module, which needs root on a kernel
 that may panic (an R1 trial did panic the test machine, see *System memory
 and DMA*).
 
