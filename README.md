@@ -78,6 +78,10 @@ wrappers, the vblank rate (60.07 Hz measured, timestamps 16.665 ms apart),
 semantics, four threads querying while the master flips, and the `kms` and
 `gem` kstats back at their idle values before the module unloads. The R0
 and R1 tests pass unchanged apart from the two capabilities R3 turns on.
+A detach refused while `rdrmnull` holds a GEM object leaves the display
+working: after the refused `modunload`, `modetest` lists it and
+page-flips with vblank events at 60 Hz, and the module unloads once the
+object is released (29 September 2026, same guest image).
 
 ## What is in the repository
 
