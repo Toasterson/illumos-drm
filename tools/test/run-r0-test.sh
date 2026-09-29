@@ -35,7 +35,10 @@ had_dri=no
 
 step uname -a
 step digest -a sha256 rdrmnull.a
-step ld -ztype=kmod -z allextract rdrmnull.a -o rdrmnull || exit 1
+# -N fs/specfs: makespecvp, for the file descriptors of dma-bufs, sync
+# objects and sync files (illumos-kernel-private-sys), lives in the specfs
+# module, which krtld does not search unless the module depends on it.
+step ld -ztype=kmod -N fs/specfs -z allextract rdrmnull.a -o rdrmnull || exit 1
 step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo

@@ -395,7 +395,7 @@ Compiling works on any host; linking needs the illumos linker:
 
 ```sh
 cargo xtask build rdrmnull           # target/x86_64-illumos-kmod/release/rdrmnull.a
-ld -ztype=kmod -z allextract rdrmnull.a -o rdrmnull    # on illumos, or: cargo xtask link rdrmnull
+ld -ztype=kmod -N fs/specfs -z allextract rdrmnull.a -o rdrmnull    # on illumos, or: cargo xtask link rdrmnull
 ```
 
 `tools/test/run-r1-test.sh` does the rest on a disposable illumos VM, as
