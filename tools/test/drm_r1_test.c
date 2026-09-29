@@ -462,7 +462,7 @@ open_by_name(uint32_t name, uint64_t off, uint64_t size, uint32_t seed, int as_n
 	/* A file without a handle to the object must not map it. */
 	errno = 0;
 	p = map(fd, size, MAP_SHARED, off);
-	check(p == NULL && errno == ENXIO, "mmap of an object without a handle in this file fails (ENXIO)");
+	check(p == NULL && errno == EACCES, "mmap of an object without a handle in this file fails (EACCES)");
 	if (as_nobody) {
 		check(gem_open(fd, name, &h, &sz) == EACCES, "nobody: GEM_OPEN before authentication is EACCES");
 		check(drmGetMagic(fd, &magic) == 0, "nobody: drmGetMagic");
@@ -544,25 +544,30 @@ test_dumb(int fd)
 	fill(p, size, 0x5eed);
 	check(gem_stats(&g) && g.mappings == 1, "kstat: one mapping");
 
-	/* Refused mappings; devmap_setup(9F) reports all of them as ENXIO. */
+	/*
+	 * Refused mappings. Since R2 the core refuses them in segmap(9E),
+	 * before devmap_setup(9F) (which reports every failure as ENXIO and
+	 * leaves a segment behind when devmap_map(9E) refuses), with Linux's
+	 * errno: EINVAL.
+	 */
 	errno = 0;
-	check(map(fd, size, MAP_SHARED, off + PAGE) == NULL && errno == ENXIO,
-	    "mmap at an offset inside the object is ENXIO");
+	check(map(fd, size, MAP_SHARED, off + PAGE) == NULL && errno == EINVAL,
+	    "mmap at an offset inside the object is EINVAL");
 	(void) gem_stats(&g);
 	print_gem("after mmap inside the object", &g);
 	errno = 0;
-	check(map(fd, size + PAGE, MAP_SHARED, off) == NULL && errno == ENXIO,
-	    "mmap beyond the end of the object is ENXIO");
+	check(map(fd, size + PAGE, MAP_SHARED, off) == NULL && errno == EINVAL,
+	    "mmap beyond the end of the object is EINVAL");
 	(void) gem_stats(&g);
 	print_gem("after mmap beyond the end", &g);
 	errno = 0;
-	check(map(fd, PAGE, MAP_PRIVATE, off) == NULL && errno == ENXIO, "MAP_PRIVATE is refused (ENXIO)");
+	check(map(fd, PAGE, MAP_PRIVATE, off) == NULL && errno == EINVAL, "MAP_PRIVATE is refused (EINVAL)");
 	(void) printf("INFO MAP_PRIVATE errno %d\n", errno);
 	(void) gem_stats(&g);
 	print_gem("after MAP_PRIVATE", &g);
 	errno = 0;
-	check(map(fd, PAGE, MAP_SHARED, GEM_OFFSET_START - PAGE) == NULL && errno == ENXIO,
-	    "mmap below the GEM offset space is ENXIO");
+	check(map(fd, PAGE, MAP_SHARED, GEM_OFFSET_START - PAGE) == NULL && errno == EINVAL,
+	    "mmap below the GEM offset space is EINVAL");
 	(void) gem_stats(&g);
 	print_gem("after the refused mappings", &g);
 	check(g.pending_maps == 0 && g.mappings == 1, "kstat: refused mappings leave nothing behind");

@@ -925,7 +925,7 @@ sync_status(int sfd, uint32_t *nfences)
 static void
 test_sync_file(int fd)
 {
-	int s1 = -1, s2 = -1, s3 = -1, ex = -1, r;
+	int s1 = -1, s1b = -1, s2 = -1, s3 = -1, ex = -1, r;
 	uint32_t so = 0, empty = 0, n = 0, first;
 	struct pollfd pf;
 	struct sync_merge_data md;
@@ -959,7 +959,10 @@ test_sync_file(int fd)
 	check(sync_status(s2, NULL) == -EIO, "SYNC_IOC_FILE_INFO status is -EIO");
 	(void) close(s2);
 
-	/* MERGE: signals when both have. */
+	/*
+	 * MERGE of two fences of rdrmnull's one timeline: one context, so the
+	 * merge is the later fence (Linux's dma_fence_unwrap_merge).
+	 */
 	check(null_fence(fd, 100, FENCE_SYNC_FILE, 0, 0, 0, 0, &s2) == 0 &&
 	    null_fence(fd, 400, FENCE_SYNC_FILE, 0, 0, 0, 0, &s3) == 0,
 	    "two more sync files (100 ms, 400 ms)");
@@ -971,25 +974,20 @@ test_sync_file(int fd)
 	    "SYNC_IOC_MERGE");
 	check(is_cloexec(md.fence), "the merged sync file is close-on-exec");
 	(void) memset(&info, 0, sizeof (info));
-	(void) memset(fi, 0, sizeof (fi));
-	info.num_fences = 4;
-	info.sync_fence_info = (uintptr_t)fi;
 	check(xioctl_err(md.fence, SYNC_IOC_FILE_INFO, &info) == 0 &&
-	    info.num_fences == 2 && strcmp(info.name, "merged") == 0 &&
-	    strcmp(fi[0].driver_name, "rdrmnull") == 0,
-	    "FILE_INFO of the merge: two fences, its name, the driver name");
-	info.num_fences = 1;
-	check(xioctl_err(md.fence, SYNC_IOC_FILE_INFO, &info) == EINVAL,
-	    "FILE_INFO with too little room is EINVAL");
+	    info.num_fences == 1 && strcmp(info.name, "merged") == 0,
+	    "FILE_INFO of a merge on one timeline: one fence, the given name");
 	info.num_fences = 0;
 	info.flags = 1;
 	check(xioctl_err(md.fence, SYNC_IOC_FILE_INFO, &info) == EINVAL,
 	    "FILE_INFO with flags is EINVAL");
 	pf.fd = md.fence;
+	pf.events = POLLIN;
 	t0 = now_ns();
 	check(poll(&pf, 1, 5000) == 1 && now_ns() - t0 >= ms_ns(250),
 	    "the merged sync file signals with the later fence");
 	md.fd2 = fd;
+	md.flags = 0;
 	check(xioctl_err(s2, SYNC_IOC_MERGE, &md) == ENOENT,
 	    "MERGE with a non-sync-file is ENOENT");
 	md.fd2 = s3;
@@ -998,6 +996,45 @@ test_sync_file(int fd)
 	    "MERGE with flags is EINVAL");
 	check(xioctl_err(s2, DRM_IOCTL_VERSION, &md) == ENOTTY,
 	    "a DRM ioctl on a sync file is ENOTTY");
+	(void) close(md.fence);
+
+	/*
+	 * MERGE of a timeline point (a chain fence, context of its own) with a
+	 * fence of rdrmnull's timeline: two fences.
+	 */
+	check(drmSyncobjCreate(fd, 0, &so) == 0 &&
+	    null_fence(fd, 300, FENCE_SYNCOBJ, so, 1, 0, 0, NULL) == 0 &&
+	    drmSyncobjExportSyncFile(fd, so, &ex) == 0 &&
+	    null_fence(fd, 200, FENCE_SYNC_FILE, 0, 0, 0, 0, &s1b) == 0,
+	    "a timeline point (300 ms) and a timeline fence (200 ms) as sync files");
+	(void) memset(&md, 0, sizeof (md));
+	md.fence = -1;
+	md.fd2 = s1b;
+	check(xioctl_err(ex, SYNC_IOC_MERGE, &md) == 0 && md.fence >= 0,
+	    "SYNC_IOC_MERGE of both");
+	(void) memset(&info, 0, sizeof (info));
+	(void) memset(fi, 0, sizeof (fi));
+	info.num_fences = 4;
+	info.sync_fence_info = (uintptr_t)fi;
+	check(xioctl_err(md.fence, SYNC_IOC_FILE_INFO, &info) == 0 &&
+	    info.num_fences == 2 && info.status == 0 &&
+	    strcmp(fi[0].driver_name, "rdrmnull") == 0 && fi[0].status == 0,
+	    "FILE_INFO: two active fences, the driver name");
+	info.num_fences = 1;
+	check(xioctl_err(md.fence, SYNC_IOC_FILE_INFO, &info) == EINVAL,
+	    "FILE_INFO with too little room is EINVAL");
+	pf.fd = md.fence;
+	check(poll(&pf, 1, 5000) == 1, "the two-fence merge signals");
+	info.num_fences = 4;
+	check(xioctl_err(md.fence, SYNC_IOC_FILE_INFO, &info) == 0 &&
+	    info.status == 1 && fi[0].status == 1 && fi[1].status == 1 &&
+	    fi[0].timestamp_ns != 0, "FILE_INFO after: signalled, with timestamps");
+	(void) close(md.fence);
+	(void) close(ex);
+	(void) close(s1b);
+	ex = -1;
+	(void) drmSyncobjDestroy(fd, so);
+	so = 0;
 
 	/* Sync objects and sync files. */
 	check(drmSyncobjCreate(fd, 0, &so) == 0 && drmSyncobjCreate(fd, 0, &empty) == 0,
@@ -1050,7 +1087,6 @@ test_sync_file(int fd)
 	(void) close(s1);
 	(void) close(s2);
 	(void) close(s3);
-	(void) close(md.fence);
 	(void) close(ex);
 	(void) drmSyncobjDestroy(fd, so);
 	(void) drmSyncobjDestroy(fd, empty);

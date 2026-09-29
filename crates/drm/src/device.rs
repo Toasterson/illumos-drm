@@ -433,9 +433,10 @@ impl<D: Driver> CharDevice for Device<D> {
         // A node minor without a clone id was never handed out by
         // clone_open, so there is no file to forget.
         if let Some(c) = d.clone {
-            // The clone id is released last, after the file's KMS and GEM
-            // state, so that a concurrent open cannot be given the same id
-            // while that state still exists (Linux's drm_file_free order).
+            // The clone id is released last, after the file's KMS, GEM and
+            // sync object state, so that a concurrent open cannot be given
+            // the same id while that state still exists (Linux's
+            // drm_file_free order; such an open would fail with EBUSY).
             // Framebuffers hold GEM references: KMS goes before GEM.
             if let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) {
                 k.file_close(c, drv, ctx);
@@ -517,6 +518,15 @@ impl<D: Driver> CharDevice for Device<D> {
         self.state.lock().permit(c, entry.perm, privileged)?;
         self.driver.ioctl(self, c, cmd, &arg, ctx)?;
         Ok(0)
+    }
+
+    fn segmap_check(&self, minor: Minor, req: &MapRequest, ctx: &Sleepable) -> Result<()> {
+        if let Some((_, id)) = anon_fd::decode(minor.0) {
+            return self.sync.anon_segmap_check(id, req.off, req.len, req.is_shared(), ctx);
+        }
+        let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
+        let g = self.gem.as_ref().ok_or(Errno::ENODEV)?;
+        g.map_check(c, req.off, req.len, req.is_shared())
     }
 }
 
