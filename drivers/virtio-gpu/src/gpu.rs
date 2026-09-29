@@ -38,6 +38,24 @@
 //! completion signals its [`Fence`], on the device's fence context or on a
 //! ring context of the file (`CONTEXT_INIT` with rings).
 
+//!
+//! # Locks
+//!
+//! `submit` orders fence ids with queueing; it is held while a request is
+//! queued (and, when the queue is full, while completions are drained and
+//! the submitter sleeps a tick), never while a completion is waited for.
+//! `ctx_lock` serialises context creation and is held across the
+//! `CTX_CREATE` round trip; it is taken before `files`. `files`, `caps`,
+//! `capset_cache` and a request's `state`, `fence` and `objs` mutexes are
+//! leaves. Completion takes only leaves, and the fence's own locks when it
+//! signals; it never takes `submit` or `ctx_lock`, so a thread holding
+//! either may drain the queue itself. The DRM core's mode-setting lock is
+//! held around the display's requests (outside every lock here), and GEM
+//! objects are destroyed with no GEM lock held. The virtio framework's
+//! mutexes are internal leaves. The threaded part of `drm_r4_test` (eight
+//! threads, own and shared files) exercises these paths together in the
+//! kernel.
+
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem::size_of;
