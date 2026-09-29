@@ -354,7 +354,7 @@ pub trait FbBacking: Send + Sync + Sized + 'static {
 /// Framebuffer lifetime: the core releases the states an update replaced
 /// right after the commit hooks, not when the new image reaches the
 /// screen. A driver that keeps scanning out the old framebuffer until a
-/// later vblank must hold its own [`FbRef`](super::objects::FbRef) clone
+/// later vblank must hold its own [`FbRef`] clone
 /// until then (as `rdrmnull` does); the reference keeps the framebuffer and
 /// its buffer objects alive, and the core frees them when the last one
 /// goes.
