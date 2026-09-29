@@ -94,6 +94,7 @@ pub mod objects;
 pub mod offsets;
 pub mod resv;
 pub mod state;
+pub mod syncobj;
 #[cfg(not(test))]
 pub mod uaccess;
 pub mod wwmutex;
