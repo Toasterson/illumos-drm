@@ -351,6 +351,14 @@ pub trait FbBacking: Send + Sync + Sized + 'static {
 /// driver that has display hardware; a render-only driver implements
 /// nothing here.
 ///
+/// Framebuffer lifetime: the core releases the states an update replaced
+/// right after the commit hooks, not when the new image reaches the
+/// screen. A driver that keeps scanning out the old framebuffer until a
+/// later vblank must hold its own [`FbRef`](super::objects::FbRef) clone
+/// until then (as `rdrmnull` does); the reference keeps the framebuffer and
+/// its buffer objects alive, and the core frees them when the last one
+/// goes.
+///
 /// The check hooks run after the core's own checks, for the objects an
 /// update touches (and those it drags in: the planes and connectors of a
 /// CRTC that needs a full mode set), and may refuse the update with any
@@ -417,11 +425,11 @@ pub trait KmsDriver<B: FbBacking>: Send + Sync {
 }
 
 /// A plane check for drivers, after Linux's
-/// `drm_atomic_helper_check_plane_state`: a visible plane must lie on its
-/// CRTC's active area; without `can_position` it must cover it exactly,
-/// and without `can_scale` the source and destination sizes must match.
-/// A plane on a disabled CRTC passes (it is invisible). Failures are
-/// `EINVAL`.
+/// `drm_atomic_helper_check_plane_state`: without `can_position` a plane
+/// must cover its CRTC's mode exactly, and without `can_scale` the source
+/// and destination sizes must match. A positioned plane may lie partly or
+/// wholly off screen (Linux clips it and marks it invisible). A plane on a
+/// disabled CRTC passes (it is invisible). Failures are `EINVAL`.
 pub fn check_plane_helper<B>(
     new: &PlaneState<B>,
     crtc: Option<&CrtcState>,

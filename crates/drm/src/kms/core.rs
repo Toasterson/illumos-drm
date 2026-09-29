@@ -29,14 +29,26 @@ use super::objects::{Blob, BlobRef, FbRef, FbRequest, Framebuffer, Ids, Layout, 
 use super::props::{CONNECTOR_PROPS, CRTC_PROPS, PLANE_PROPS, Prop, PropDef};
 use super::state::{ConnectorStatus, Current, FbBacking, KmsDriver, OldState};
 
-/// The largest blob a client may create. Blob memory is locked kernel
-/// memory; Linux's limit is `INT_MAX`.
+// Blob and framebuffer memory is locked kernel memory and every open file
+// may create them without authentication, so, unlike Linux (which bounds a
+// blob by INT_MAX and nothing else), the core bounds them per file and per
+// device; going past a bound is ENOMEM.
+
+/// The largest blob a client may create.
 pub const MAX_BLOB: usize = 1 << 20;
 /// The most blob bytes one file may hold.
 pub const MAX_FILE_BLOB_BYTES: usize = 4 << 20;
-/// The most framebuffers one file may hold (Linux has no limit; each costs
-/// kernel memory).
-pub const MAX_FILE_FBS: usize = 1024;
+/// The most blobs one file may hold.
+pub const MAX_FILE_BLOBS: usize = 256;
+/// The most blob bytes of all files of a device together.
+pub const MAX_DEVICE_BLOB_BYTES: usize = 16 << 20;
+/// The most blobs a device holds, its own (IN_FORMATS, EDID, legacy
+/// modes) included.
+pub const MAX_DEVICE_BLOBS: usize = 4096;
+/// The most framebuffers one file may hold.
+pub const MAX_FILE_FBS: usize = 256;
+/// The most framebuffers a device holds, legacy cursor images included.
+pub const MAX_DEVICE_FBS: usize = 4096;
 
 /// What a connector's last probe found.
 #[derive(Clone, Debug, Default)]
@@ -622,15 +634,22 @@ impl<B: FbBacking> KmsCore<B> {
 
     // --- blobs ---------------------------------------------------------------
 
-    /// `CREATEPROPBLOB`: `EINVAL` for an empty blob, `ENOMEM` above
-    /// [`MAX_BLOB`] or the file's [`MAX_FILE_BLOB_BYTES`].
+    /// `CREATEPROPBLOB`: `EINVAL` for an empty blob, `ENOMEM` past one of
+    /// the bounds above ([`MAX_BLOB`], [`MAX_FILE_BLOB_BYTES`],
+    /// [`MAX_FILE_BLOBS`], [`MAX_DEVICE_BLOB_BYTES`], [`MAX_DEVICE_BLOBS`]).
     pub fn create_blob(&mut self, file: u32, data: Vec<u8>, ctx: &Sleepable) -> Result<u32, Errno> {
         if data.is_empty() {
             return Err(Errno::EINVAL);
         }
         let len = data.len();
         let f = self.files.get(&file).ok_or(Errno::ENXIO)?;
-        if len > MAX_BLOB || f.blob_bytes + len > MAX_FILE_BLOB_BYTES {
+        let device_bytes: usize = self.files.values().map(|f| f.blob_bytes).sum();
+        if len > MAX_BLOB
+            || f.blob_bytes + len > MAX_FILE_BLOB_BYTES
+            || f.blobs.len() >= MAX_FILE_BLOBS
+            || device_bytes + len > MAX_DEVICE_BLOB_BYTES
+            || self.blobs.len() >= MAX_DEVICE_BLOBS
+        {
             return Err(Errno::ENOMEM);
         }
         let id = self.ids.alloc(ObjKind::Blob, ctx)?;
@@ -704,9 +723,8 @@ impl<B: FbBacking> KmsCore<B> {
                 }
             }
         }
-        if let Some(f) = file.and_then(|f| self.files.get(&f))
-            && f.fbs.len() >= MAX_FILE_FBS
-        {
+        let file_full = file.and_then(|f| self.files.get(&f)).is_some_and(|f| f.fbs.len() >= MAX_FILE_FBS);
+        if file_full || self.fbs.len() >= MAX_DEVICE_FBS {
             release(objs);
             return Err(Errno::ENOMEM);
         }

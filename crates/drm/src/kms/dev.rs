@@ -19,13 +19,17 @@
 //!
 //! # Vblanks and events
 //!
-//! A driver reports each vblank with [`KmsEvents::vblank`] (through its [`VblankHandle`]), from thread
-//! context, a task queue, a level-0 `ddi_periodic(9F)` callback or a
-//! `timeout(9F)` callback; the event lock is an adaptive mutex without an
-//! interrupt priority, so hardware interrupt handlers must pass vblanks on
-//! to a soft interrupt that is registered with a matching lock priority
-//! (not provided yet; R4's virtio-gpu uses a software vblank like
-//! `rdrmnull`'s, [`super::soft::SoftVblank`]). Waking pollers with
+//! A driver reports each vblank with [`KmsEvents::vblank`] (through its
+//! [`VblankHandle`]) in thread context: an ioctl, a task queue or a level-0
+//! `ddi_periodic(9F)` callback, which is what the `Sleepable` token it
+//! demands proves. The event lock is an adaptive mutex without an interrupt
+//! priority, so taking it from an interrupt handler or a `timeout(9F)`
+//! callback would be a DDI violation (`mutex_init(9F)`); the token makes
+//! that impossible in safe code. A driver with a hardware vblank interrupt
+//! needs a lock with the interrupt's priority and an entry point for the
+//! `Atomic` token, which comes with the first such driver; R4's virtio-gpu
+//! has no vblank interrupt and uses [`super::soft::SoftVblank`], as
+//! `rdrmnull` does. Waking pollers with
 //! `pollwakeup(9F)` happens after the event lock is released, on a
 //! [`PollHeads`] array that lives as long as the device, so a wakeup that
 //! races with a close finds a valid head.
@@ -92,8 +96,8 @@ unsafe impl Plain for uapi::drm_mode_get_blob {}
 unsafe impl Plain for uapi::drm_mode_fb_cmd {}
 // SAFETY: as above.
 unsafe impl Plain for uapi::drm_mode_fb_cmd2 {}
-// SAFETY: as above.
-unsafe impl Plain for u32 {}
+// SAFETY: as above; the structure has no padding (asserted in objects.rs).
+unsafe impl Plain for uapi::drm_mode_modeinfo {}
 // SAFETY: as above.
 unsafe impl Plain for uapi::drm_mode_crtc_page_flip {}
 // SAFETY: as above.
@@ -185,9 +189,9 @@ fn now_ns() -> i64 {
 impl KmsEvents {
     /// Reports a vblank of CRTC `crtc` (an index) that happened at
     /// `time_ns` (`gethrtime(9F)`): the counter advances, an armed flip
-    /// completes, due waits are delivered, pollers and waiters wake. See
-    /// the module documentation for the contexts it may be called from.
-    pub fn vblank(&self, crtc: usize, time_ns: i64) {
+    /// completes, due waits are delivered, pollers and waiters wake.
+    /// Thread context only (see the module documentation).
+    pub fn vblank(&self, crtc: usize, time_ns: i64, _ctx: &Sleepable) {
         let w = self.lock.lock().handle_vblank(crtc, time_ns);
         self.wake(w);
     }
@@ -222,6 +226,8 @@ pub struct Caller<'a> {
 /// The mode-setting state of a device in the kernel.
 pub struct Kms<O: GemObject> {
     core: Mutex<KmsCore<GemRef<O>>>,
+    /// Serialises `read(2)` (taken before the event lock).
+    read_lock: Mutex<()>,
     ev: Arc<KmsEvents>,
     commits: AtomicU64,
     kstat: Option<TypedKstat<KmsKstat>>,
@@ -248,7 +254,7 @@ impl<O: GemObject> Kms<O> {
         let ev = Arc::new(KmsEvents {
             lock: Mutex::new(events),
             cv: CondVar::new(),
-            polls: PollHeads::new(MAX_FILES as usize + 1, ctx),
+            polls: PollHeads::new(MAX_FILES as usize + 1, ctx)?,
         });
         let kstat = TypedKstat::<KmsKstat>::new(
             ddi::KstatId { module: dev.driver_name(), instance: dev.instance(), name: c"kms", class: c"misc" },
@@ -257,7 +263,15 @@ impl<O: GemObject> Kms<O> {
         if kstat.is_err() {
             dev.warn(format_args!("cannot create the kms kstat; statistics are unavailable"));
         }
-        let k = Kms { core: Mutex::new(core), ev, commits: AtomicU64::new(0), kstat: kstat.ok(), atomic, modifiers };
+        let k = Kms {
+            core: Mutex::new(core),
+            read_lock: Mutex::new(()),
+            ev,
+            commits: AtomicU64::new(0),
+            kstat: kstat.ok(),
+            atomic,
+            modifiers,
+        };
         k.publish();
         Ok(k)
     }
@@ -340,6 +354,10 @@ impl<O: GemObject> Kms<O> {
         let nonblock = i32::from(uio.fmode()) & (sys::FNONBLOCK | sys::FNDELAY) != 0;
         let mut copied = 0usize;
         loop {
+            // Readers take events one at a time and copy them out without
+            // the event lock; the read lock keeps two readers of the same
+            // file from passing each other (Linux's event_read_lock).
+            let r = self.read_lock.lock();
             let mut g = self.ev.lock.lock();
             match g.pop(c.get(), uio.resid()) {
                 Some(e) => {
@@ -359,6 +377,7 @@ impl<O: GemObject> Kms<O> {
                     if nonblock {
                         return Err(Errno::EAGAIN);
                     }
+                    drop(r);
                     let (g, interrupted) = self.ev.cv.wait_sig(g, ctx);
                     drop(g);
                     if interrupted {
@@ -370,7 +389,7 @@ impl<O: GemObject> Kms<O> {
     }
 
     /// `chpoll(9E)`: readable while events are queued.
-    pub(crate) fn chpoll(&self, c: CloneId) -> Result<(PollEvents, PollRegistration), Errno> {
+    pub(crate) fn chpoll(&self, c: CloneId) -> Result<(PollEvents, PollRegistration<'_>), Errno> {
         let ready = if self.ev.lock.lock().readable(c.get()) {
             PollEvents::IN.union(PollEvents::RDNORM)
         } else {
@@ -781,7 +800,19 @@ impl<O: GemObject> Kms<O> {
                         let prev = (0..i).find(|&j| fb.objs[j].as_ref().is_some_and(|p| p.same(o)));
                         handles[i] = match prev {
                             Some(j) => handles[j],
-                            None => g.handle_create(file, o.clone(), ctx)?,
+                            None => match g.handle_create(file, o.clone(), ctx) {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    // Do not leave the handles made so far
+                                    // behind (Linux's drm_mode_getfb2_ioctl).
+                                    for (j, h) in handles.iter().enumerate().take(i) {
+                                        if *h != 0 && !handles[..j].contains(h) {
+                                            let _ = g.handle_close(file, *h, ctx);
+                                        }
+                                    }
+                                    return Err(e);
+                                }
+                            },
                         };
                     }
                 }
@@ -1281,16 +1312,34 @@ const ENOSYS: Errno = match Errno::new(sys::errno::ENOSYS) {
     None => Errno::EINVAL,
 };
 
-fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
-    // SAFETY: plain integers without padding; the byte view covers exactly
-    // the slice.
+/// The bytes of a slice of padding-free plain values (`u16`, `u32`, `u64`,
+/// `drm_mode_modeinfo`).
+fn as_bytes<T: Plain + NoPadding>(v: &[T]) -> &[u8] {
+    // SAFETY: T has no padding (NoPadding), so every byte is initialised;
+    // the byte view covers exactly the slice.
     unsafe { core::slice::from_raw_parts(v.as_ptr().cast(), core::mem::size_of_val(v)) }
 }
 
-fn as_bytes_mut<T: Copy>(v: &mut [T]) -> &mut [u8] {
-    // SAFETY: as above; every byte pattern is a valid integer.
+/// The bytes of a slice of plain values, for filling from userland.
+fn as_bytes_mut<T: Plain + NoPadding>(v: &mut [T]) -> &mut [u8] {
+    // SAFETY: as above; every byte pattern is a valid T (Plain).
     unsafe { core::slice::from_raw_parts_mut(v.as_mut_ptr().cast(), core::mem::size_of_val(v)) }
 }
+
+/// Types without padding bytes, whose byte view exposes no uninitialised
+/// memory.
+///
+/// # Safety
+/// The type must have no padding.
+unsafe trait NoPadding {}
+// SAFETY: integers have no padding.
+unsafe impl NoPadding for u16 {}
+// SAFETY: as above.
+unsafe impl NoPadding for u32 {}
+// SAFETY: as above.
+unsafe impl NoPadding for u64 {}
+// SAFETY: 68 bytes of fields, no padding (asserted in objects.rs).
+unsafe impl NoPadding for uapi::drm_mode_modeinfo {}
 
 /// Copies at most `room` IDs to a user array (the partial copy of Linux's
 /// `GETRESOURCES` and friends).
@@ -1300,11 +1349,7 @@ fn copy_ids(arg: &IoctlArg<'_>, ptr: u64, ids: &[u32], room: u32) -> Result<(), 
 }
 
 fn copy_modes(arg: &IoctlArg<'_>, ptr: u64, modes: &[uapi::drm_mode_modeinfo]) -> Result<(), Errno> {
-    // drm_mode_modeinfo has no padding (asserted in objects.rs).
-    let bytes =
-        // SAFETY: the structures consist of integers without padding.
-        unsafe { core::slice::from_raw_parts(modes.as_ptr().cast::<u8>(), core::mem::size_of_val(modes)) };
-    copy_out_bytes(arg, ptr as usize, bytes)
+    copy_out_bytes(arg, ptr as usize, as_bytes(modes))
 }
 
 /// Copies at most `room` property IDs and values.

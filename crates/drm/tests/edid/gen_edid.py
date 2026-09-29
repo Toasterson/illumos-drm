@@ -7,8 +7,8 @@
 Provenance: every blob in this directory is synthesized by this script from
 the published VESA EDID 1.3/1.4 and CTA-861 layouts and VESA DMT/CTA timing
 values; none is captured from a real display or copied from another project,
-so they carry the MPL-2.0 like the rest of the repository. Run it from this
-directory to regenerate them; the output is deterministic.
+so they carry the MPL-2.0 like the rest of the repository. Run it to
+regenerate them next to it; the output is deterministic.
 
   rdrmnull.bin               EDID 1.4, one block: the virtual display of the
                              rdrmnull test driver (also built into it).
@@ -127,7 +127,10 @@ def dvi():
     return base("OLD", 0x1600, 7, 3, (41, 31), est, stds, descs, 0x0a)
 
 
-for name, blob in [("rdrmnull.bin", rdrmnull()), ("hdmi-1080p.bin", hdmi_tv()),
-                   ("dvi-1600x1200-edid13.bin", dvi())]:
-    with open(name, "wb") as f:
-        f.write(bytes(blob))
+if __name__ == "__main__":
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name, blob in [("rdrmnull.bin", rdrmnull()), ("hdmi-1080p.bin", hdmi_tv()),
+                       ("dvi-1600x1200-edid13.bin", dvi())]:
+        with open(os.path.join(here, name), "wb") as f:
+            f.write(bytes(blob))

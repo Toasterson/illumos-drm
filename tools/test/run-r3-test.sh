@@ -141,6 +141,7 @@ fail=0
 had_dri=no
 [ -d /dev/dri ] && had_dri=yes
 
+[ -f REVISION ] && step cat REVISION
 step uname -a
 # devfs drops the clone@0 nodes of idle drivers (bridge, llc1, ptm, ...) a
 # few seconds after boot, and devfsadm -C at the end recreates them, which

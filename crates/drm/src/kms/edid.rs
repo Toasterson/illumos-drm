@@ -306,7 +306,7 @@ pub fn standard_timing(t: [u8; 2], version: (u8, u8)) -> Option<DisplayMode> {
 /// Decodes a three-byte CVT code of an 0xF8 descriptor: the normal-blanking
 /// modes at 50, 60, 75 and 85 Hz that it marks as supported.
 fn cvt_code(c: &[u8], out: &mut Vec<DisplayMode>) {
-    let (c0, c1, c2) = (u16::from(byte(c, 0)), u16::from(byte(c, 1)), byte(c, 2));
+    let (c0, c1, c2) = (u32::from(byte(c, 0)), u32::from(byte(c, 1)), byte(c, 2));
     if c0 == 0 && c1 == 0 && c2 == 0 {
         return;
     }
@@ -320,8 +320,9 @@ fn cvt_code(c: &[u8], out: &mut Vec<DisplayMode>) {
     // Bits 1 to 4: 85, 75, 60 and 50 Hz; bit 0 is 60 Hz with reduced
     // blanking, which is not implemented (Linux skips it too).
     for (bit, rate) in [(1, 85), (2, 75), (3, 60), (4, 50)] {
+        let (Ok(w), Ok(h)) = (u16::try_from(width), u16::try_from(height)) else { return };
         if c2 & (1 << bit) != 0
-            && let Some(m) = modes::cvt_mode(width, height, rate)
+            && let Some(m) = modes::cvt_mode(w, h, rate)
         {
             out.push(m);
         }
@@ -445,6 +446,16 @@ mod tests {
         let info = parse(&tv).unwrap();
         assert!(!info.hdmi);
         assert!(info.modes.iter().any(|m| m.hdisplay == 1920));
+    }
+
+    #[test]
+    fn large_cvt_codes() {
+        // A 12-bit height code: 8192 lines, 13107 pixels at 16:10; no
+        // arithmetic may overflow on the way.
+        let mut v = std::vec::Vec::new();
+        cvt_code(&[0xff, 0xf8, 0x1e], &mut v);
+        cvt_code(&[0xff, 0xfc, 0x1e], &mut v);
+        assert!(v.iter().all(|m| m.vdisplay == 8192));
     }
 
     #[test]

@@ -33,6 +33,13 @@ use drm_uapi as uapi;
 /// (possibly with padding) and have no invariants of its own.
 pub unsafe trait Plain: Copy {}
 
+// SAFETY: plain integers.
+unsafe impl Plain for u16 {}
+// SAFETY: plain integers.
+unsafe impl Plain for u32 {}
+// SAFETY: plain integers.
+unsafe impl Plain for u64 {}
+
 // SAFETY: integer and pointer fields only; see the bindings in drm-uapi.
 unsafe impl Plain for uapi::drm_version {}
 // SAFETY: as above.

@@ -37,19 +37,24 @@ fn now() -> i64 {
 }
 
 impl SoftVblank {
-    /// Starts calling `on_vblank(time_ns)` once per frame of `frame_ns`
-    /// nanoseconds, the first time one frame from now. The callback runs on
-    /// the level-0 periodic task queue (thread context).
-    pub fn start<F: FnMut(i64) + Send + 'static>(frame_ns: u64, mut on_vblank: F, ctx: &Sleepable) -> SoftVblank {
+    /// Starts calling `on_vblank(time_ns, ctx)` once per frame of
+    /// `frame_ns` nanoseconds, the first time one frame from now. The
+    /// callback runs on the level-0 periodic task queue, in thread context,
+    /// which the `Sleepable` token it receives proves.
+    pub fn start<F: FnMut(i64, &Sleepable) + Send + 'static>(
+        frame_ns: u64,
+        mut on_vblank: F,
+        ctx: &Sleepable,
+    ) -> SoftVblank {
         let frame = i64::try_from(frame_ns.max(1_000_000)).unwrap_or(i64::MAX);
         let mut next = now().saturating_add(frame);
-        let tick: Tick = Box::new(move |_ctx: &Sleepable| {
+        let tick: Tick = Box::new(move |ctx: &Sleepable| {
             let t = now();
             if t.saturating_sub(next) > 4 * frame {
                 next += (t - next) / frame * frame;
             }
             while t >= next {
-                on_vblank(next);
+                on_vblank(next, ctx);
                 next = next.saturating_add(frame);
             }
         });

@@ -695,6 +695,12 @@ test_legacy(int fd, int fd2)
 	    "SETCRTC with a viewport past the framebuffer is ENOSPC");
 	check(drmModeSetCrtc(fd, crtc_id, fa, 0, 0, NULL, 0, &mode1024) == -EINVAL,
 	    "SETCRTC with a mode and no connectors is EINVAL");
+	{
+		drmModeModeInfo odd = mode1024;
+		odd.vscan = 2;
+		check(drmModeSetCrtc(fd, crtc_id, fa, 0, 0, &conn, 1, &odd) == -EINVAL,
+		    "SETCRTC with a mode the display cannot show (vscan 2) is EINVAL");
+	}
 	check(drmModeSetCrtc(fd, crtc_id, fa, 0, 0, &conn, 1, &mode1024) == 0, "SETCRTC 1024x768 with framebuffer A");
 	crtc = drmModeGetCrtc(fd, crtc_id);
 	check(crtc != NULL && crtc->mode_valid && crtc->buffer_id == fa && crtc->mode.hdisplay == 1024 &&
@@ -1205,6 +1211,72 @@ test_concurrency(int fd)
 	buf_destroy(fd, &b);
 }
 
+/*
+ * Files opened and closed from many threads, each with a framebuffer, a
+ * blob and a pending event at close: a closing file's state must never
+ * leak into a new file that is given the same clone id.
+ */
+static void *
+churner(void *arg)
+{
+	struct worker *w = arg;
+	int i;
+
+	for (i = 0; i < w->iters; i++) {
+		int fd = open(CARD, O_RDWR);
+		struct buf b;
+		uint32_t fb = 0, blob = 0;
+		drmModeResPtr r;
+		drmVBlank vbl;
+		char data[8] = "churner";
+
+		if (fd < 0) {
+			w->errors++;
+			continue;
+		}
+		r = drmModeGetResources(fd);
+		if (r == NULL || r->count_fbs != 0)
+			w->errors++;
+		drmModeFreeResources(r);
+		if (!buf_create(fd, 64, 64, 32, &b) ||
+		    addfb2(fd, 64, 64, XRGB8888, b.handle, b.pitch, 0, 0, &fb) != 0 ||
+		    drmModeCreatePropertyBlob(fd, data, sizeof (data), &blob) != 0)
+			w->errors++;
+		r = drmModeGetResources(fd);
+		if (r == NULL || r->count_fbs != 1 || r->fbs[0] != fb)
+			w->errors++;
+		drmModeFreeResources(r);
+		(void) memset(&vbl, 0, sizeof (vbl));
+		vbl.request.type = DRM_VBLANK_RELATIVE | DRM_VBLANK_EVENT;
+		vbl.request.sequence = 100000;
+		(void) drmWaitVBlank(fd, &vbl);
+		if (b.map != NULL && b.map != MAP_FAILED)
+			(void) munmap((void *)b.map, b.size);
+		(void) close(fd);
+	}
+	return (NULL);
+}
+
+static void
+test_open_close_churn(void)
+{
+	pthread_t t[8];
+	struct worker w[8];
+	int i, errs = 0;
+
+	for (i = 0; i < 8; i++) {
+		w[i].iters = 50;
+		w[i].errors = 0;
+		(void) pthread_create(&t[i], NULL, churner, &w[i]);
+	}
+	for (i = 0; i < 8; i++) {
+		(void) pthread_join(t[i], NULL);
+		errs += w[i].errors;
+	}
+	check(errs == 0, "8 threads x 50 open/addfb/blob/event/close cycles: no state crosses files");
+	check(kms_idle("after the churn"), "the churn leaves no framebuffer, blob or event behind");
+}
+
 static void
 test_close_turns_off(void)
 {
@@ -1253,6 +1325,7 @@ main(int argc, char **argv)
 	(void) close(fd2);
 	(void) close(fd);
 	test_close_turns_off();
+	test_open_close_churn();
 	msleep(100);
 	check(kms_stats(&k) && k.vblanks > 0 && k.flips > 0 && k.commits > 0, "kstat counted vblanks, flips, commits");
 	check(kms_idle("at the end"), "every framebuffer, blob and event is released");

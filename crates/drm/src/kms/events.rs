@@ -21,8 +21,12 @@
 //! context, and charged to the file's budget. Everything that happens
 //! later — a vblank ([`EventCore::handle_vblank`]) completing flips and
 //! waits, delivery to a queue — moves the already allocated events between
-//! intrusive lists and allocates nothing, so a driver may call it from an
-//! interrupt handler. Delivery reports the files that received something
+//! intrusive lists in O(1) per event and allocates nothing, so it is fit
+//! for an interrupt handler once the lock around it has the interrupt's
+//! priority; the kernel layer's lock does not yet, and its entry point
+//! demands the `Sleepable` token (see `kms::dev`). Waits are kept sorted by
+//! their sequence, so a vblank touches only the waits it completes.
+//! Delivery reports the files that received something
 //! as a [`WakeSet`], a fixed-size bit set, so that the caller can wake
 //! pollers after releasing its lock (`pollwakeup(9F)` must not be called
 //! with a lock that `chpoll(9E)` takes).
@@ -33,6 +37,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::ptr::NonNull;
 
 use ddi::Errno;
 use drm_uapi as uapi;
@@ -41,6 +46,10 @@ use crate::minor::MAX_FILES;
 
 /// The byte budget of one file's events (Linux: 4096).
 pub const EVENT_SPACE: usize = 4096;
+/// The most events a device keeps queued or pending over all files; a
+/// charge beyond it fails with `ENOMEM`. Linux bounds events per file only;
+/// with up to 511 files that would be 65,000 events of locked memory.
+pub const MAX_DEVICE_EVENTS: u64 = 8192;
 /// The size of every event this core sends (`drm_event_vblank` and
 /// `drm_event_crtc_sequence` are both 32 bytes).
 pub const EVENT_SIZE: usize = 32;
@@ -78,8 +87,13 @@ pub struct Event {
     /// The vblank sequence a wait completes at.
     target: u64,
     data: [u8; EVENT_SIZE],
-    next: Option<Box<Event>>,
+    /// The next event of the list this one is on; owned by that list.
+    next: Option<NonNull<Event>>,
 }
+
+// SAFETY: `next` is a link that only the owning EventList follows; an
+// event on no list owns nothing through it.
+unsafe impl Send for Event {}
 
 impl Event {
     /// Allocates an event for `file` (a clone ID) about the CRTC with ID
@@ -123,17 +137,29 @@ impl Event {
     }
 }
 
-/// A singly linked list of events, linked through the events themselves.
+/// A singly linked list of events, linked through the events themselves,
+/// with a tail pointer: appending, prepending and taking the first event
+/// are O(1) and allocate nothing.
+///
+/// The list owns its events: each was a `Box<Event>` turned into a raw
+/// pointer by [`EventList::push_back`] or [`EventList::push_front`] and
+/// becomes one again in [`EventList::pop_front`]. `head` and `tail` are
+/// both `None` or both point into the chain, `tail` at the last event.
 #[derive(Debug, Default)]
 pub struct EventList {
-    head: Option<Box<Event>>,
+    head: Option<NonNull<Event>>,
+    tail: Option<NonNull<Event>>,
     len: usize,
 }
+
+// SAFETY: the list owns its events exclusively (see above), and Event is
+// Send.
+unsafe impl Send for EventList {}
 
 impl EventList {
     /// An empty list.
     pub const fn new() -> EventList {
-        EventList { head: None, len: 0 }
+        EventList { head: None, tail: None, len: 0 }
     }
 
     /// The number of events.
@@ -146,40 +172,91 @@ impl EventList {
         self.len == 0
     }
 
-    /// Appends an event. Walks the list (bounded by the event budgets);
-    /// allocates nothing.
+    fn first(&self) -> Option<&Event> {
+        // SAFETY: head points at an event the list owns; the shared borrow
+        // of the list keeps it alive and unmodified.
+        self.head.map(|p| unsafe { &*p.as_ptr() })
+    }
+
+    /// Appends an event.
     pub fn push_back(&mut self, mut e: Box<Event>) {
         e.next = None;
-        let mut cur = &mut self.head;
-        while let Some(node) = cur {
-            cur = &mut node.next;
+        let p = NonNull::from(Box::leak(e));
+        match self.tail {
+            // SAFETY: tail points at the last event, owned by this list.
+            Some(t) => unsafe { (*t.as_ptr()).next = Some(p) },
+            None => self.head = Some(p),
         }
-        *cur = Some(e);
+        self.tail = Some(p);
         self.len += 1;
     }
 
     /// Prepends an event.
     pub fn push_front(&mut self, mut e: Box<Event>) {
-        e.next = self.head.take();
-        self.head = Some(e);
+        e.next = self.head;
+        let p = NonNull::from(Box::leak(e));
+        if self.tail.is_none() {
+            self.tail = Some(p);
+        }
+        self.head = Some(p);
         self.len += 1;
     }
 
     /// Removes the first event.
     pub fn pop_front(&mut self) -> Option<Box<Event>> {
-        let mut e = self.head.take()?;
+        let p = self.head?;
+        // SAFETY: p came from Box::leak in a push and is owned by this list;
+        // it is unlinked here, so it is turned back into a Box once.
+        let mut e = unsafe { Box::from_raw(p.as_ptr()) };
         self.head = e.next.take();
+        if self.head.is_none() {
+            self.tail = None;
+        }
         self.len -= 1;
         Some(e)
     }
 
-    /// Moves every event for which `pred` holds to `out`, in order.
+    /// Moves every event for which `pred` holds to `out`, keeping the order
+    /// of both; one pass.
     fn extract(&mut self, mut pred: impl FnMut(&Event) -> bool, out: &mut EventList) {
         let mut rest = EventList::new();
         while let Some(e) = self.pop_front() {
             if pred(&e) { out.push_back(e) } else { rest.push_back(e) }
         }
         *self = rest;
+    }
+
+    /// Inserts an event after every event with a target not above its own,
+    /// keeping the list sorted by target. O(n) in the ioctl that queues it.
+    fn insert_sorted(&mut self, e: Box<Event>) {
+        if self.tail.is_none_or(|t| {
+            // SAFETY: tail points at an event this list owns.
+            unsafe { (*t.as_ptr()).target <= e.target }
+        }) {
+            self.push_back(e);
+            return;
+        }
+        let mut before = EventList::new();
+        while self.first().is_some_and(|f| f.target <= e.target) {
+            if let Some(x) = self.pop_front() {
+                before.push_back(x);
+            }
+        }
+        before.push_back(e);
+        while let Some(x) = self.pop_front() {
+            before.push_back(x);
+        }
+        *self = before;
+    }
+
+    /// Moves the leading events whose target is at most `seq` to `out`:
+    /// the waits a sorted list completes at vblank `seq`. O(completed).
+    fn take_due(&mut self, seq: u64, out: &mut EventList) {
+        while self.first().is_some_and(|f| f.target <= seq) {
+            if let Some(e) = self.pop_front() {
+                out.push_back(e);
+            }
+        }
     }
 }
 
@@ -316,7 +393,7 @@ impl EventCore {
     pub fn charge(&mut self, file: u32, n: usize) -> Result<(), Errno> {
         let f = self.files.get_mut(file as usize).filter(|f| f.open).ok_or(Errno::ENXIO)?;
         let bytes = n.checked_mul(EVENT_SIZE).ok_or(Errno::ENOMEM)?;
-        if f.space < bytes {
+        if f.space < bytes || self.stats.outstanding.saturating_add(n as u64) > MAX_DEVICE_EVENTS {
             return Err(Errno::ENOMEM);
         }
         f.space -= bytes;
@@ -422,7 +499,7 @@ impl EventCore {
             c.flip_events.extract(|_| true, &mut done);
             self.stats.flips += 1;
         }
-        c.waiters.extract(|e| e.target <= count, &mut done);
+        c.waiters.take_due(count, &mut done);
         self.stats.vblanks += 1;
         while let Some(e) = done.pop_front() {
             self.deliver(e, count, time_ns, &mut wake);
@@ -461,7 +538,7 @@ impl EventCore {
             self.deliver(e, count, time, &mut wake);
         } else {
             e.target = target;
-            c.waiters.push_back(e);
+            c.waiters.insert_sorted(e);
         }
         Ok(wake)
     }
@@ -481,7 +558,7 @@ impl EventCore {
     /// fails.
     pub fn pop(&mut self, file: u32, room: usize) -> Option<Box<Event>> {
         let f = self.files.get_mut(file as usize)?;
-        if f.queue.head.as_ref()?.data.len() > room {
+        if f.queue.first()?.data.len() > room {
             return None;
         }
         let e = f.queue.pop_front()?;
@@ -637,6 +714,55 @@ mod tests {
         let got = read_all(&mut ev, 5);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0][8], 1, "order kept after put_back");
+    }
+
+    #[test]
+    fn sorted_waits_and_list_invariants() {
+        let mut ev = EventCore::new(&[1], &ctx());
+        ev.open(4);
+        ev.set_enabled(0, true, 1, 0);
+        ev.charge(4, 5).unwrap();
+        for t in [5u64, 2, 9, 2, 3] {
+            let e = Event::new(4, EventKind::Vblank { user_data: t }, 1, &ctx());
+            assert!(ev.queue_wait(0, t, e).is_ok());
+        }
+        let mut seen = std::vec::Vec::new();
+        for i in 1..=9 {
+            ev.handle_vblank(0, i);
+            while let Some(e) = ev.pop(4, 64) {
+                seen.push((u64::from_ne_bytes(e.data[8..16].try_into().unwrap()), u32_at(&e.data, 24)));
+            }
+        }
+        assert_eq!(seen, [(2, 2), (2, 2), (3, 3), (5, 5), (9, 9)], "each at its vblank, in target order");
+        // The list keeps its tail across emptying and refilling.
+        let mut l = EventList::new();
+        l.push_front(flip(4, 1));
+        assert!(l.pop_front().is_some() && l.is_empty());
+        l.push_back(flip(4, 2));
+        l.push_front(flip(4, 1));
+        l.push_back(flip(4, 3));
+        let order: std::vec::Vec<u8> = core::iter::from_fn(|| l.pop_front())
+            .map(|e| match e.kind {
+                EventKind::Flip { user_data } => user_data as u8,
+                _ => 0,
+            })
+            .collect();
+        assert_eq!(order, [1, 2, 3]);
+    }
+
+    #[test]
+    fn device_cap() {
+        let mut ev = EventCore::new(&[1], &ctx());
+        let per_file = EVENT_SPACE / EVENT_SIZE;
+        let files = (MAX_DEVICE_EVENTS as usize).div_ceil(per_file) + 1;
+        let mut total = 0;
+        for f in 1..=files as u32 {
+            ev.open(f);
+            while ev.charge(f, 1).is_ok() {
+                total += 1;
+            }
+        }
+        assert_eq!(total, MAX_DEVICE_EVENTS as usize);
     }
 
     #[test]

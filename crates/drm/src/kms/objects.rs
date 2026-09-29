@@ -67,19 +67,23 @@ impl ObjKind {
 #[derive(Default)]
 pub struct Ids {
     map: BTreeMap<u32, ObjKind>,
+    /// No ID below this is free.
+    hint: u32,
 }
 
 impl Ids {
     /// Creates an empty space.
     pub const fn new() -> Ids {
-        Ids { map: BTreeMap::new() }
+        Ids { map: BTreeMap::new(), hint: 1 }
     }
 
-    /// Allocates the lowest free ID (from 1) for an object. The caller must
-    /// be in a context that may block: the map allocates with `KM_SLEEP`.
+    /// Allocates the lowest free ID (from 1) for an object. The search
+    /// starts at the lowest ID that may be free, so allocating in a row is
+    /// cheap. The caller must be in a context that may block: the map
+    /// allocates with `KM_SLEEP`.
     pub fn alloc(&mut self, kind: ObjKind, _ctx: &ddi::Sleepable) -> Result<u32, Errno> {
-        let mut want = 1u32;
-        for &k in self.map.keys() {
+        let mut want = self.hint.max(1);
+        for (&k, _) in self.map.range(want..) {
             if k != want {
                 break;
             }
@@ -89,12 +93,15 @@ impl Ids {
             return Err(Errno::ENOMEM);
         }
         self.map.insert(want, kind);
+        self.hint = want + 1;
         Ok(want)
     }
 
     /// Frees an ID.
     pub fn free(&mut self, id: u32) {
-        self.map.remove(&id);
+        if self.map.remove(&id).is_some() {
+            self.hint = self.hint.min(id);
+        }
     }
 
     /// Looks an ID up.

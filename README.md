@@ -463,7 +463,10 @@ a frame late if a vblank fell between). A non-blocking commit or
 `PAGE_FLIP` on a CRTC with a pending flip is `EBUSY`; a blocking commit
 waits for it first and for its own flip afterwards (one second at most
 each). A driver reports vblanks through its `VblankHandle` with the
-`gethrtime(9F)` time (`TIMESTAMP_MONOTONIC`). `rdrmnull` uses
+`gethrtime(9F)` time (`TIMESTAMP_MONOTONIC`). Waits are kept sorted by
+their sequence and the event lists append in O(1), so a vblank costs only
+the events it completes; concurrent readers of the device are serialised
+so that events keep their order. `rdrmnull` uses
 `kms::soft::SoftVblank`, a 10 ms `ddi_periodic(9F)` callback that reports
 every frame boundary of the mode with its exact time: 60 Hz on average,
 each vblank delivered up to 10 ms late. Events of a file that closes are
@@ -472,20 +475,26 @@ nothing of it. Lock order: the mode-setting lock, then the event lock; the
 vblank path takes only the event lock and wakes pollers after dropping it.
 
 **Mode setting (R3): deviations and open items.** Limits Linux does not
-have, because blob and framebuffer memory is locked kernel memory: a blob
-is at most 1 MiB and a file's blobs 4 MiB (`ENOMEM`), a file has at most
-1024 framebuffers (`ENOMEM`), and one `MODE_ATOMIC` names at most 1024
-objects and 16384 properties (`EINVAL`). The fence properties
+have, because blobs, framebuffers and events are locked kernel memory that
+any open file may create: a blob is at most 1 MiB, a file holds at most
+256 blobs and 4 MiB of blob data, the device 4096 blobs and 16 MiB; a file
+holds at most 256 framebuffers, the device 4096; the device keeps at most
+8192 events queued or pending over all files (each file's 4096-byte budget
+is Linux's); all of these fail with `ENOMEM`. One `MODE_ATOMIC` names at
+most 1024 objects and 16384 properties (`EINVAL`). The fence properties
 `IN_FENCE_FD` and `OUT_FENCE_PTR` exist so that their IDs are known, but
 no object carries them and setting them is `EINVAL` until fences exist
 (R2). Not implemented: leases, asynchronous and targeted page flips, the
 atomic colour-management properties (legacy `GETGAMMA`/`SETGAMMA` work),
 `VRR_ENABLED`, writeback connectors, rotation, `zpos`, `TILE`, damage
 clips, and `DIRTYFB` (`ENOSYS`, as Linux answers for a driver without
-damage tracking). The event lock has no interrupt priority, so a hardware
-driver reports vblanks from thread, task queue, level-0 periodic or
-`timeout(9F)` context until a priority-aware variant exists; the refusal
-of `ATOMIC` to Xorg by process name stays open.
+damage tracking). The event lock has no interrupt priority, so
+`VblankHandle::vblank` demands the `Sleepable` token (thread, task queue or
+level-0 periodic context); a driver with a hardware vblank interrupt needs a
+priority-aware lock and an `Atomic` entry point, which come with the first
+such driver. If `detach` is refused after the KMS state was released
+(GEM objects still referenced), the device stays attached with every CRTC
+off. The refusal of `ATOMIC` to Xorg by process name stays open.
 
 ## Building
 

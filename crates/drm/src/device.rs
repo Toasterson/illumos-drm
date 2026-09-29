@@ -379,14 +379,17 @@ impl<D: Driver> CharDevice for Device<D> {
         // A node minor without a clone id was never handed out by
         // clone_open, so there is no file to forget.
         if let Some(c) = d.clone {
-            self.state.lock().close(c);
-            // Framebuffers hold GEM references: release them first.
+            // The clone id is released last, after the file's KMS and GEM
+            // state, so that a concurrent open cannot be given the same id
+            // while that state still exists (Linux's drm_file_free order).
+            // Framebuffers hold GEM references: KMS goes before GEM.
             if let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) {
                 k.file_close(c, drv, ctx);
             }
             if let Some(g) = &self.gem {
                 g.file_close(c, ctx);
             }
+            self.state.lock().close(c);
         }
         Ok(())
     }
@@ -396,7 +399,12 @@ impl<D: Driver> CharDevice for Device<D> {
         self.kms.as_ref().ok_or(Errno::ENXIO)?.read(c, uio, ctx)
     }
 
-    fn chpoll(&self, minor: Minor, _events: PollEvents, _anyyet: bool) -> Result<(PollEvents, PollRegistration)> {
+    fn chpoll<'a>(
+        &'a self,
+        minor: Minor,
+        _events: PollEvents,
+        _anyyet: bool,
+    ) -> Result<(PollEvents, PollRegistration<'a>)> {
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
         self.kms.as_ref().ok_or(Errno::ENXIO)?.chpoll(c)
     }

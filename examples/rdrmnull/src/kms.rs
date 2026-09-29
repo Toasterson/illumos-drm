@@ -42,6 +42,11 @@ type Fb = FbRef<GemRef<NullObject>>;
 /// The EDID of the virtual display.
 static EDID: &[u8] = include_bytes!("../../../crates/drm/tests/edid/rdrmnull.bin");
 
+/// The modes the virtual connector accepts, from the EDID or from userland
+/// (a `MODE_ID` blob or `SETCRTC`).
+const LIMITS: ModeLimits =
+    ModeLimits { max_width: 2048, max_height: 2048, max_clock: 400_000, interlace: false, dblscan: false };
+
 /// The largest cursor, as `DRM_CAP_CURSOR_WIDTH`/`HEIGHT` report.
 const CURSOR_MAX: u32 = 64;
 
@@ -150,7 +155,7 @@ impl NullKms {
         let scan = self.scan.clone();
         let src = SoftVblank::start(
             frame_ns,
-            move |t| {
+            move |t, ctx| {
                 let old = {
                     let mut s = scan.lock();
                     s.frames += 1;
@@ -165,7 +170,7 @@ impl NullKms {
                 // Never the last reference: the core's registry keeps one
                 // for as long as a state or this driver may use it.
                 drop(old);
-                h.vblank(0, t);
+                h.vblank(0, t, ctx);
             },
             ctx,
         );
@@ -200,13 +205,13 @@ fn checksum(img: &Image) -> Option<u64> {
         if start + len > size {
             return None;
         }
-        // SAFETY: the range lies inside the object's locked kernel memory
-        // (checked above), which lives as long as the framebuffer; a client
-        // may write it concurrently through a mapping, which changes the
-        // bytes read but not their validity as u8.
-        let bytes = unsafe { core::slice::from_raw_parts(base.add(start as usize), len as usize) };
-        for b in bytes {
-            hash ^= u64::from(*b);
+        for i in start..start + len {
+            // SAFETY: the byte lies inside the object's locked kernel memory
+            // (checked above), which lives as long as the framebuffer. A
+            // client may write it concurrently through a mapping, so it is
+            // read with a volatile load rather than through a reference.
+            let b = unsafe { core::ptr::read_volatile(base.add(i as usize)) };
+            hash ^= u64::from(b);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
@@ -215,8 +220,7 @@ fn checksum(img: &Image) -> Option<u64> {
 
 impl KmsDriver<GemRef<NullObject>> for NullKms {
     fn layout(&self) -> Layout {
-        let limits =
-            ModeLimits { max_width: 2048, max_height: 2048, max_clock: 400_000, interlace: false, dblscan: false };
+        let limits = LIMITS;
         Layout {
             min_width: 1,
             max_width: 2048,
@@ -262,8 +266,14 @@ impl KmsDriver<GemRef<NullObject>> for NullKms {
         check_plane_helper(new, crtc, false, false)
     }
 
-    fn check_crtc(&self, _crtc: usize, _new: &CrtcState, _view: &StateView<'_, GemRef<NullObject>>) -> Result<()> {
-        Ok(())
+    fn check_crtc(&self, _crtc: usize, new: &CrtcState, _view: &StateView<'_, GemRef<NullObject>>) -> Result<()> {
+        // A mode from userland must be one the display could show: within
+        // the connector's limits, progressive, not double-scanned, and
+        // without line repetition (vscan), which the scanout ignores.
+        match &new.mode {
+            Some(m) if !LIMITS.allows(m) || m.vscan > 1 => Err(Errno::EINVAL),
+            _ => Ok(()),
+        }
     }
 
     fn commit_crtc(&self, _crtc: usize, old: &CrtcState, new: &CrtcState, ctx: &Sleepable) {

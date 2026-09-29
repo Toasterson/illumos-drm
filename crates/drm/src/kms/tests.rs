@@ -403,6 +403,13 @@ fn blobs() {
     assert!(k.blob(blob).is_none());
     k.destroy_blob(FILE, b, &ctx()).unwrap();
     assert!(k.blob(b).is_none());
+    // A file cannot hold more than MAX_FILE_BLOBS blobs, however small.
+    for _ in 0..super::core::MAX_FILE_BLOBS {
+        k.create_blob(OTHER, std::vec![1], &ctx()).unwrap();
+    }
+    assert_eq!(k.create_blob(OTHER, std::vec![1], &ctx()), Err(Errno::ENOMEM));
+    k.file_close(OTHER, &Mock::new(), &ctx()).unwrap();
+    assert_eq!(k.counts().1, 3, "the file's blobs go with it; the device's three stay");
 }
 
 #[test]

@@ -182,8 +182,11 @@ impl DisplayMode {
         if num == 0 {
             return None;
         }
-        // den / (num * 1000) seconds.
-        Some(den * 1_000_000 / num)
+        // den / (num * 1000) seconds. den reaches 2^49 with the largest
+        // totals, double scan and vscan, so the product needs 128 bits;
+        // the result is capped rather than wrapped.
+        let ns = u128::from(den) * 1_000_000 / u128::from(num);
+        Some(u64::try_from(ns).unwrap_or(u64::MAX))
     }
 
     /// The timings, flags and aspect ratio without type and name: two modes
@@ -609,6 +612,17 @@ mod tests {
         for m in ESTABLISHED {
             assert!(m.validate_basic().is_ok());
         }
+    }
+
+    #[test]
+    fn extreme_timings_do_not_overflow() {
+        let mut m = DisplayMode::new(1, [1, 1, 1, u16::MAX], [1, 1, 1, u16::MAX], uapi::DRM_MODE_FLAG_DBLSCAN);
+        m.vscan = u16::MAX;
+        assert!(m.frame_ns().unwrap() > 1_000_000_000_000);
+        assert_eq!(m.vrefresh(), 0);
+        let fast = DisplayMode::new(u32::MAX, [1, 1, 1, 1], [1, 1, 1, 1], uapi::DRM_MODE_FLAG_INTERLACE);
+        assert_eq!(fast.frame_ns(), Some(0));
+        assert!(fast.vrefresh() > 0);
     }
 
     #[test]
