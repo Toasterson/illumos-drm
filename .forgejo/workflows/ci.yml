@@ -46,6 +46,6 @@ jobs:
           --target targets/x86_64-illumos-kmod.json
           -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
       - run: >
-          ld -ztype=kmod -z allextract
+          ld -ztype=kmod -N fs/specfs -z allextract
           target/x86_64-illumos-kmod/release/rdrmnull.a -o target/rdrmnull &&
           elfdump -d target/rdrmnull | grep SUNW_KMOD && nm -u target/rdrmnull
