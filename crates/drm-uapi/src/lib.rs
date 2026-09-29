@@ -5,8 +5,10 @@
 //! headers with the illumos patch that gfx-drm applies (`drm_handle_t` is
 //! 64 bits wide on illumos), and the `DRM_IOCTL_*` command numbers in the
 //! illumos `_IOWR` encoding. It covers `drm.h`, `drm_mode.h` and
-//! `virtgpu_drm.h`. Only the 64-bit ABI exists: the kernel refuses 32-bit
-//! callers.
+//! `virtgpu_drm.h`; the last comes from Linux v6.12 rather than libdrm
+//! (`tools/uapi/include/README`), with the two older layouts of
+//! `drm_virtgpu_execbuffer` in [`virtgpu_compat`](crate::drm_virtgpu_execbuffer_v1).
+//! Only the 64-bit ABI exists: the kernel refuses 32-bit callers.
 //!
 //! The generated files carry the MIT licence of the headers they are
 //! derived from (see the notice below); everything else is MPL-2.0.
@@ -50,6 +52,9 @@ mod abi;
 mod bindings;
 pub mod ioc;
 mod ioctl;
+#[allow(non_camel_case_types)]
+mod virtgpu_compat;
 
 pub use bindings::*;
 pub use ioctl::*;
+pub use virtgpu_compat::*;

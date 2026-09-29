@@ -31,6 +31,7 @@
 //! as in illumos-ddi (section 6 of its `docs/DESIGN.md`).
 
 mod kernel_check;
+mod uapi_compat;
 mod uapi_table;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -236,7 +237,8 @@ fn link(pkg: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Compares the output of `tools/uapi/drm_layout.c` (gcc on illumos) with
+/// Compares the output of `tools/uapi/drm_layout.c` and of
+/// `tools/uapi/virtgpu_compat_layout.c` (gcc on illumos, concatenated) with
 /// the same facts computed from the Rust definitions, line by line. Every
 /// line must be present on both sides with the same value.
 fn uapi_check(file: &str) -> Result<(), String> {
@@ -246,7 +248,8 @@ fn uapi_check(file: &str) -> Result<(), String> {
         Some((key.to_string(), value.to_string()))
     };
     let c: BTreeMap<String, String> = c_text.lines().filter_map(split).collect();
-    let rust: BTreeMap<String, String> = uapi_table::lines().iter().filter_map(|l| split(l)).collect();
+    let rust: BTreeMap<String, String> =
+        uapi_table::lines().iter().chain(uapi_compat::lines().iter()).filter_map(|l| split(l)).collect();
     let mut errors = 0;
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for (key, rv) in &rust {
