@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull", "xtask"]
-default-members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull"]
+members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull", "drivers/virtio-gpu", "xtask"]
+default-members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull", "drivers/virtio-gpu"]
 
 [workspace.package]
 version = "0.0.1"
