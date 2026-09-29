@@ -269,50 +269,33 @@ mod imp {
             stats: &SyncStats,
             ctx: &Sleepable,
         ) -> Result<(), Errno> {
-            let mut obj = Some(obj);
-            // Try the object's existing dma-buf first, then a new minor.
-            for attempt in 0..2 {
-                let Some(o) = obj.take() else { return Err(Errno::EINVAL) };
-                let (id, fresh, spare) = match self.reserve(o, attempt == 0, stats, ctx) {
-                    Ok(v) => v,
-                    Err((o, e)) => {
-                        o.put(ctx);
-                        return Err(e);
-                    }
-                };
-                let m = super::minor(self.index, id).ok_or(Errno::ENXIO);
-                let r = m.and_then(|m| NewFd::open(dev, Minor(m), flags, arg, ctx));
-                let leftover = self.table.lock().settle(id, r.is_ok());
-                if let Some(lo) = leftover {
-                    self.dropped(id, lo, stats, ctx);
+            // A dma-buf reuses its object's open minor (booked, so a racing
+            // last close keeps it); anything else gets a new one.
+            let (id, _fresh, spare) = match self.reserve(obj, true, stats, ctx) {
+                Ok(v) => v,
+                Err((o, e)) => {
+                    o.put(ctx);
+                    return Err(e);
                 }
-                match r {
-                    Ok(nfd) => {
-                        if let Some(s) = spare {
-                            s.put(ctx);
-                        }
-                        write_fd(nfd.fd())?;
-                        nfd.install();
-                        return Ok(());
-                    }
-                    // Cannot happen with the booking rule of AnonTable; kept
-                    // as a fallback: a reused minor that failed, try a new
-                    // one.
-                    Err(e) if !fresh && e == Errno::ENXIO => obj = spare,
-                    Err(e) => {
-                        if let Some(s) = spare {
-                            s.put(ctx);
-                        }
-                        return Err(e);
-                    }
-                }
+            };
+            if let Some(s) = spare {
+                s.put(ctx);
             }
-            Err(Errno::ENXIO)
+            let m = super::minor(self.index, id).ok_or(Errno::ENXIO);
+            let r = m.and_then(|m| NewFd::open(dev, Minor(m), flags, arg, ctx));
+            let leftover = self.table.lock().settle(id, r.is_ok());
+            if let Some(lo) = leftover {
+                self.dropped(id, lo, stats, ctx);
+            }
+            let nfd = r?;
+            write_fd(nfd.fd())?;
+            nfd.install();
+            Ok(())
         }
 
-        /// Finds or creates the entry for `obj` and books one pending open.
-        /// Returns the number, whether the entry is new, and the reference
-        /// that was not needed because an entry existed (kept for a retry).
+        /// Finds or creates the entry for `obj` and books one open. Returns
+        /// the number, whether the entry is new, and the reference that was
+        /// not needed because an entry existed.
         #[allow(clippy::type_complexity, reason = "private helper")]
         fn reserve(
             &self,

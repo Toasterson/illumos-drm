@@ -432,9 +432,11 @@ ignores or cannot allocate for: `TRANSFER` refuses flags other than
 arrays of handles are limited to 65536 entries (`EINVAL` above; Linux
 tries the allocation). Each file has its own handle table, freed at
 `close(9E)`. Sync object files and sync files of one device can be
-imported into another device of the same driver, which shares this code;
-the imported objects keep their device from detaching until they are
-gone. Files of other drivers, even ones built on this core, are `EINVAL`:
+imported into another device of the same driver, which shares this code,
+if both signal their fences at the same interrupt priority
+(`Driver::fence_priority`; `ENOTSUP` otherwise, since the locks waiting
+on the fences are created with the importer's); the imported objects keep
+their device from detaching until they are gone. Files of other drivers, even ones built on this core, are `EINVAL`:
 each driver module links its own copy of the core, and sharing objects
 between copies needs the C interface of R5.
 

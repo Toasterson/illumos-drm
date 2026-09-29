@@ -96,7 +96,9 @@ impl<O: GemObject> SyncCore<O> {
     /// into another), `EINVAL` for any other file, `EBADF` for a closed
     /// descriptor. With `local_only` (dma-bufs, whose import across
     /// devices needs an attach the core does not have), another device's
-    /// file is `ENOTSUP`.
+    /// file is `ENOTSUP`; so is any file of a device whose fences are
+    /// signalled at another interrupt priority ([`crate::Driver::fence_priority`]),
+    /// because the locks waiting on them are created with this device's.
     pub(crate) fn lookup(
         &self,
         fd: i32,
@@ -113,6 +115,12 @@ impl<O: GemObject> SyncCore<O> {
             // SAFETY: the held file is an open file of device `index`, which
             // therefore cannot detach (and unregister) during this call.
             let other = unsafe { registry::get::<O>(index) }.ok_or(Errno::EINVAL)?;
+            // The other device's fences are signalled at its priority, and
+            // the locks this device creates for waiting on them (waiters,
+            // chain points, arrays) use this device's: both must agree.
+            if other.domain.priority() != self.domain.priority() {
+                return Err(ENOTSUP);
+            }
             other.anon.get(id)
         };
         drop(f);

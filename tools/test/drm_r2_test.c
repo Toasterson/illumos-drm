@@ -1354,33 +1354,38 @@ test_threads(void)
 /* Exports against last closes                                         */
 /* ------------------------------------------------------------------ */
 
+#define	RACE_OBJS	3
+
 struct race {
 	int fd;
-	uint32_t handle;
+	uint32_t handle[RACE_OBJS];
 	int errors;
 	int exports;
+	int id;
 };
 
 /*
- * Four threads export the same buffer again and again and close their
- * descriptors at once, so that exports race the last close of the
- * dma-buf's minor. Every descriptor must import back to the buffer's
- * handle.
+ * Four threads export three buffers again and again and close their
+ * descriptors at once, so that exports race the last close of each
+ * dma-buf's minor and numbers are recycled between buffers. Every
+ * descriptor must import back to the handle of the buffer it was exported
+ * from.
  */
 static void *
 race_thread(void *arg)
 {
 	struct race *r = arg;
 	int i, pfd;
-	uint32_t h;
+	uint32_t h, want;
 
 	for (i = 0; i < 400; i++) {
-		if (drmPrimeHandleToFD(r->fd, r->handle, DRM_CLOEXEC, &pfd) != 0) {
+		want = r->handle[(i + r->id) % RACE_OBJS];
+		if (drmPrimeHandleToFD(r->fd, want, DRM_CLOEXEC, &pfd) != 0) {
 			__sync_fetch_and_add(&r->errors, 1);
 			continue;
 		}
 		__sync_fetch_and_add(&r->exports, 1);
-		if (drmPrimeFDToHandle(r->fd, pfd, &h) != 0 || h != r->handle)
+		if (drmPrimeFDToHandle(r->fd, pfd, &h) != 0 || h != want)
 			__sync_fetch_and_add(&r->errors, 1);
 		(void) close(pfd);
 	}
@@ -1390,22 +1395,31 @@ race_thread(void *arg)
 static void
 test_export_close_race(int card)
 {
-	struct race r;
+	struct race r, per[4];
 	pthread_t th[4];
-	int i;
+	int i, errors = 0, exports = 0;
 
 	(void) memset(&r, 0, sizeof (r));
-	r.fd = card;
-	r.handle = dumb(card, 64, 64, NULL);
-	check(r.handle != 0, "RACE: a buffer");
-	for (i = 0; i < 4; i++)
-		(void) pthread_create(&th[i], NULL, race_thread, &r);
-	for (i = 0; i < 4; i++)
+	for (i = 0; i < RACE_OBJS; i++)
+		r.handle[i] = dumb(card, 64, 64, NULL);
+	check(r.handle[0] != 0 && r.handle[1] != 0 && r.handle[2] != 0,
+	    "RACE: three buffers");
+	for (i = 0; i < 4; i++) {
+		per[i] = r;
+		per[i].fd = card;
+		per[i].id = i;
+		(void) pthread_create(&th[i], NULL, race_thread, &per[i]);
+	}
+	for (i = 0; i < 4; i++) {
 		(void) pthread_join(th[i], NULL);
-	(void) printf("INFO race: %d exports, %d errors\n", r.exports, r.errors);
-	check(r.errors == 0 && r.exports == 1600,
-	    "4 threads: exports racing the last close always import the buffer");
-	gem_close(card, r.handle);
+		errors += per[i].errors;
+		exports += per[i].exports;
+	}
+	(void) printf("INFO race: %d exports, %d errors\n", exports, errors);
+	check(errors == 0 && exports == 1600,
+	    "4 threads, 3 buffers: exports racing last closes import their own buffer");
+	for (i = 0; i < RACE_OBJS; i++)
+		gem_close(card, r.handle[i]);
 	check(sync_idle(1), "RACE: every dma-buf is gone");
 }
 
