@@ -362,8 +362,12 @@ impl FenceDomain {
     }
 
     /// Prepares for detach: waits for the drain task, destroys what is
-    /// parked, and reports whether anything is left (a live fence, or a
-    /// reference to the domain other than the caller's).
+    /// parked, and reports whether anything is left: a live fence, or a
+    /// reference to the domain other than the caller's, such as the one an
+    /// interrupt-context release holds while it parks a fence and
+    /// dispatches the drain (see `Fence::defer_put`). A release racing with
+    /// detach therefore makes the detach fail rather than free the domain
+    /// under it; drivers stop their signallers in `before_detach`.
     #[cfg(not(test))]
     pub fn quiesce(this: &KArc<FenceDomain>, ctx: &Sleepable) -> Result<(), [u64; 8]> {
         this.tq.wait(ctx);
@@ -395,8 +399,10 @@ const CB_REMOVED: u8 = 4;
 /// The type-independent head of a callback node, first in the allocation.
 #[repr(C)]
 struct CbHdr {
-    /// The next node on the fence's list; changed with the fence locked.
-    next: *mut CbHdr,
+    /// The next node on the fence's list; changed with the fence locked,
+    /// or by the signaller once it owns the detached list. Atomic because
+    /// shared references to the header exist while it changes.
+    next: AtomicPtr<CbHdr>,
     /// The fence the node was added to, for `remove_callback`.
     owner: AtomicPtr<FenceInner>,
     state: AtomicU8,
@@ -434,7 +440,7 @@ impl<T: FenceCallback> FenceCb<T> {
     fn wrap(value: T) -> CbNode<T> {
         CbNode {
             hdr: CbHdr {
-                next: ptr::null_mut(),
+                next: AtomicPtr::new(ptr::null_mut()),
                 owner: AtomicPtr::new(ptr::null_mut()),
                 state: AtomicU8::new(CB_IDLE),
                 call: cb_call::<T>,
@@ -583,7 +589,7 @@ impl Drop for FenceInner {
         while let Some(h) = NonNull::new(cb) {
             // SAFETY: nodes on the list are live and referenced by it.
             unsafe {
-                cb = (*h.as_ptr()).next;
+                cb = (*h.as_ptr()).next.load(Ordering::Relaxed);
                 SyncStats::dec(&stats.callbacks);
                 (*h.as_ptr()).state.store(CB_REMOVED, Ordering::Release);
                 ((*h.as_ptr()).release)(h);
@@ -668,11 +674,15 @@ impl Fence {
 
     fn defer_put(arc: KArc<FenceInner>) {
         if let Some(last) = KArc::release(arc) {
-            // The domain outlives the call: quiesce refuses while fences
-            // live, and this dead fence still holds its reference.
-            let d: *const FenceDomain = &*last.domain;
-            // SAFETY: as above.
-            unsafe { &*d }.defer(last);
+            // Once `last` is on the list, a drain on another processor may
+            // destroy it and with it its domain reference, so a reference of
+            // our own keeps the domain alive until `defer` has returned. It
+            // cannot be the last one: the device holds one, and
+            // `FenceDomain::quiesce` refuses while any other exists, so this
+            // drop only decrements (as `GemRef` does for the GEM state).
+            let d = KArc::clone(&last.domain);
+            d.defer(last);
+            drop(d);
         }
     }
 
@@ -826,8 +836,8 @@ impl Fence {
             // SAFETY: nodes on the list are live and referenced by it; they
             // change only with the lock held, which it is.
             unsafe {
-                cur = (*h.as_ptr()).next;
-                (*h.as_ptr()).next = rev;
+                cur = (*h.as_ptr()).next.load(Ordering::Relaxed);
+                (*h.as_ptr()).next.store(rev, Ordering::Relaxed);
                 (*h.as_ptr()).state.store(CB_RUNNING, Ordering::Release);
             }
             rev = h.as_ptr();
@@ -854,7 +864,7 @@ impl Fence {
         let list_ref = KArc::into_raw(KArc::clone(&cb.node)).cast::<CbHdr>();
         // SAFETY: the node is ours to link while the fence is locked.
         unsafe {
-            (*list_ref.as_ptr()).next = st.cbs;
+            (*list_ref.as_ptr()).next.store(st.cbs, Ordering::Relaxed);
             (*list_ref.as_ptr()).owner.store(inner as *const FenceInner as *mut FenceInner, Ordering::Release);
         }
         st.cbs = list_ref.as_ptr();
@@ -888,20 +898,28 @@ impl Fence {
         {
             let mut st = inner.state.lock();
             if hdr.state.load(Ordering::Acquire) == CB_LISTED {
-                let mut link: *mut *mut CbHdr = &mut st.cbs;
-                // SAFETY: walking the list under the lock.
-                unsafe {
-                    while !(*link).is_null() {
-                        if *link == h.as_ptr() {
-                            *link = (*h.as_ptr()).next;
-                            hdr.state.store(CB_REMOVED, Ordering::Release);
-                            SyncStats::dec(&inner.domain.stats.callbacks);
-                            drop(st);
-                            (hdr.release)(h);
-                            return true;
+                // Unlink `h`: from the head, or from its predecessor.
+                let mut prev: Option<NonNull<CbHdr>> = None;
+                let mut cur = st.cbs;
+                while let Some(c) = NonNull::new(cur) {
+                    // SAFETY: nodes on the list are live and referenced by
+                    // it; their links change only with the lock held.
+                    let next = unsafe { c.as_ref() }.next.load(Ordering::Relaxed);
+                    if c == h {
+                        match prev {
+                            // SAFETY: as above.
+                            Some(p) => unsafe { p.as_ref() }.next.store(next, Ordering::Relaxed),
+                            None => st.cbs = next,
                         }
-                        link = &mut (**link).next;
+                        hdr.state.store(CB_REMOVED, Ordering::Release);
+                        SyncStats::dec(&inner.domain.stats.callbacks);
+                        drop(st);
+                        // SAFETY: the list's reference, now unlinked.
+                        unsafe { (hdr.release)(h) };
+                        return true;
                     }
+                    prev = Some(c);
+                    cur = next;
                 }
             }
         }
@@ -1207,7 +1225,7 @@ impl Worklist {
                 // SAFETY: taken off the list by mark_signaled; the list's
                 // reference is ours now.
                 let next = unsafe {
-                    cb = (*h.as_ptr()).next;
+                    cb = (*h.as_ptr()).next.load(Ordering::Relaxed);
                     ((*h.as_ptr()).call)(h, &f, ctx)
                 };
                 // SAFETY: as above. DONE is published before the reference

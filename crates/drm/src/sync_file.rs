@@ -226,7 +226,11 @@ mod imp {
 
         /// `chpoll(9E)`: `POLLIN` once the fence has signalled.
         pub fn chpoll(&self, reg: &mut PollRegistration<'_>) -> PollEvents {
-            reg.register(&self.head);
+            // SAFETY: the head lives as long as the sync file, which the
+            // anonymous-file table holds until close(9E) of the file's own
+            // minor, and the file being polled is that minor, held open by
+            // the poll framework until the poller is linked.
+            unsafe { reg.register_unchecked(&self.head) };
             if self.fence.is_signaled() { PollEvents::IN.union(PollEvents::RDNORM) } else { PollEvents::NONE }
         }
 

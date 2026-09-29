@@ -115,7 +115,7 @@ impl<O: GemObject> SyncCore<O> {
     /// `chpoll(9E)` of a DRM file: writable, never readable before the
     /// event queue of R3; the device's head is registered so that a poll
     /// for input waits, as on Linux.
-    pub(crate) fn drm_file_chpoll(&self, reg: &mut PollRegistration<'_>) -> PollEvents {
+    pub(crate) fn drm_file_chpoll<'s>(&'s self, reg: &mut PollRegistration<'s>) -> PollEvents {
         reg.register(&self.drm_poll);
         PollEvents::OUT.union(PollEvents(ddi::sys::POLLWRNORM))
     }

@@ -466,12 +466,12 @@ impl<D: Driver> CharDevice for Device<D> {
         g.map_check(c, req.off, req.len, req.is_shared())
     }
 
-    fn chpoll(
-        &self,
+    fn chpoll<'s>(
+        &'s self,
         minor: Minor,
         _events: PollEvents,
         _any_yet: bool,
-        reg: &mut PollRegistration<'_>,
+        reg: &mut PollRegistration<'s>,
     ) -> Result<PollEvents> {
         // Sync files signal POLLIN when their fence has; DRM files have no
         // events before R3 (Linux's drm_poll reports them writable).
