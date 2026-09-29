@@ -145,7 +145,7 @@ fn add_fb(m: &Mock, k: &mut KmsCore<Buf>, file: u32, w: u32, h: u32, format: u32
     let r = req(w, h, format);
     k.check_fb(&r, m).unwrap();
     let size = u64::from(r.pitches[0]) * u64::from(h);
-    k.add_fb(Some(file), &r, [Some(m.buf(size)), None, None, None], (0, 0), &ctx()).unwrap().id
+    k.add_fb(Some(file), &r, [Some(m.buf(size)), None, None, None], (0, 0), false, &ctx()).unwrap().id
 }
 
 fn ids(k: &KmsCore<Buf>) -> (u32, u32, u32, u32, u32) {
@@ -156,7 +156,7 @@ fn ids(k: &KmsCore<Buf>) -> (u32, u32, u32, u32, u32) {
 
 fn mode_blob(k: &mut KmsCore<Buf>, w: u16, h: u16) -> u32 {
     let m = modes::find_dmt(w, h, 60).unwrap();
-    k.create_blob(FILE, mode_blob_data(&m), &ctx()).unwrap()
+    k.create_blob(FILE, mode_blob_data(&m), false, &ctx()).unwrap()
 }
 
 /// A full modeset through atomic properties.
@@ -237,7 +237,8 @@ fn framebuffers_and_modifiers() {
     assert_eq!(k.check_fb(&r, &m), Ok(1));
     assert_eq!(k.check_fb(&req(64, 64, NV12), &m), Err(Errno::EINVAL), "no plane scans NV12 out");
     // An object too small for the image.
-    let small = k.add_fb(Some(FILE), &req(64, 64, XRGB8888), [Some(m.buf(100)), None, None, None], (0, 0), &ctx());
+    let small =
+        k.add_fb(Some(FILE), &req(64, 64, XRGB8888), [Some(m.buf(100)), None, None, None], (0, 0), false, &ctx());
     assert_eq!(small.err(), Some(Errno::EINVAL));
     assert_eq!(m.released.load(Ordering::SeqCst), 1, "the object reference goes back");
     let a = add_fb(&m, &mut k, FILE, 64, 64, XRGB8888);
@@ -320,7 +321,7 @@ fn check_errnos() {
     assert_eq!(k.set_prop(&mut st, ck, k.prop_id(Prop::ModeId), 4242, Errno::ENOENT), Err(Errno::EINVAL));
     assert_eq!(k.set_prop(&mut st, ck, k.prop_id(Prop::Active), 2, Errno::ENOENT), Err(Errno::EINVAL));
     // A blob of the wrong size is not a mode.
-    let junk = k.create_blob(FILE, std::vec![1, 2, 3], &ctx()).unwrap();
+    let junk = k.create_blob(FILE, std::vec![1, 2, 3], false, &ctx()).unwrap();
     assert_eq!(k.set_prop(&mut st, ck, k.prop_id(Prop::ModeId), u64::from(junk), Errno::ENOENT), Err(Errno::EINVAL));
     // ACTIVE without a mode.
     k.set_prop(&mut st, ck, k.prop_id(Prop::Active), 1, Errno::ENOENT).unwrap();
@@ -386,9 +387,9 @@ fn rmfb_and_close_turn_off_what_they_show() {
 #[test]
 fn blobs() {
     let (_m, mut k) = setup();
-    assert_eq!(k.create_blob(FILE, Vec::new(), &ctx()), Err(Errno::EINVAL));
-    assert_eq!(k.create_blob(FILE, std::vec![0; super::core::MAX_BLOB + 1], &ctx()), Err(Errno::ENOMEM));
-    let b = k.create_blob(FILE, std::vec![7; 16], &ctx()).unwrap();
+    assert_eq!(k.create_blob(FILE, Vec::new(), false, &ctx()), Err(Errno::EINVAL));
+    assert_eq!(k.create_blob(FILE, std::vec![0; super::core::MAX_BLOB + 1], false, &ctx()), Err(Errno::ENOMEM));
+    let b = k.create_blob(FILE, std::vec![7; 16], false, &ctx()).unwrap();
     assert_eq!(k.destroy_blob(OTHER, b, &ctx()), Err(Errno::EPERM));
     assert_eq!(k.destroy_blob(FILE, 4242, &ctx()), Err(Errno::ENOENT));
     // A blob a state uses outlives its destruction.
@@ -405,9 +406,14 @@ fn blobs() {
     assert!(k.blob(b).is_none());
     // A file cannot hold more than MAX_FILE_BLOBS blobs, however small.
     for _ in 0..super::core::MAX_FILE_BLOBS {
-        k.create_blob(OTHER, std::vec![1], &ctx()).unwrap();
+        k.create_blob(OTHER, std::vec![1], false, &ctx()).unwrap();
     }
-    assert_eq!(k.create_blob(OTHER, std::vec![1], &ctx()), Err(Errno::ENOMEM));
+    assert_eq!(k.create_blob(OTHER, std::vec![1], false, &ctx()), Err(Errno::ENOMEM));
+    assert_eq!(
+        k.create_blob(OTHER, std::vec![1], true, &ctx()),
+        Err(Errno::ENOMEM),
+        "the file bound holds for the master"
+    );
     k.file_close(OTHER, &Mock::new(), &ctx()).unwrap();
     assert_eq!(k.counts().1, 3, "the file's blobs go with it; the device's three stay");
 }

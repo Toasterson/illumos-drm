@@ -299,6 +299,8 @@ impl WakeSet {
 #[derive(Debug, Default)]
 struct FileEvents {
     open: bool,
+    /// A `read(2)` of this file is copying an event out.
+    reading: bool,
     /// Bytes of the budget still free.
     space: usize,
     queue: EventList,
@@ -363,7 +365,7 @@ impl EventCore {
     /// Registers an opened file.
     pub fn open(&mut self, file: u32) {
         if let Some(f) = self.files.get_mut(file as usize) {
-            *f = FileEvents { open: true, space: EVENT_SPACE, queue: EventList::new() };
+            *f = FileEvents { open: true, reading: false, space: EVENT_SPACE, queue: EventList::new() };
         }
     }
 
@@ -391,9 +393,18 @@ impl EventCore {
     /// Charges `n` events to a file's budget: `ENOMEM` if they do not fit
     /// (Linux's `drm_event_reserve_init`).
     pub fn charge(&mut self, file: u32, n: usize) -> Result<(), Errno> {
+        self.charge_as(file, n, false)
+    }
+
+    /// [`EventCore::charge`], for the current master when `master` is set:
+    /// it is exempt from [`MAX_DEVICE_EVENTS`] (its own 4096 bytes still
+    /// apply), so that other clients cannot starve the display server's
+    /// flip events.
+    pub fn charge_as(&mut self, file: u32, n: usize, master: bool) -> Result<(), Errno> {
         let f = self.files.get_mut(file as usize).filter(|f| f.open).ok_or(Errno::ENXIO)?;
         let bytes = n.checked_mul(EVENT_SIZE).ok_or(Errno::ENOMEM)?;
-        if f.space < bytes || self.stats.outstanding.saturating_add(n as u64) > MAX_DEVICE_EVENTS {
+        let device_full = !master && self.stats.outstanding.saturating_add(n as u64) > MAX_DEVICE_EVENTS;
+        if f.space < bytes || device_full {
             return Err(Errno::ENOMEM);
         }
         f.space -= bytes;
@@ -546,6 +557,25 @@ impl EventCore {
     /// The CRTC index of a CRTC ID.
     pub fn crtc_of(&self, crtc_id: u32) -> Option<usize> {
         self.crtc_index(crtc_id)
+    }
+
+    /// Starts a `read(2)` of a file: `false` while another reader of the
+    /// same file is copying an event out (the caller waits and retries).
+    pub fn begin_read(&mut self, file: u32) -> bool {
+        match self.files.get_mut(file as usize) {
+            Some(f) if !f.reading => {
+                f.reading = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Ends what [`EventCore::begin_read`] started.
+    pub fn end_read(&mut self, file: u32) {
+        if let Some(f) = self.files.get_mut(file as usize) {
+            f.reading = false;
+        }
     }
 
     /// Whether a file has events to read.
@@ -763,6 +793,11 @@ mod tests {
             }
         }
         assert_eq!(total, MAX_DEVICE_EVENTS as usize);
+        // The master still gets its own budget.
+        let m = files as u32 + 1;
+        ev.open(m);
+        assert_eq!(ev.charge(m, 1), Err(Errno::ENOMEM));
+        assert_eq!(ev.charge_as(m, 1, true), Ok(()));
     }
 
     #[test]

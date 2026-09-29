@@ -637,7 +637,10 @@ impl<B: FbBacking> KmsCore<B> {
     /// `CREATEPROPBLOB`: `EINVAL` for an empty blob, `ENOMEM` past one of
     /// the bounds above ([`MAX_BLOB`], [`MAX_FILE_BLOB_BYTES`],
     /// [`MAX_FILE_BLOBS`], [`MAX_DEVICE_BLOB_BYTES`], [`MAX_DEVICE_BLOBS`]).
-    pub fn create_blob(&mut self, file: u32, data: Vec<u8>, ctx: &Sleepable) -> Result<u32, Errno> {
+    /// The current master (`master`) is exempt from the device bounds, so
+    /// that other clients cannot starve the display server; its own file
+    /// bounds still apply.
+    pub fn create_blob(&mut self, file: u32, data: Vec<u8>, master: bool, ctx: &Sleepable) -> Result<u32, Errno> {
         if data.is_empty() {
             return Err(Errno::EINVAL);
         }
@@ -647,8 +650,7 @@ impl<B: FbBacking> KmsCore<B> {
         if len > MAX_BLOB
             || f.blob_bytes + len > MAX_FILE_BLOB_BYTES
             || f.blobs.len() >= MAX_FILE_BLOBS
-            || device_bytes + len > MAX_DEVICE_BLOB_BYTES
-            || self.blobs.len() >= MAX_DEVICE_BLOBS
+            || (!master && (device_bytes + len > MAX_DEVICE_BLOB_BYTES || self.blobs.len() >= MAX_DEVICE_BLOBS))
         {
             return Err(Errno::ENOMEM);
         }
@@ -704,13 +706,16 @@ impl<B: FbBacking> KmsCore<B> {
     /// handles name: each object must be large enough for its plane
     /// (`EINVAL`). `file` is the owner, or `None` for an internal one (the
     /// legacy cursor). Returns the new framebuffer; the objects are
-    /// released on failure.
+    /// released on failure. The current master (`master`) is exempt from
+    /// [`MAX_DEVICE_FBS`], as for blobs.
+    #[allow(clippy::too_many_arguments, reason = "the parts of a framebuffer")]
     pub fn add_fb(
         &mut self,
         file: Option<u32>,
         r: &FbRequest,
         objs: [Option<B>; 4],
         hot: (i32, i32),
+        master: bool,
         ctx: &Sleepable,
     ) -> Result<FbRef<B>, Errno> {
         let release = |objs: [Option<B>; 4]| objs.into_iter().flatten().for_each(|o| o.release(ctx));
@@ -724,7 +729,7 @@ impl<B: FbBacking> KmsCore<B> {
             }
         }
         let file_full = file.and_then(|f| self.files.get(&f)).is_some_and(|f| f.fbs.len() >= MAX_FILE_FBS);
-        if file_full || self.fbs.len() >= MAX_DEVICE_FBS {
+        if file_full || (!master && self.fbs.len() >= MAX_DEVICE_FBS) {
             release(objs);
             return Err(Errno::ENOMEM);
         }

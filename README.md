@@ -465,8 +465,8 @@ waits for it first and for its own flip afterwards (one second at most
 each). A driver reports vblanks through its `VblankHandle` with the
 `gethrtime(9F)` time (`TIMESTAMP_MONOTONIC`). Waits are kept sorted by
 their sequence and the event lists append in O(1), so a vblank costs only
-the events it completes; concurrent readers of the device are serialised
-so that events keep their order. `rdrmnull` uses
+the events it completes; concurrent readers of one file take turns so
+that its events keep their order, without holding up other files. `rdrmnull` uses
 `kms::soft::SoftVblank`, a 10 ms `ddi_periodic(9F)` callback that reports
 every frame boundary of the mode with its exact time: 60 Hz on average,
 each vblank delivered up to 10 ms late. Events of a file that closes are
@@ -480,7 +480,9 @@ any open file may create: a blob is at most 1 MiB, a file holds at most
 256 blobs and 4 MiB of blob data, the device 4096 blobs and 16 MiB; a file
 holds at most 256 framebuffers, the device 4096; the device keeps at most
 8192 events queued or pending over all files (each file's 4096-byte budget
-is Linux's); all of these fail with `ENOMEM`. One `MODE_ATOMIC` names at
+is Linux's); all of these fail with `ENOMEM`. The current master is exempt
+from the device-wide bounds (its per-file bounds still apply), so that
+other clients cannot starve the display server. One `MODE_ATOMIC` names at
 most 1024 objects and 16384 properties (`EINVAL`). The fence properties
 `IN_FENCE_FD` and `OUT_FENCE_PTR` exist so that their IDs are known, but
 no object carries them and setting them is `EINVAL` until fences exist

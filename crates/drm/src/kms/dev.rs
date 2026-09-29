@@ -226,8 +226,6 @@ pub struct Caller<'a> {
 /// The mode-setting state of a device in the kernel.
 pub struct Kms<O: GemObject> {
     core: Mutex<KmsCore<GemRef<O>>>,
-    /// Serialises `read(2)` (taken before the event lock).
-    read_lock: Mutex<()>,
     ev: Arc<KmsEvents>,
     commits: AtomicU64,
     kstat: Option<TypedKstat<KmsKstat>>,
@@ -263,15 +261,7 @@ impl<O: GemObject> Kms<O> {
         if kstat.is_err() {
             dev.warn(format_args!("cannot create the kms kstat; statistics are unavailable"));
         }
-        let k = Kms {
-            core: Mutex::new(core),
-            read_lock: Mutex::new(()),
-            ev,
-            commits: AtomicU64::new(0),
-            kstat: kstat.ok(),
-            atomic,
-            modifiers,
-        };
+        let k = Kms { core: Mutex::new(core), ev, commits: AtomicU64::new(0), kstat: kstat.ok(), atomic, modifiers };
         k.publish();
         Ok(k)
     }
@@ -354,30 +344,52 @@ impl<O: GemObject> Kms<O> {
         let nonblock = i32::from(uio.fmode()) & (sys::FNONBLOCK | sys::FNDELAY) != 0;
         let mut copied = 0usize;
         loop {
-            // Readers take events one at a time and copy them out without
-            // the event lock; the read lock keeps two readers of the same
-            // file from passing each other (Linux's event_read_lock).
-            let r = self.read_lock.lock();
             let mut g = self.ev.lock.lock();
+            // Readers of one file take turns (Linux's per-file
+            // event_read_lock): an event is copied out without the event
+            // lock, and a second reader must not pass it meanwhile. Readers
+            // of other files are not held up.
+            if !g.begin_read(c.get()) {
+                if nonblock {
+                    return if copied > 0 { Ok(()) } else { Err(Errno::EAGAIN) };
+                }
+                let (g, interrupted) = self.ev.cv.wait_sig(g, ctx);
+                drop(g);
+                if interrupted {
+                    return Err(Errno::EINTR);
+                }
+                continue;
+            }
             match g.pop(c.get(), uio.resid()) {
                 Some(e) => {
                     drop(g);
-                    match uio.copy_out(e.bytes()) {
-                        Ok(_) => copied += e.bytes().len(),
-                        Err(_) => {
-                            self.ev.lock.lock().put_back(e);
-                            return if copied == 0 { Err(Errno::EFAULT) } else { Ok(()) };
+                    let r = uio.copy_out(e.bytes());
+                    let mut g = self.ev.lock.lock();
+                    g.end_read(c.get());
+                    let failed = match r {
+                        Ok(_) => {
+                            copied += e.bytes().len();
+                            false
                         }
+                        Err(_) => {
+                            g.put_back(e);
+                            true
+                        }
+                    };
+                    drop(g);
+                    self.ev.cv.notify_all();
+                    if failed {
+                        return if copied == 0 { Err(Errno::EFAULT) } else { Ok(()) };
                     }
                 }
                 None => {
+                    g.end_read(c.get());
                     if copied > 0 || g.readable(c.get()) {
                         return Ok(());
                     }
                     if nonblock {
                         return Err(Errno::EAGAIN);
                     }
-                    drop(r);
                     let (g, interrupted) = self.ev.cv.wait_sig(g, ctx);
                     drop(g);
                     if interrupted {
@@ -435,7 +447,8 @@ impl<O: GemObject> Kms<O> {
             return Err(e);
         }
         // Allocate and charge the events before the commit, so that a full
-        // budget fails the ioctl without changing anything.
+        // budget fails the ioctl without changing anything. Every commit
+        // path needs the master, which the device-wide event bound exempts.
         let mut events: Vec<(usize, Box<Event>)> = Vec::new();
         if let Some(user_data) = event {
             for (i, id) in core.crtc_ids().iter().enumerate() {
@@ -443,7 +456,7 @@ impl<O: GemObject> Kms<O> {
                     events.push((i, Event::new(file.get(), EventKind::Flip { user_data }, *id, ctx)));
                 }
             }
-            if let Err(e) = self.ev.lock.lock().charge(file.get(), events.len()) {
+            if let Err(e) = self.ev.lock.lock().charge_as(file.get(), events.len(), true) {
                 drop(events);
                 release_state(st, ctx);
                 core.sweep(ctx);
@@ -548,7 +561,7 @@ impl<O: GemObject> Kms<O> {
         match op {
             // Linux keeps these as no-ops for old userland.
             KmsOp::ModesetCtl | KmsOp::AttachMode | KmsOp::DetachMode => Ok(()),
-            KmsOp::WaitVblank => self.wait_vblank(file, arg, ctx),
+            KmsOp::WaitVblank => self.wait_vblank(file, who.master, arg, ctx),
             KmsOp::CrtcGetSequence => {
                 let mut a = UserArg::<uapi::drm_crtc_get_sequence>::read(arg)?;
                 let (i, enable) = {
@@ -590,7 +603,7 @@ impl<O: GemObject> Kms<O> {
                 if v.flags & uapi::DRM_CRTC_SEQUENCE_NEXT_ON_MISS != 0 && seq >= req {
                     req = seq + 1;
                 }
-                ev.charge(file.get(), 1)?;
+                ev.charge_as(file.get(), 1, who.master)?;
                 let w = match ev.queue_wait(i, req, e) {
                     Ok(w) => w,
                     Err((_e, err)) => {
@@ -757,7 +770,7 @@ impl<O: GemObject> Kms<O> {
                 }
                 let mut data = alloc::vec![0u8; len];
                 copy_in_bytes(arg, v.data as usize, &mut data)?;
-                let id = self.core.lock().create_blob(file.get(), data, ctx)?;
+                let id = self.core.lock().create_blob(file.get(), data, who.master, ctx)?;
                 // SAFETY: a field assignment.
                 unsafe { a.get_mut() }.blob_id = id;
                 a.write(arg)
@@ -847,7 +860,7 @@ impl<O: GemObject> Kms<O> {
                     offsets: [0; 4],
                     modifiers: [0; 4],
                 };
-                let id = self.add_fb(file, &r, gem, drv, ctx)?;
+                let id = self.add_fb(file, who.master, &r, gem, drv, ctx)?;
                 // SAFETY: a field assignment.
                 unsafe { a.get_mut() }.fb_id = id;
                 a.write(arg)
@@ -868,7 +881,7 @@ impl<O: GemObject> Kms<O> {
                     offsets: v.offsets,
                     modifiers: v.modifier,
                 };
-                let id = self.add_fb(file, &r, gem, drv, ctx)?;
+                let id = self.add_fb(file, who.master, &r, gem, drv, ctx)?;
                 // SAFETY: a field assignment.
                 unsafe { a.get_mut() }.fb_id = id;
                 a.write(arg)
@@ -998,9 +1011,11 @@ impl<O: GemObject> Kms<O> {
         }
     }
 
+    #[allow(clippy::too_many_arguments, reason = "the parts of ADDFB")]
     fn add_fb(
         &self,
         file: CloneId,
+        master: bool,
         r: &FbRequest,
         gem: Option<&KArc<GemCore<O>>>,
         drv: Drv<'_, O>,
@@ -1019,7 +1034,7 @@ impl<O: GemObject> Kms<O> {
                 }
             }
         }
-        Ok(core.add_fb(Some(file.get()), r, objs, (0, 0), ctx)?.id)
+        Ok(core.add_fb(Some(file.get()), r, objs, (0, 0), master, ctx)?.id)
     }
 
     fn setcrtc(&self, who: &Caller<'_>, arg: &IoctlArg<'_>, drv: Drv<'_, O>, ctx: &Sleepable) -> Result<(), Errno> {
@@ -1126,7 +1141,7 @@ impl<O: GemObject> Kms<O> {
                 core.check_fb(&r, drv)?;
                 let g = gem.ok_or(Errno::ENOENT)?;
                 let o = g.lookup(file, handle)?;
-                Some(Some(core.add_fb(None, &r, [Some(o), None, None, None], hot, ctx)?))
+                Some(Some(core.add_fb(None, &r, [Some(o), None, None, None], hot, true, ctx)?))
             }
         } else {
             None
@@ -1206,7 +1221,7 @@ impl<O: GemObject> Kms<O> {
         self.run_commit(&mut core, st, who.file, want_event.then_some(v.user_data), test_only, drv, ctx)
     }
 
-    fn wait_vblank(&self, file: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn wait_vblank(&self, file: CloneId, master: bool, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         const TYPES: u32 = uapi::_DRM_VBLANK_ABSOLUTE | uapi::_DRM_VBLANK_RELATIVE;
         const FLAGS: u32 = uapi::_DRM_VBLANK_EVENT
             | uapi::_DRM_VBLANK_SIGNAL
@@ -1252,7 +1267,7 @@ impl<O: GemObject> Kms<O> {
             req.sequence = target as u32;
         }
         if let Some(e) = event {
-            ev.charge(file.get(), 1)?;
+            ev.charge_as(file.get(), 1, master)?;
             let passed = seq >= target;
             let w = match ev.queue_wait(pipe, target, e) {
                 Ok(w) => w,
