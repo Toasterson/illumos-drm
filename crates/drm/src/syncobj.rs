@@ -9,7 +9,7 @@
 //! fence in, `RESET` takes it out, a driver's submission replaces it. A
 //! timeline sync object holds the latest point of a chain
 //! ([`Fence::chain`]): `TIMELINE_SIGNAL` and submissions add points,
-//! [`Syncobj::find_fence`] gives the fence of a point, [`Syncobj::query`]
+//! [`SyncobjInner::find_fence`] gives the fence of a point, [`SyncobjInner::query`]
 //! the last point reached. Both kinds are one type, as in Linux; point 0
 //! means the binary behaviour.
 //!
@@ -43,7 +43,7 @@ pub const WAIT_FOR_SUBMIT: u32 = drm_uapi::DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMI
 /// `DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE`.
 pub const WAIT_AVAILABLE: u32 = drm_uapi::DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE;
 
-/// How long [`Syncobj::find_fence`] waits for a submission with
+/// How long [`SyncobjInner::find_fence`] waits for a submission with
 /// `WAIT_FOR_SUBMIT` (Linux's `DRM_SYNCOBJ_WAIT_FOR_SUBMIT_TIMEOUT`, 5 s).
 pub const SUBMIT_TIMEOUT: Nanos = 5_000_000_000;
 

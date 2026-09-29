@@ -72,6 +72,7 @@
 
 extern crate alloc;
 
+pub mod anon_fd;
 pub mod caps;
 pub mod defer;
 #[cfg(not(test))]
@@ -80,6 +81,8 @@ pub mod dmaerr;
 pub mod driver;
 pub mod dumb;
 pub mod fence;
+#[cfg(not(test))]
+pub mod fence_dev;
 #[cfg(not(test))]
 pub mod gem;
 pub mod idmap;
@@ -92,9 +95,14 @@ pub mod kvec;
 pub mod minor;
 pub mod objects;
 pub mod offsets;
+#[cfg(not(test))]
+pub mod prime;
 pub mod resv;
 pub mod state;
+pub mod sync_file;
 pub mod syncobj;
+#[cfg(not(test))]
+pub mod syncobj_ioctl;
 #[cfg(not(test))]
 pub mod uaccess;
 pub mod wwmutex;

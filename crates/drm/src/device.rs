@@ -44,9 +44,11 @@ use ddi::prelude::*;
 use ddi::sys;
 use drm_uapi as uapi;
 
+use crate::anon_fd;
 use crate::caps;
 use crate::driver::{BUS_ID_MAX, BusId, Driver, Features};
 use crate::dumb::DumbRequest;
+use crate::fence_dev::SyncCore;
 use crate::gem::{GemCore, registry};
 use crate::ioctl::{self, Entry, Op};
 use crate::karc::KArc;
@@ -75,6 +77,8 @@ pub struct Device<D: Driver> {
     gem: Option<KArc<GemCore<D::Object>>>,
     /// The mode-setting state, for drivers with a [`Driver::kms`].
     kms: Option<Kms<D::Object>>,
+    /// Fences, sync objects, dma-bufs and sync files (R2).
+    sync: KArc<SyncCore<D::Object>>,
     // Dropping these removes the minor nodes.
     _card: MinorNode,
     _render: Option<MinorNode>,
@@ -129,6 +133,17 @@ impl<D: Driver> Device<D> {
         } else {
             None
         };
+        if D::FEATURES.contains(Features::SYNCOBJ_TIMELINE) && !D::FEATURES.contains(Features::SYNCOBJ) {
+            dev.warn(format_args!("timeline sync objects need SYNCOBJ"));
+            return Err(DdiError);
+        }
+        let sync = match SyncCore::new(dev, index, driver.fence_priority(), ctx) {
+            Ok(s) => s,
+            Err(e) => {
+                dev.warn(format_args!("cannot set up fences: {e:?}"));
+                return Err(DdiError);
+            }
+        };
         if let Some(g) = &gem
             && !registry::insert(index, &**g)
         {
@@ -162,6 +177,7 @@ impl<D: Driver> Device<D> {
             has_render: render.is_some(),
             gem,
             kms,
+            sync,
             _card: card,
             _render: render,
         })
@@ -184,9 +200,9 @@ impl<D: Driver> Device<D> {
     }
 
     /// Unregisters the device. Refuses, and hands the device back, while
-    /// files are open, framebuffers are still referenced or GEM objects
-    /// remain (after the driver's [`Driver::before_detach`] and the
-    /// deferred releases have run). All checks run before anything is torn
+    /// files are open, framebuffers are still referenced, GEM objects
+    /// remain or fences and sync objects are alive (after the driver's
+    /// [`Driver::before_detach`] and the deferred releases have run). All checks run before anything is torn
     /// down, so a refused device keeps working; only then are the driver's
     /// sources stopped ([`Driver::before_teardown`]) and the mode-setting
     /// and GEM state released.
@@ -198,15 +214,24 @@ impl<D: Driver> Device<D> {
             return Err((self, DdiError));
         }
         self.driver.before_detach(ctx);
+        // Anonymous files are closed (they keep the device open), so this
+        // only drops leftovers nothing can reach; dma-bufs hold GEM objects,
+        // which hold fences.
+        self.sync.clear(ctx);
         // Every check runs before anything is torn down: a refused detach
         // leaves the device attached, so it must leave it working, its
-        // mode-setting state and the driver's vblank source included.
+        // mode-setting state, the driver's vblank source and its fence
+        // timeline included.
         if let Some(Err(n)) = self.kms.as_ref().map(|k| k.detach_check(ctx)) {
             self.dev.warn(format_args!("detach refused: {n} framebuffers still referenced"));
             return Err((self, DdiError));
         }
         if let Some(Err(s)) = self.gem.as_ref().map(|g| GemCore::quiesce(g, ctx)) {
             self.dev.warn(format_args!("detach refused: GEM state in use: {s:?}"));
+            return Err((self, DdiError));
+        }
+        if let Err(s) = SyncCore::quiesce(&self.sync, ctx) {
+            self.dev.warn(format_args!("detach refused: fences or sync objects remain: {s:?}"));
             return Err((self, DdiError));
         }
         // The detach completes: the driver stops its sources, then the
@@ -219,6 +244,12 @@ impl<D: Driver> Device<D> {
             registry::remove(self.index);
         }
         Ok(())
+    }
+
+    /// Returns the synchronisation state: the fence domain drivers create
+    /// their fences in, and the sync object and anonymous-file tables.
+    pub fn sync(&self) -> &KArc<SyncCore<D::Object>> {
+        &self.sync
     }
 
     /// Returns the GEM state, if the driver has [`Features::GEM`].
@@ -359,6 +390,15 @@ impl<D: Driver> CharDevice for Device<D> {
         if otyp != OpenType::Char {
             return Err(Errno::EINVAL);
         }
+        // A dma-buf, sync object or sync file being exported: the export
+        // path opens its minor itself (crate::anon_fd); no clone.
+        if let Some((index, id)) = anon_fd::decode(minor.0) {
+            if index != self.index {
+                return Err(Errno::ENXIO);
+            }
+            self.sync.anon_open(id)?;
+            return Ok(None);
+        }
         let d = minor::decode(minor.0).ok_or(Errno::ENXIO)?;
         if d.index != self.index || d.clone.is_some() || (d.kind == NodeKind::Render && !self.has_render) {
             return Err(Errno::ENXIO);
@@ -382,6 +422,13 @@ impl<D: Driver> CharDevice for Device<D> {
             self.state.lock().close(clone);
             return Err(e);
         }
+        if let Err(e) = self.sync.file_open(clone, ctx) {
+            if let Some(g) = &self.gem {
+                g.file_close(clone, ctx);
+            }
+            self.state.lock().close(clone);
+            return Err(e);
+        }
         if let Some(k) = &self.kms {
             k.file_open(clone, ctx);
         }
@@ -389,6 +436,10 @@ impl<D: Driver> CharDevice for Device<D> {
     }
 
     fn close(&self, minor: Minor, _flags: OpenFlags, _otyp: OpenType, _cred: &Cred<'_>, ctx: &Sleepable) -> Result<()> {
+        if let Some((_, id)) = anon_fd::decode(minor.0) {
+            self.sync.anon_close(id, ctx);
+            return Ok(());
+        }
         let d = minor::decode(minor.0).ok_or(Errno::ENXIO)?;
         // A node minor without a clone id was never handed out by
         // clone_open, so there is no file to forget.
@@ -403,6 +454,7 @@ impl<D: Driver> CharDevice for Device<D> {
             if let Some(g) = &self.gem {
                 g.file_close(c, ctx);
             }
+            self.sync.file_close(c, ctx);
             self.state.lock().close(c);
         }
         Ok(())
@@ -419,6 +471,11 @@ impl<D: Driver> CharDevice for Device<D> {
         _events: PollEvents,
         _anyyet: bool,
     ) -> Result<(PollEvents, PollRegistration<'a>)> {
+        // A sync file is readable once its fence has signalled; a dma-buf
+        // has no poll semantics here (implicit fences are not polled).
+        if let Some((_, id)) = anon_fd::decode(minor.0) {
+            return self.sync.anon_chpoll(id);
+        }
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
         self.kms.as_ref().ok_or(Errno::ENXIO)?.chpoll(c)
     }
@@ -432,6 +489,9 @@ impl<D: Driver> CharDevice for Device<D> {
         _model: DataModel,
         ctx: &Sleepable,
     ) -> Result<usize> {
+        if let Some((_, id)) = anon_fd::decode(minor.0) {
+            return self.sync.anon_devmap(id, self.gem.as_ref(), &dhp, off, len, ctx);
+        }
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
         let g = self.gem.as_ref().ok_or(Errno::ENXIO)?;
         g.devmap(c, &dhp, off, len, ctx)
@@ -443,6 +503,12 @@ impl<D: Driver> CharDevice for Device<D> {
         // sizes differ) instead of a misread structure, and ENOTTY for
         // anything else, as any caller would.
         let cmd = cmd.0 as u32;
+        // Ioctls on dma-buf and sync files; their structures have the same
+        // layout in both data models.
+        if let Some((_, id)) = anon_fd::decode(minor.0) {
+            self.sync.anon_ioctl(id, cmd, &arg, ctx)?;
+            return Ok(0);
+        }
         if arg.model() == DataModel::Ilp32 {
             let known = ioctl::is_core_nr(cmd) || ioctl::is_driver_nr(D::IOCTLS, cmd) || kmsioctl::is_kms_nr(cmd);
             return Err(if known { Errno::ENOTSUP } else { Errno::ENOTTY });
@@ -682,6 +748,25 @@ impl<D: Driver> Device<D> {
                 self.state.lock().permit(c, perm, privileged)?;
                 let g = self.dumb_gem()?;
                 g.handle_close(c, a.get().handle, ctx)?;
+            }
+            // R2: PRIME and sync objects (crate::prime, crate::syncobj_ioctl).
+            op @ (Op::PrimeHandleToFd | Op::PrimeFdToHandle) => {
+                self.state.lock().permit(c, perm, privileged)?;
+                self.sync.prime_ioctl(op, c, D::FEATURES, self.gem.as_ref(), arg, ctx)?;
+            }
+            op @ (Op::SyncobjCreate
+            | Op::SyncobjDestroy
+            | Op::SyncobjHandleToFd
+            | Op::SyncobjFdToHandle
+            | Op::SyncobjWait
+            | Op::SyncobjReset
+            | Op::SyncobjSignal
+            | Op::SyncobjTimelineWait
+            | Op::SyncobjQuery
+            | Op::SyncobjTransfer
+            | Op::SyncobjTimelineSignal) => {
+                self.state.lock().permit(c, perm, privileged)?;
+                self.sync.syncobj_ioctl(op, c, D::FEATURES, arg, ctx)?;
             }
         }
         Ok(())
