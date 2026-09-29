@@ -41,7 +41,12 @@
 //! therefore cannot be opened. Exporting a GEM object again while its
 //! dma-buf file is open opens the same minor again (one dma-buf per
 //! object, as Linux keeps `obj->dma_buf`); if that races with the last
-//! close, a new minor is used.
+//! close, the booked open keeps the entry and its number ([`AnonTable`]),
+//! and the export opens the same object again.
+//!
+//! Sync object files and sync files of one device can be imported into
+//! another device of the same driver (see `fence_dev::SyncCore::lookup`);
+//! dma-bufs cannot (`ENOTSUP`).
 
 use ddi::{Errno, Sleepable};
 
@@ -190,7 +195,7 @@ mod imp {
     use core::sync::atomic::Ordering;
 
     use ddi::prelude::*;
-    use ddi::private::fd::{FdFlags, FileRef, NewFd};
+    use ddi::private::fd::{FdFlags, NewFd};
 
     use crate::fence::SyncStats;
     use crate::gem::{GemCore, GemObject, GemRef, KIdSpace, NameBuf};
@@ -376,24 +381,6 @@ mod imp {
         /// Returns a reference to the object of anonymous minor `id`.
         pub(crate) fn get(&self, id: u32) -> Option<AnonObj<O>> {
             self.table.lock().get(id).map(AnonObj::clone_ref)
-        }
-
-        /// Looks up descriptor `fd` of the calling process: the object if it
-        /// is an anonymous file of this device, `EINVAL` for any other file
-        /// (`EBADF` for a closed descriptor), `ENOTSUP` for an anonymous
-        /// file of another device of this driver (importing across devices
-        /// is not supported).
-        pub(crate) fn lookup(&self, dev: &DevInfo, fd: i32, arg: &IoctlArg<'_>) -> Result<AnonObj<O>, Errno> {
-            let f = FileRef::get(fd, arg)?;
-            let m = f.own_minor(dev).ok_or(Errno::EINVAL)?;
-            let (index, id) = super::decode(m.0).ok_or(Errno::EINVAL)?;
-            if index != self.index {
-                return Err(Errno::ENOTSUP);
-            }
-            // The held file keeps the minor open, so the entry exists.
-            let r = self.get(id).ok_or(Errno::EINVAL);
-            drop(f);
-            r
         }
 
         /// Drops every entry (detach, after every file has closed: nothing

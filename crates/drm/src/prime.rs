@@ -121,7 +121,7 @@ impl<O: GemObject> SyncCore<O> {
         if a.get().flags != 0 {
             return Err(Errno::EINVAL);
         }
-        let obj = match self.anon.lookup(&self.dev, a.get().fd, arg)? {
+        let obj = match self.lookup(a.get().fd, arg, true, ctx)? {
             AnonObj::DmaBuf(g) => g,
             o => {
                 o.put(ctx);
