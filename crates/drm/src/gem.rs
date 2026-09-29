@@ -408,7 +408,7 @@ impl SysMem {
                     )
                 };
                 if raw.is_null() || r != sys::DDI_SUCCESS {
-                    return Err(dmaerr::object_errno(dmaerr::from_code(r)));
+                    return Err(dmaerr::code_errno(r));
                 }
                 SgHandle::Raw(raw)
             }
@@ -441,7 +441,7 @@ impl SysMem {
             // ENOMEM for a shortage or no mapping (not EFAULT, which in a
             // create ioctl reads as a bad user pointer), EIO for codes a
             // fresh handle cannot return.
-            _ => return Err(dmaerr::object_errno(dmaerr::from_code(r))),
+            _ => return Err(dmaerr::code_errno(r)),
         }
         // SAFETY: the handle is bound.
         let n = unsafe { sys::ddi_dma_ncookies(handle.as_raw()) };

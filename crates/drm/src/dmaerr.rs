@@ -30,28 +30,12 @@
 //! * `EIO` for what a fresh handle cannot report (`DDI_DMA_INUSE`,
 //!   `DDI_DMA_LOCKED`, `DDI_DMA_STALE`, `DDI_FAILURE`) and for codes this
 //!   crate does not know: those would be framework faults, not a shortage.
+//!
+//! Raw `DDI_DMA_*` return codes are decoded with illumos-ddi's
+//! [`DmaError::check`], which knows all ten failure codes, so a raw call
+//! and a call through the safe layer end in the same errno.
 
-use core::ffi::c_int;
-
-use ddi::sys;
 use ddi::{DmaError, Errno};
-
-/// Interprets a failed return code of `ddi_dma_alloc_handle(9F)` or
-/// `ddi_dma_addr_bind_handle(9F)`, which are in the same `DDI_DMA_*`
-/// convention. `DDI_SUCCESS` and `DDI_DMA_MAPPED` (both zero) are not
-/// failures; they come back as [`DmaError::Other`], like any code the
-/// manual pages do not list for these functions.
-pub fn from_code(r: c_int) -> DmaError {
-    match r {
-        sys::DDI_DMA_PARTIAL_MAP => DmaError::PartialMap,
-        sys::DDI_DMA_NORESOURCES => DmaError::NoResources,
-        sys::DDI_DMA_NOMAPPING => DmaError::NoMapping,
-        sys::DDI_DMA_TOOBIG => DmaError::TooBig,
-        sys::DDI_DMA_INUSE => DmaError::InUse,
-        sys::DDI_DMA_BADATTR => DmaError::BadAttr,
-        other => DmaError::Other(other),
-    }
-}
 
 /// The errno for a DMA failure while creating an object, as the
 /// [module documentation](self) explains.
@@ -68,9 +52,19 @@ pub fn object_errno(e: DmaError) -> Errno {
     }
 }
 
+/// The errno for a failed raw `DDI_DMA_*` return code of
+/// `ddi_dma_alloc_handle(9F)` or `ddi_dma_addr_bind_handle(9F)`, decoded
+/// with [`DmaError::check`]. A success code (`DDI_SUCCESS`,
+/// `DDI_DMA_MAPPED`) is not a failure; given one anyway, for example with
+/// a handle the kernel did not fill in, the answer is `EIO`.
+pub fn code_errno(r: i32) -> Errno {
+    object_errno(DmaError::check(r).err().unwrap_or(DmaError::Other(r)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ddi::sys;
 
     #[test]
     fn failed_binds_are_enomem_not_efault() {
@@ -78,16 +72,36 @@ mod tests {
         // of a fresh handle without DDI_DMA_PARTIAL. NOMAPPING is what the
         // patched kernel returns for a handle of the root node.
         for code in [sys::DDI_DMA_NOMAPPING, sys::DDI_DMA_NORESOURCES, sys::DDI_DMA_TOOBIG, sys::DDI_DMA_PARTIAL_MAP] {
-            assert_eq!(object_errno(from_code(code)), Errno::ENOMEM, "code {code}");
-            assert_ne!(object_errno(from_code(code)), Errno::EFAULT);
+            assert_eq!(code_errno(code), Errno::ENOMEM, "code {code}");
+            assert_ne!(code_errno(code), Errno::EFAULT);
+        }
+    }
+
+    #[test]
+    fn every_dma_code_has_the_documented_errno() {
+        // All ten DDI_DMA_* failure codes, decoded by illumos-ddi, end in
+        // the errno the module documentation promises.
+        for (code, errno) in [
+            (sys::DDI_DMA_PARTIAL_MAP, Errno::ENOMEM),
+            (sys::DDI_DMA_NORESOURCES, Errno::ENOMEM),
+            (sys::DDI_DMA_NOMAPPING, Errno::ENOMEM),
+            (sys::DDI_DMA_TOOBIG, Errno::ENOMEM),
+            (sys::DDI_DMA_TOOSMALL, Errno::EINVAL),
+            (sys::DDI_DMA_BADLIMITS, Errno::EINVAL),
+            (sys::DDI_DMA_BADATTR, Errno::EINVAL),
+            (sys::DDI_DMA_LOCKED, Errno::EIO),
+            (sys::DDI_DMA_STALE, Errno::EIO),
+            (sys::DDI_DMA_INUSE, Errno::EIO),
+        ] {
+            assert_eq!(code_errno(code), errno, "code {code}");
         }
     }
 
     #[test]
     fn allocation_errors() {
         // ddi_dma_alloc_handle(9F): a pseudo node gets BADATTR.
-        assert_eq!(object_errno(from_code(sys::DDI_DMA_BADATTR)), Errno::EINVAL);
-        assert_eq!(object_errno(from_code(sys::DDI_DMA_NORESOURCES)), Errno::ENOMEM);
+        assert_eq!(code_errno(sys::DDI_DMA_BADATTR), Errno::EINVAL);
+        assert_eq!(code_errno(sys::DDI_DMA_NORESOURCES), Errno::ENOMEM);
         // The own-node guard of illumos-ddi.
         assert_eq!(object_errno(DmaError::NotOwnNode), Errno::ENXIO);
     }
@@ -102,22 +116,12 @@ mod tests {
     }
 
     #[test]
-    fn framework_faults_are_eio() {
-        assert_eq!(object_errno(from_code(sys::DDI_DMA_INUSE)), Errno::EIO);
-        assert_eq!(object_errno(from_code(12345)), Errno::EIO);
-        assert_eq!(from_code(12345), DmaError::Other(12345));
-        for e in [DmaError::Locked, DmaError::Stale, DmaError::Failure] {
+    fn framework_faults_and_unknown_codes_are_eio() {
+        assert_eq!(code_errno(12345), Errno::EIO);
+        // A success code handed in anyway (a NULL handle with DDI_SUCCESS).
+        assert_eq!(code_errno(sys::DDI_SUCCESS), Errno::EIO);
+        for e in [DmaError::InUse, DmaError::Locked, DmaError::Stale, DmaError::Failure, DmaError::Other(7)] {
             assert_eq!(object_errno(e), Errno::EIO, "{e:?}");
         }
-    }
-
-    #[test]
-    fn every_bind_code_is_decoded() {
-        assert_eq!(from_code(sys::DDI_DMA_PARTIAL_MAP), DmaError::PartialMap);
-        assert_eq!(from_code(sys::DDI_DMA_NORESOURCES), DmaError::NoResources);
-        assert_eq!(from_code(sys::DDI_DMA_NOMAPPING), DmaError::NoMapping);
-        assert_eq!(from_code(sys::DDI_DMA_TOOBIG), DmaError::TooBig);
-        assert_eq!(from_code(sys::DDI_DMA_INUSE), DmaError::InUse);
-        assert_eq!(from_code(sys::DDI_DMA_BADATTR), DmaError::BadAttr);
     }
 }
