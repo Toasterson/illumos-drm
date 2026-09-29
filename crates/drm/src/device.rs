@@ -732,7 +732,8 @@ impl<D: Driver> Device<D> {
                 // requests cannot allocate past the device's budget.
                 let reservation = g.reserve(size, ctx)?;
                 let mem = g.sys_mem(size, ctx)?;
-                let obj = GemCore::create_reserved(g, D::Object::from(mem), reservation, ctx)?;
+                let obj = self.driver.dumb_object(self, mem, &req, &layout, ctx)?;
+                let obj = GemCore::create_reserved(g, obj, reservation, ctx)?;
                 let size = obj.size() as u64;
                 let handle = g.handle_create(c, obj, ctx)?;
                 // SAFETY: only field assignments below.

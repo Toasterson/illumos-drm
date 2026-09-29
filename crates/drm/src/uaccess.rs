@@ -67,6 +67,58 @@ unsafe impl Plain for uapi::drm_mode_map_dumb {}
 // SAFETY: as above.
 unsafe impl Plain for uapi::drm_mode_destroy_dumb {}
 
+// The virtio-gpu uAPI (`virtgpu_drm.h`), for the virtio-gpu driver. Every
+// structure consists of naturally aligned `__u32`, `__s32` and `__u64`
+// fields without padding; `drm-uapi`'s layout assertions pin the sizes
+// that show it (`abi.rs`, `virtgpu_compat.rs`).
+// SAFETY: integer fields only, no padding.
+unsafe impl Plain for uapi::drm_virtgpu_map {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_execbuffer {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_execbuffer_v1 {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_execbuffer_v2 {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_execbuffer_syncobj {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_getparam {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_resource_create {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_resource_info {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_3d_transfer_to_host {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_3d_transfer_from_host {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_3d_transfer_to_host_v1 {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_3d_transfer_from_host_v1 {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_3d_wait {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_get_caps {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_resource_create_blob {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_context_init {}
+// SAFETY: as above.
+unsafe impl Plain for uapi::drm_virtgpu_context_set_param {}
+const _: () = {
+    use core::mem::size_of;
+    assert!(size_of::<uapi::drm_virtgpu_map>() == 16);
+    assert!(size_of::<uapi::drm_virtgpu_execbuffer_syncobj>() == 16);
+    assert!(size_of::<uapi::drm_virtgpu_getparam>() == 16);
+    assert!(size_of::<uapi::drm_virtgpu_resource_create>() == 56);
+    assert!(size_of::<uapi::drm_virtgpu_resource_info>() == 16);
+    assert!(size_of::<uapi::drm_virtgpu_3d_wait>() == 8);
+    assert!(size_of::<uapi::drm_virtgpu_get_caps>() == 24);
+    assert!(size_of::<uapi::drm_virtgpu_resource_create_blob>() == 48);
+    assert!(size_of::<uapi::drm_virtgpu_context_init>() == 16);
+    assert!(size_of::<uapi::drm_virtgpu_context_set_param>() == 16);
+};
+
 /// An ioctl argument structure held in the kernel.
 pub struct UserArg<T: Plain> {
     buf: MaybeUninit<T>,
