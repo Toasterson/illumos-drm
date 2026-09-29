@@ -227,6 +227,8 @@ static const char *const sync_live_keys[] = {
 };
 #define	NLIVE	(sizeof (sync_live_keys) / sizeof (sync_live_keys[0]))
 
+static uint64_t sync_counter(const char *);
+
 /* Waits up to two seconds for the live sync counters to reach zero. */
 static int
 sync_idle(int print)
@@ -248,7 +250,9 @@ sync_idle(int print)
 		for (i = 0; i < (int)NLIVE; i++)
 			(void) printf(" %s=%llu", sync_live_keys[i],
 			    (unsigned long long)v[i]);
-		(void) printf("\n");
+		(void) printf(" deferred=%llu drains=%llu\n",
+		    (unsigned long long)sync_counter("deferred"),
+		    (unsigned long long)sync_counter("drains"));
 	}
 	return (!busy);
 }
