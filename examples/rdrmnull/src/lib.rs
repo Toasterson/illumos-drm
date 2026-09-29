@@ -704,7 +704,12 @@ impl NullDriver {
             f.signal(Ctx::Sleep(ctx));
         }
         f.put(Ctx::Sleep(ctx));
-        let t = Timeout::new(Ticks::from_micros(u64::from(v.delay_ms) * 1000), fence_timer as fn(&Atomic), ctx);
+        // timeout(9F) counts from the current tick, so it can fire up to one
+        // tick before `delay_ms` has passed on the monotonic clock; one tick
+        // more makes sure the fence is due when the soft interrupt runs.
+        let tick_us = Ticks::from_micros(1).as_micros();
+        let after = Ticks::from_micros(u64::from(v.delay_ms) * 1000 + tick_us);
+        let t = Timeout::new(after, fence_timer as fn(&Atomic), ctx);
         let old = {
             let mut ts = self.fence_timers.lock();
             // Timers that have fired are only freed here.

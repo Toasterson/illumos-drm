@@ -44,6 +44,12 @@ unsafe impl Plain for SyncFenceInfo {}
 // SAFETY: as above.
 unsafe impl Plain for DmaBufSync {}
 
+/// `ENODEV`, `mmap(2)` of a file that cannot be mapped.
+const ENODEV: Errno = match Errno::new(ddi::sys::errno::ENODEV) {
+    Some(e) => e,
+    None => Errno::EINVAL,
+};
+
 ddi::named_kstat! {
     /// The `sync` kstat of a DRM device (`kstat -m <driver> -n sync`).
     pub struct SyncKstat {
@@ -393,6 +399,31 @@ impl<O: GemObject> SyncCore<O> {
     }
 
     // --- dma-buf mappings ---
+
+    /// `segmap(9E)` of anonymous minor `id`: only a dma-buf maps, shared,
+    /// within its size (`EINVAL` otherwise, `ENODEV` for other anonymous
+    /// files, as `mmap(2)` of a file without mappings gives).
+    pub(crate) fn anon_segmap_check(
+        &self,
+        id: u32,
+        off: u64,
+        len: usize,
+        shared: bool,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        match self.anon.get(id).ok_or(Errno::ENXIO)? {
+            AnonObj::DmaBuf(g) => {
+                let size = g.size() as u64;
+                g.put(ctx);
+                let end = off.checked_add(len as u64).ok_or(Errno::EINVAL)?;
+                if !shared || end > size || len == 0 { Err(Errno::EINVAL) } else { Ok(()) }
+            }
+            o => {
+                o.put(ctx);
+                Err(ENODEV)
+            }
+        }
+    }
 
     /// `devmap(9E)` of anonymous minor `id` (a dma-buf).
     pub(crate) fn anon_devmap(

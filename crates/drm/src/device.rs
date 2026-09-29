@@ -400,11 +400,13 @@ impl<D: Driver> CharDevice for Device<D> {
         // A node minor without a clone id was never handed out by
         // clone_open, so there is no file to forget.
         if let Some(c) = d.clone {
-            self.state.lock().close(c);
+            // The clone id is freed last: an open that reuses it must find
+            // the file's GEM and sync object tables gone (else EBUSY).
             if let Some(g) = &self.gem {
                 g.file_close(c, ctx);
             }
             self.sync.file_close(c, ctx);
+            self.state.lock().close(c);
         }
         Ok(())
     }
@@ -453,6 +455,15 @@ impl<D: Driver> CharDevice for Device<D> {
         self.state.lock().permit(c, entry.perm, privileged)?;
         self.driver.ioctl(self, c, cmd, &arg, ctx)?;
         Ok(0)
+    }
+
+    fn segmap_check(&self, minor: Minor, req: &MapRequest, ctx: &Sleepable) -> Result<()> {
+        if let Some((_, id)) = anon_fd::decode(minor.0) {
+            return self.sync.anon_segmap_check(id, req.off, req.len, req.is_shared(), ctx);
+        }
+        let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
+        let g = self.gem.as_ref().ok_or(Errno::ENODEV)?;
+        g.map_check(c, req.off, req.len, req.is_shared())
     }
 
     fn chpoll(
