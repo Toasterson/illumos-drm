@@ -163,6 +163,43 @@ impl SyncStats {
     }
 }
 
+#[cfg(not(test))]
+ddi::named_kstat! {
+    /// The `sync` kstat of a DRM device (`kstat -m <driver> -n sync`).
+    pub struct SyncKstat {
+        /// Live fences.
+        pub fences: u64,
+        /// Fences signalled so far.
+        pub signaled: u64,
+        /// Fences signalled with an error so far.
+        pub errors: u64,
+        /// Registered fence callbacks.
+        pub callbacks: u64,
+        /// Live fence arrays.
+        pub arrays: u64,
+        /// Live timeline points.
+        pub chains: u64,
+        /// Fences released by the task queue so far.
+        pub deferred: u64,
+        /// Runs of the release task so far.
+        pub drains: u64,
+        /// Blocking waits so far.
+        pub waits: u64,
+        /// Waits that timed out so far.
+        pub timeouts: u64,
+        /// Waits a signal interrupted so far.
+        pub interrupted: u64,
+        /// Live sync objects.
+        pub syncobjs: u64,
+        /// Live sync files.
+        pub sync_files: u64,
+        /// Live dma-bufs.
+        pub dmabufs: u64,
+        /// Anonymous minors in use.
+        pub anon_files: u64,
+    }
+}
+
 // --- the domain -------------------------------------------------------------
 
 /// Fence contexts are unique across the module, so that fences of two
@@ -182,6 +219,9 @@ pub struct FenceDomain {
     drain_scheduled: AtomicBool,
     /// The counters.
     pub stats: SyncStats,
+    /// The `sync` kstat the counters are copied to.
+    #[cfg(not(test))]
+    kstat: Option<ddi::TypedKstat<SyncKstat>>,
 }
 
 /// A raw pointer to the domain for the drain task.
@@ -207,6 +247,13 @@ impl FenceDomain {
             }
         }
         let tq = ddi::TaskQueue::new(dev, c"fencefree", core::num::NonZeroU32::MIN, ctx).map_err(|_| Errno::ENOMEM)?;
+        let kstat = ddi::TypedKstat::<SyncKstat>::new(
+            ddi::KstatId { module: dev.driver_name(), instance: dev.instance(), name: c"sync", class: c"misc" },
+            ctx,
+        );
+        if kstat.is_err() {
+            dev.warn(format_args!("cannot create the sync kstat; statistics are unavailable"));
+        }
         KArc::new(
             FenceDomain {
                 tq,
@@ -214,6 +261,7 @@ impl FenceDomain {
                 deferred: DeferList::new(),
                 drain_scheduled: AtomicBool::new(false),
                 stats: SyncStats::default(),
+                kstat: kstat.ok(),
             },
             ctx,
         )
@@ -273,13 +321,44 @@ impl FenceDomain {
     }
 
     /// Destroys every parked fence, including those that destroying others
-    /// parks. Thread context; cheap when nothing is parked.
+    /// parks, and publishes the counters. Thread context; cheap when
+    /// nothing is parked.
     pub fn drain(&self, ctx: &Sleepable) {
+        if self.deferred.is_empty() {
+            return;
+        }
         while !self.deferred.is_empty() {
             drop(self.deferred.take_all(ctx));
         }
         #[cfg(test)]
         self.drain_scheduled.store(false, Ordering::Release);
+        self.publish();
+    }
+
+    /// Copies the counters to the `sync` kstat. Thread context (the kstat
+    /// mutex is adaptive); a no-op on the host.
+    pub fn publish(&self) {
+        #[cfg(not(test))]
+        if let Some(k) = &self.kstat {
+            let s = &self.stats;
+            let l = |a: &AtomicU64| a.load(Ordering::Relaxed);
+            let mut g = k.lock();
+            g.fences.set(l(&s.fences));
+            g.signaled.set(l(&s.signaled));
+            g.errors.set(l(&s.errors));
+            g.callbacks.set(l(&s.callbacks));
+            g.arrays.set(l(&s.arrays));
+            g.chains.set(l(&s.chains));
+            g.deferred.set(l(&s.deferred));
+            g.drains.set(l(&s.drains));
+            g.waits.set(l(&s.waits));
+            g.timeouts.set(l(&s.timeouts));
+            g.interrupted.set(l(&s.interrupted));
+            g.syncobjs.set(l(&s.syncobjs));
+            g.sync_files.set(l(&s.sync_files));
+            g.dmabufs.set(l(&s.dmabufs));
+            g.anon_files.set(l(&s.anon_files));
+        }
     }
 
     /// Prepares for detach: waits for the drain task, destroys what is
