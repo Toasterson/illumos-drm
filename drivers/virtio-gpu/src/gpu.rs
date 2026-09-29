@@ -600,7 +600,7 @@ impl Gpu {
 
     /// Waits until the device has completed `cmd` and returns the response
     /// type. Uninterruptible, for requests the kernel itself needs; `EIO`
-    /// after [`REQUEST_TIMEOUT`].
+    /// after 10 seconds (`REQUEST_TIMEOUT`).
     pub fn wait(&self, dev: &Dev, cmd: &KArc<Cmd>, ctx: &Sleepable) -> Result<u32, Errno> {
         let start = HrTime::now();
         loop {
