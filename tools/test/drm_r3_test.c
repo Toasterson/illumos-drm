@@ -1249,7 +1249,8 @@ churner(void *arg)
 		(void) memset(&vbl, 0, sizeof (vbl));
 		vbl.request.type = DRM_VBLANK_RELATIVE | DRM_VBLANK_EVENT;
 		vbl.request.sequence = 100000;
-		(void) drmWaitVBlank(fd, &vbl);
+		if (drmWaitVBlank(fd, &vbl) != 0)
+			w->errors++;
 		if (b.map != NULL && b.map != MAP_FAILED)
 			(void) munmap((void *)b.map, b.size);
 		(void) close(fd);
@@ -1258,12 +1259,20 @@ churner(void *arg)
 }
 
 static void
-test_open_close_churn(void)
+test_open_close_churn(int fd)
 {
 	pthread_t t[8];
 	struct worker w[8];
 	int i, errs = 0;
+	struct kms k0, k1;
+	struct buf a;
+	uint32_t fa = 0, conn = conn_id;
 
+	/* The display is on, so that every churner can queue a vblank event. */
+	check(buf_create(fd, 1024, 768, 32, &a) &&
+	    addfb2(fd, 1024, 768, XRGB8888, a.handle, a.pitch, 0, 0, &fa) == 0 &&
+	    drmModeSetCrtc(fd, crtc_id, fa, 0, 0, &conn, 1, &mode1024) == 0, "the display is on for the churn");
+	(void) kms_stats(&k0);
 	for (i = 0; i < 8; i++) {
 		w[i].iters = 50;
 		w[i].errors = 0;
@@ -1274,7 +1283,11 @@ test_open_close_churn(void)
 		errs += w[i].errors;
 	}
 	check(errs == 0, "8 threads x 50 open/addfb/blob/event/close cycles: no state crosses files");
-	check(kms_idle("after the churn"), "the churn leaves no framebuffer, blob or event behind");
+	(void) kms_stats(&k1);
+	check(k1.events_discarded - k0.events_discarded == 400 && k1.events_outstanding == 0,
+	    "the 400 events pending at close were discarded");
+	(void) rmfb(fd, fa);
+	buf_destroy(fd, &a);
 }
 
 static void
@@ -1321,11 +1334,11 @@ main(int argc, char **argv)
 	test_vblank(fd);
 	test_event_limits();
 	test_concurrency(fd);
+	test_open_close_churn(fd);
 	(void) close(rfd);
 	(void) close(fd2);
 	(void) close(fd);
 	test_close_turns_off();
-	test_open_close_churn();
 	msleep(100);
 	check(kms_stats(&k) && k.vblanks > 0 && k.flips > 0 && k.commits > 0, "kstat counted vblanks, flips, commits");
 	check(kms_idle("at the end"), "every framebuffer, blob and event is released");
