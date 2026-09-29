@@ -91,6 +91,8 @@ extern crate alloc;
 
 mod kms;
 
+use alloc::boxed::Box;
+
 use core::ffi::{CStr, c_int, c_void};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
@@ -420,24 +422,30 @@ impl SoftInterruptHandler for Timeline {
     }
 }
 
-/// The soft interrupt of each device, for the timer callbacks, which
-/// cannot take arguments of their own (their type must be nameable).
+/// The soft interrupt of each device, by instance, for the timer
+/// callbacks: a timer outlives no device (before_detach cancels them), but
+/// the slot also lets a refused detach reconnect the timeline.
 static SOFTS: [AtomicPtr<SoftInterrupt<Timeline>>; 64] = [const { AtomicPtr::new(ptr::null_mut()) }; 64];
 
-/// The timer of a test fence.
-type FenceTimer = Timeout<fn(&Atomic)>;
+/// The timer of a test fence: a boxed closure (the module's global
+/// allocator, `KM_SLEEP` in the ioctl) naming its device's instance.
+type FenceTimer = Timeout<Box<dyn FnOnce(&Atomic) + Send>>;
 
-/// The timer callback (a callout): triggers the soft interrupts, whose
-/// handlers find the fences that are due.
-fn fence_timer(_a: &Atomic) {
-    for s in &SOFTS {
-        let p = s.load(Ordering::Acquire);
-        if !p.is_null() {
-            // SAFETY: set in attach from the driver's boxed soft interrupt
-            // and cleared in before_detach after every timer is cancelled.
-            let _ = unsafe { &*p }.trigger();
-        }
+/// The timer callback (a callout): triggers the soft interrupt of device
+/// `index` only, whose handler finds the fences that are due.
+fn fence_timer(index: usize) {
+    let Some(s) = SOFTS.get(index) else { return };
+    let p = s.load(Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: set in attach from the driver's boxed soft interrupt and
+        // cleared in before_detach after every timer is cancelled.
+        let _ = unsafe { &*p }.trigger();
     }
+}
+
+/// Logs how many pending test fences a detach signalled with `ECANCELED`.
+fn dev_note_cancelled(index: usize, n: u32) {
+    ddi::knote!("rdrmnull{index}: detach cancelled {n} pending test fences (ECANCELED)");
 }
 
 // --- the driver -------------------------------------------------------------------
@@ -726,7 +734,9 @@ impl NullDriver {
         // more makes sure the fence is due when the soft interrupt runs.
         let tick_us = Ticks::from_micros(1).as_micros();
         let after = Ticks::from_micros(u64::from(v.delay_ms) * 1000 + tick_us);
-        let t = Timeout::new(after, fence_timer as fn(&Atomic), ctx);
+        let index = self.index;
+        let f: Box<dyn FnOnce(&Atomic) + Send> = Box::new(move |_: &Atomic| fence_timer(index));
+        let t = Timeout::new(after, f, ctx);
         let old = {
             let mut ts = self.fence_timers.lock();
             // Timers that have fired are only freed here.
@@ -897,11 +907,17 @@ impl drm::Driver for NullDriver {
         if let Some(s) = SOFTS.get(self.index) {
             s.store(ptr::null_mut(), Ordering::Release);
         }
+        let mut cancelled = 0u32;
         loop {
             let d = self.soft.state().due.lock().swap_remove(0);
             let Some(d) = d else { break };
             d.fence.signal_with_error(Errno::ECANCELED, Ctx::Sleep(ctx));
             d.fence.put(Ctx::Sleep(ctx));
+            cancelled += 1;
+        }
+        if cancelled != 0 {
+            // The kernel test looks for this line.
+            dev_note_cancelled(self.index, cancelled);
         }
         // Cancel or finish the timer, then drop a reference it never got to.
         let t = self.timer.lock().take();

@@ -61,6 +61,7 @@
 
 #define	CARD	"/dev/dri/card0"
 #define	RENDER	"/dev/dri/renderD128"
+#define	CARD1	"/dev/dri/card1"
 
 /* The test ioctls of rdrmnull (examples/rdrmnull/src/lib.rs). */
 struct rdrmnull_fence {
@@ -1349,6 +1350,135 @@ test_threads(void)
 	check(sync_idle(1), "THREADS: everything is gone");
 }
 
+/* ------------------------------------------------------------------ */
+/* Exports against last closes                                         */
+/* ------------------------------------------------------------------ */
+
+struct race {
+	int fd;
+	uint32_t handle;
+	int errors;
+	int exports;
+};
+
+/*
+ * Four threads export the same buffer again and again and close their
+ * descriptors at once, so that exports race the last close of the
+ * dma-buf's minor. Every descriptor must import back to the buffer's
+ * handle.
+ */
+static void *
+race_thread(void *arg)
+{
+	struct race *r = arg;
+	int i, pfd;
+	uint32_t h;
+
+	for (i = 0; i < 400; i++) {
+		if (drmPrimeHandleToFD(r->fd, r->handle, DRM_CLOEXEC, &pfd) != 0) {
+			__sync_fetch_and_add(&r->errors, 1);
+			continue;
+		}
+		__sync_fetch_and_add(&r->exports, 1);
+		if (drmPrimeFDToHandle(r->fd, pfd, &h) != 0 || h != r->handle)
+			__sync_fetch_and_add(&r->errors, 1);
+		(void) close(pfd);
+	}
+	return (NULL);
+}
+
+static void
+test_export_close_race(int card)
+{
+	struct race r;
+	pthread_t th[4];
+	int i;
+
+	(void) memset(&r, 0, sizeof (r));
+	r.fd = card;
+	r.handle = dumb(card, 64, 64, NULL);
+	check(r.handle != 0, "RACE: a buffer");
+	for (i = 0; i < 4; i++)
+		(void) pthread_create(&th[i], NULL, race_thread, &r);
+	for (i = 0; i < 4; i++)
+		(void) pthread_join(th[i], NULL);
+	(void) printf("INFO race: %d exports, %d errors\n", r.exports, r.errors);
+	check(r.errors == 0 && r.exports == 1600,
+	    "4 threads: exports racing the last close always import the buffer");
+	gem_close(card, r.handle);
+	check(sync_idle(1), "RACE: every dma-buf is gone");
+}
+
+/* ------------------------------------------------------------------ */
+/* Two devices                                                         */
+/* ------------------------------------------------------------------ */
+
+static void
+test_two_devices(int card)
+{
+	int c1 = open_node(CARD1), pfd = -1, ofd = -1, sfd = -1;
+	uint32_t h, so0 = 0, so1 = 0, so1b = 0, got, first;
+	struct drm_prime_handle ph;
+
+	if (c1 < 0) {
+		(void) printf("INFO no " CARD1 ": cross-device checks skipped\n");
+		return;
+	}
+	h = dumb(card, 64, 64, NULL);
+	check(h != 0 && drmPrimeHandleToFD(card, h, DRM_CLOEXEC, &pfd) == 0,
+	    "TWO: a dma-buf of card0");
+	(void) memset(&ph, 0, sizeof (ph));
+	ph.fd = pfd;
+	check(xioctl_err(c1, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ph) == ENOTSUP,
+	    "TWO: card1 refuses card0's dma-buf with ENOTSUP");
+	check(drmSyncobjCreate(card, 0, &so0) == 0 &&
+	    drmSyncobjHandleToFD(card, so0, &ofd) == 0,
+	    "TWO: a sync object of card0 as a file");
+	check(drmSyncobjFDToHandle(c1, ofd, &so1) == 0 && so1 != 0,
+	    "TWO: card1 imports card0's sync object");
+	check(null_fence(c1, 100, FENCE_SYNCOBJ, so1, 0, 0, 0, NULL) == 0,
+	    "TWO: card1's timeline fences the shared object (100 ms)");
+	check(drmSyncobjWait(card, &so0, 1, now_ns() + ms_ns(5000), 0, &first) == 0,
+	    "TWO: card0 sees card1's fence signal");
+	check(null_fence(card, 100, FENCE_SYNC_FILE, 0, 0, 0, 0, &sfd) == 0,
+	    "TWO: a sync file of card0 (100 ms)");
+	check(drmSyncobjCreate(c1, 0, &so1b) == 0 &&
+	    drmSyncobjImportSyncFile(c1, so1b, sfd) == 0,
+	    "TWO: card1 imports card0's sync file into its sync object");
+	check(drmSyncobjWait(c1, &so1b, 1, now_ns() + ms_ns(5000), 0, &got) == 0,
+	    "TWO: card1 waits for card0's fence");
+	(void) close(pfd);
+	(void) close(ofd);
+	(void) close(sfd);
+	(void) drmSyncobjDestroy(c1, so1);
+	(void) drmSyncobjDestroy(c1, so1b);
+	(void) drmSyncobjDestroy(card, so0);
+	gem_close(card, h);
+	(void) close(c1);
+	check(sync_idle(1), "TWO: everything is gone");
+}
+
+/*
+ * "pending" mode: leave a fence of the rdrmnull timeline pending with no
+ * file open, so that the detach that follows must cancel it (ECANCELED).
+ */
+static int
+leave_pending(void)
+{
+	int fd = open_node(RENDER);
+	uint32_t so = 0;
+
+	if (fd < 0 || drmSyncobjCreate(fd, 0, &so) != 0 ||
+	    null_fence(fd, 10000, FENCE_SYNCOBJ, so, 0, 0, 0, NULL) != 0) {
+		(void) printf("FAIL pending: could not leave a fence pending\n");
+		return (1);
+	}
+	(void) drmSyncobjDestroy(fd, so);
+	(void) close(fd);
+	(void) printf("PASS pending: a 10 s fence is left pending with no file open\n");
+	return (0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1360,6 +1490,8 @@ main(int argc, char **argv)
 		return (prime_child(atoi(argv[2])));
 	if (argc == 3 && strcmp(argv[1], "syncobj-child") == 0)
 		return (syncobj_child(atoi(argv[2])));
+	if (argc == 2 && strcmp(argv[1], "pending") == 0)
+		return (leave_pending());
 
 	card = open_node(CARD);
 	render = open_node(RENDER);
@@ -1377,6 +1509,8 @@ main(int argc, char **argv)
 	test_resv(card);
 	test_eintr(render);
 	test_threads();
+	test_export_close_race(card);
+	test_two_devices(card);
 	(void) close(card);
 	(void) close(render);
 	check(sync_idle(1), "at the end the sync kstat shows nothing live");
