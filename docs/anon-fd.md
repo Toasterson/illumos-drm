@@ -95,8 +95,11 @@ DRM file minors use the low 18 bits, so the ranges are disjoint;
 `fstat(2)`; the DRM core only supports LP64 callers anyway.
 
 **Opens.** An anonymous minor can only be opened by the export path: its
-table entry counts pending opens, and `open(9E)` succeeds only while one
-is pending. A device node made with `mknod(2)` for the number cannot be
+table entry counts booked opens, and `open(9E)` succeeds only while one
+is booked. `close(9E)` keeps an entry, and its number, while an open is
+booked, so that an export racing with the last close of the same dma-buf
+opens the object it booked (`AnonTable` in `crates/drm/src/anon_fd.rs`,
+with a host stress test of exports against last closes). A device node made with `mknod(2)` for the number cannot be
 opened. The export first creates the entry, then opens, then copies the
 descriptor number out to the ioctl argument, and only then installs the
 descriptor with `setf()`; if the copy fails, the open is undone
@@ -106,7 +109,8 @@ descriptor with `setf()`; if the copy fails, the open is undone
 **One dma-buf per object.** While a GEM object's dma-buf file is open,
 exporting the object again opens the same minor again (Linux keeps
 `obj->dma_buf`), so both descriptors have the same `st_rdev`. If that
-races with the last close, the export uses a new minor.
+races with the last close, the booked open keeps the entry (see *Opens*)
+and the export reopens the same dma-buf.
 
 **Paths.** `makespecvp()` gives the vnode no path, and the devmap
 framework cannot map such a vnode: `segdev_create()` looks the device up
@@ -141,10 +145,13 @@ synchronisation through its reservation, `POLLIN` for the write fences,
 object files are always ready, as on Linux.
 
 **Imports.** `getf()`, check `v_type == VCHR` and the major number,
-decode the minor, look the entry up (it exists while the held file is
-open), `releasef()`. A descriptor of another device of the same driver is
+decode the minor, look the entry up in the table of the device the minor
+names (it exists while the held file is open, and the held file keeps
+that device attached), `releasef()`. Sync object files and sync files of
+any device of the driver are accepted; a dma-buf of another device is
 `ENOTSUP` (cross-device import needs attach and a scatter/gather mapping,
-which no driver has yet); any other file is `EINVAL`.
+which no driver has yet); any other file is `EINVAL`, including files of
+other drivers built on this core, which link their own copy of it.
 
 **Context.** Descriptors belong to the calling process, so they are only
 created and looked up inside an ioctl of a user process:

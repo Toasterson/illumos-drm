@@ -448,11 +448,20 @@ query. `SYNCOBJ_WAIT` and `SYNCOBJ_TIMELINE_WAIT` wait for all or any of
 several objects, for submissions (`WAIT_FOR_SUBMIT`) or only for them
 (`WAIT_AVAILABLE`), with fence callbacks and submission waiters pointing
 at one waiter on the waiting thread's stack that the cleanup removes
-before it goes. The ioctls check their arguments as Linux does
-(`drm::syncobj_ioctl` lists the rules); the one deviation is that
-`TRANSFER` refuses flags other than `WAIT_FOR_SUBMIT`, which Linux
-ignores. Each file has its own handle table, freed at `close(9E)`. Arrays
-of handles are limited to 65536 entries (`EINVAL` above).
+before it goes. The ioctls check their arguments and answer with the
+errnos Linux does (`drm::syncobj_ioctl` lists the rules: which `pad`
+fields are checked, which unknown handles are `ENOENT` and which
+`EINVAL`). Deviations from Linux in R2, all refusals of input Linux
+ignores or cannot allocate for: `TRANSFER` refuses flags other than
+`WAIT_FOR_SUBMIT`, `PRIME_FD_TO_HANDLE` refuses non-zero `flags`, and
+arrays of handles are limited to 65536 entries (`EINVAL` above; Linux
+tries the allocation). Each file has its own handle table, freed at
+`close(9E)`. Sync object files and sync files of one device can be
+imported into another device of the same driver, which shares this code;
+the imported objects keep their device from detaching until they are
+gone. Files of other drivers, even ones built on this core, are `EINVAL`:
+each driver module links its own copy of the core, and sharing objects
+between copies needs the C interface of R5.
 
 **File descriptors, PRIME and sync files (R2).** A dma-buf, an exported
 sync object and a sync file are specfs files of an *anonymous minor* of
@@ -463,9 +472,13 @@ file, `devmap(9E)` maps a dma-buf, and imports find the object by minor.
 and why. `PRIME_HANDLE_TO_FD` honours `DRM_CLOEXEC` and `DRM_RDWR` and
 gives one dma-buf per object; `PRIME_FD_TO_HANDLE` returns the calling
 file's existing handle or creates one, for dma-bufs of the same device
-(`ENOTSUP` for another device of the driver, `EINVAL` for other files).
-Sync files answer `SYNC_IOC_MERGE` and `SYNC_IOC_FILE_INFO`, dma-bufs
-`DMA_BUF_IOCTL_SYNC` (a checked no-op, the memory is coherent). Polling a
+(`ENOTSUP` for another device of the driver, because importing across
+devices needs an attach and a scatter/gather mapping no driver has yet;
+`EINVAL` for other files). Sync files answer `SYNC_IOC_MERGE` and
+`SYNC_IOC_FILE_INFO`, dma-bufs `DMA_BUF_IOCTL_SYNC`: the start of CPU
+access waits, interruptibly, for the object's reservation (the writers
+before reading, everyone before writing), as Linux does; there is no
+cache to flush, the memory is coherent. Polling a
 dma-buf for its reservation is not implemented yet (`ENOTSUP`); nothing in
 R2 needs it, and a compositor using implicit synchronisation will.
 
