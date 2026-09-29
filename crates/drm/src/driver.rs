@@ -246,11 +246,21 @@ pub trait Driver: Send + Sync + Sized + 'static {
     }
 
     /// Called in `detach(9E)` once no file is open, before the core checks
-    /// that no GEM object is left: the driver releases whatever references
-    /// it holds on its own (timers, work in flight). The detach can still
-    /// fail afterwards.
+    /// whether the detach can proceed: the driver drops the references it
+    /// holds on its own that would keep GEM objects alive (timers, work in
+    /// flight). A check can still refuse the detach afterwards, and the
+    /// device then stays attached and in use, so this must not stop
+    /// anything the device needs to work (vblank sources, interrupts): that
+    /// belongs in [`Driver::before_teardown`].
     #[cfg(not(test))]
     fn before_detach(&self, _ctx: &ddi::Sleepable) {}
+
+    /// Called in `detach(9E)` once every check has passed, when the detach
+    /// will complete: the driver stops what still reaches the core (vblank
+    /// sources, interrupts) and drops its framebuffer references, before
+    /// the core tears down the mode-setting and GEM state.
+    #[cfg(not(test))]
+    fn before_teardown(&self, _ctx: &ddi::Sleepable) {}
 }
 
 #[cfg(test)]

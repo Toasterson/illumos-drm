@@ -357,8 +357,21 @@ impl<B: FbBacking> KmsCore<B> {
         }
     }
 
+    /// The detach check: frees the orphaned framebuffers and blobs nothing
+    /// refers to any more, then reports how many framebuffers are left.
+    /// Once every file is closed, none should be: a file's close turns off
+    /// what shows its framebuffers. One that is left is still referenced
+    /// (by the driver, for example), and would keep its GEM objects alive,
+    /// so the detach is refused (`Err` with the count) and nothing else
+    /// changes, which leaves the device working.
+    pub fn detach_check(&mut self, ctx: &Sleepable) -> Result<(), usize> {
+        self.sweep(ctx);
+        if self.fbs.is_empty() { Ok(()) } else { Err(self.fbs.len()) }
+    }
+
     /// Releases every framebuffer and blob and the current state, when the
-    /// device detaches. The driver must have dropped its own references.
+    /// device detaches, after [`KmsCore::detach_check`] passed. The driver
+    /// must have dropped its own references.
     pub fn teardown(&mut self, ctx: &Sleepable) {
         for p in self.cur.planes.iter_mut() {
             if let Some(fb) = p.fb.take() {

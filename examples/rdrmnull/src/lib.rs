@@ -585,7 +585,8 @@ impl drm::Driver for NullDriver {
     }
 
     fn before_detach(&self, ctx: &Sleepable) {
-        self.kms.shutdown();
+        // Only references the driver holds for itself go here; the display
+        // keeps running, because the detach may still be refused.
         // Cancel or finish the timer, then drop a reference it never got to.
         let t = self.timer.lock().take();
         drop(t);
@@ -593,6 +594,10 @@ impl drm::Driver for NullDriver {
             // SAFETY: stored from GemRef::into_raw, taken once.
             unsafe { GemRef::<NullObject>::from_raw(p) }.put(ctx);
         }
+    }
+
+    fn before_teardown(&self, _ctx: &Sleepable) {
+        self.kms.shutdown();
     }
 }
 

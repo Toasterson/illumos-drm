@@ -309,8 +309,20 @@ impl<O: GemObject> Kms<O> {
         self.publish();
     }
 
-    /// Releases everything when the device detaches, after the driver has
-    /// stopped its vblank source and dropped its framebuffer references.
+    /// The KMS part of the detach checks ([`KmsCore::detach_check`]):
+    /// `Err` with the number of framebuffers still referenced. Changes
+    /// nothing a working device needs, because the detach may be refused.
+    pub(crate) fn detach_check(&self, ctx: &Sleepable) -> Result<(), usize> {
+        let mut core = self.core.lock();
+        let r = core.detach_check(ctx);
+        drop(core);
+        self.publish();
+        r
+    }
+
+    /// Releases everything when the device detaches, after every detach
+    /// check passed and the driver has stopped its vblank source and
+    /// dropped its framebuffer references ([`crate::Driver::before_teardown`]).
     pub(crate) fn teardown(&self, ctx: &Sleepable) {
         let mut core = self.core.lock();
         core.teardown(ctx);

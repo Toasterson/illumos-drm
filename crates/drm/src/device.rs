@@ -184,8 +184,12 @@ impl<D: Driver> Device<D> {
     }
 
     /// Unregisters the device. Refuses, and hands the device back, while
-    /// files are open or GEM objects remain (after the driver's
-    /// [`Driver::before_detach`] and the deferred releases have run).
+    /// files are open, framebuffers are still referenced or GEM objects
+    /// remain (after the driver's [`Driver::before_detach`] and the
+    /// deferred releases have run). All checks run before anything is torn
+    /// down, so a refused device keeps working; only then are the driver's
+    /// sources stopped ([`Driver::before_teardown`]) and the mode-setting
+    /// and GEM state released.
     #[allow(clippy::result_large_err, reason = "the shape of ddi::Driver::detach, which hands the instance back")]
     pub fn detach(self, ctx: &Sleepable) -> Result<(), (Device<D>, DdiError)> {
         let open = self.state.lock().open_files();
@@ -194,14 +198,24 @@ impl<D: Driver> Device<D> {
             return Err((self, DdiError));
         }
         self.driver.before_detach(ctx);
+        // Every check runs before anything is torn down: a refused detach
+        // leaves the device attached, so it must leave it working, its
+        // mode-setting state and the driver's vblank source included.
+        if let Some(Err(n)) = self.kms.as_ref().map(|k| k.detach_check(ctx)) {
+            self.dev.warn(format_args!("detach refused: {n} framebuffers still referenced"));
+            return Err((self, DdiError));
+        }
+        if let Some(Err(s)) = self.gem.as_ref().map(|g| GemCore::quiesce(g, ctx)) {
+            self.dev.warn(format_args!("detach refused: GEM state in use: {s:?}"));
+            return Err((self, DdiError));
+        }
+        // The detach completes: the driver stops its sources, then the
+        // mode-setting state goes, then the GEM state.
+        self.driver.before_teardown(ctx);
         if let Some(k) = &self.kms {
             k.teardown(ctx);
         }
-        if let Some(g) = &self.gem {
-            if let Err(s) = GemCore::quiesce(g, ctx) {
-                self.dev.warn(format_args!("detach refused: GEM state in use: {s:?}"));
-                return Err((self, DdiError));
-            }
+        if self.gem.is_some() {
             registry::remove(self.index);
         }
         Ok(())

@@ -494,9 +494,12 @@ damage tracking). The event lock has no interrupt priority, so
 `VblankHandle::vblank` demands the `Sleepable` token (thread, task queue or
 level-0 periodic context); a driver with a hardware vblank interrupt needs a
 priority-aware lock and an `Atomic` entry point, which come with the first
-such driver. If `detach` is refused after the KMS state was released
-(GEM objects still referenced), the device stays attached with every CRTC
-off. The refusal of `ATOMIC` to Xorg by process name stays open.
+such driver. `detach` checks everything before it tears anything down
+(open files, framebuffers still referenced, GEM objects left, after the
+driver's `before_detach` has dropped what it holds for itself); a refused
+device keeps its mode-setting state and its vblank source and works on.
+Only when every check has passed does the driver stop its sources
+(`before_teardown`) and the core release the KMS and GEM state. The refusal of `ATOMIC` to Xorg by process name stays open.
 
 ## Building
 

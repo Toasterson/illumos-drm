@@ -385,6 +385,43 @@ fn rmfb_and_close_turn_off_what_they_show() {
 }
 
 #[test]
+fn detach_check_changes_nothing_it_refuses() {
+    let (m, mut k) = setup();
+    let fb = add_fb(&m, &mut k, FILE, 1024, 768, XRGB8888);
+    let mut st = modeset_state(&mut k, fb, true).unwrap();
+    k.check(&mut st, 0, &m).unwrap();
+    let d = k.commit(st, &m, &ctx());
+    super::core::release_old(d.old, &ctx());
+    // The driver keeps a reference to what it scans out (rdrmnull's
+    // scanout does, until the next vblank), and the file closes.
+    let extra = k.fb(fb).unwrap().clone();
+    k.file_close(FILE, &m, &ctx()).unwrap();
+    assert!(!k.cur.crtcs[0].active);
+    // Refused while the reference exists, and nothing is torn down: the
+    // framebuffer is still there, its buffer not released, the static
+    // objects unchanged.
+    let ids = k.ids.len();
+    assert_eq!(k.detach_check(&ctx()), Err(1));
+    assert!(k.fb(fb).is_some());
+    assert_eq!(m.released.load(Ordering::SeqCst), 0);
+    assert_eq!(k.ids.len(), ids);
+    // The device still works: a new file sets a mode.
+    k.file_open(FILE, &ctx());
+    let fb2 = add_fb(&m, &mut k, FILE, 1024, 768, XRGB8888);
+    let mut st = modeset_state(&mut k, fb2, true).unwrap();
+    k.check(&mut st, 0, &m).unwrap();
+    let d = k.commit(st, &m, &ctx());
+    super::core::release_old(d.old, &ctx());
+    assert!(k.cur.crtcs[0].active);
+    k.file_close(FILE, &m, &ctx()).unwrap();
+    // Once the driver lets go, the check frees the orphan and passes.
+    drop(extra);
+    assert_eq!(k.detach_check(&ctx()), Ok(()));
+    assert!(k.fb(fb).is_none() && k.fb(fb2).is_none());
+    assert_eq!(m.released.load(Ordering::SeqCst), 2);
+}
+
+#[test]
 fn blobs() {
     let (_m, mut k) = setup();
     assert_eq!(k.create_blob(FILE, Vec::new(), false, &ctx()), Err(Errno::EINVAL));
