@@ -208,7 +208,7 @@ mod imp {
         /// Makes a sync file of `fence` named `name`.
         pub fn new(fence: Fence, name: &[u8], ctx: &Sleepable) -> Result<KArc<SyncFile>, Errno> {
             let cb = FenceCb::new(PollWake(AtomicPtr::new(core::ptr::null_mut())), ctx)?;
-            let head = PollBox::try_new()?;
+            let head = PollBox::new(ctx);
             let p = &*head.head() as *const PollHead as *mut PollHead;
             let sf = KArc::new(SyncFile { fence, name: super::name_field(name), head, cb }, ctx)?;
             // The head never moves: it is pinned in a box of its own.
