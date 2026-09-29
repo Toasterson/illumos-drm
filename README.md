@@ -82,7 +82,12 @@ process work there; reservation waits distinguish writers from readers;
 a signal interrupts a wait with `EINTR`; eight threads do all of it at
 once. The `sync` kstat (`kstat -p rdrmnull:0:sync`) shows every fence,
 callback, sync object, sync file, dma-buf and anonymous file gone after
-each step, and the module unloads. The first run panicked the machine in
+each step, and the module unloads. A detach attempted while `rdrmnull`
+holds a buffer with a pending fence in its reservation cancels the fence,
+is refused, and leaves the display (`modetest` lists it) and the sync
+paths (a sync object signalled by the test timeline, a sync file waking
+`poll(2)`) working; once the buffer is released the module unloads. The
+first run panicked the machine in
 the devmap framework on the first `mmap(2)` of a dma-buf; the analysis
 and the fix, which made that impossible in illumos-ddi, are in
 [docs/anon-fd.md](docs/anon-fd.md) and illumos-ddi's `docs/DESIGN.md`
