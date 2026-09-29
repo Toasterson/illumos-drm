@@ -109,6 +109,11 @@ impl<D: Driver> Device<D> {
             dev.warn(format_args!("unexpected page size"));
             return Err(DdiError);
         }
+        // The minor nodes are created on the driver's own node (illumos-ddi
+        // takes `&OwnNode` for them) before the GEM state takes the node.
+        // Opens wait until attach has returned, and dropping them on a
+        // later failure removes them again.
+        let (card, render) = Self::nodes(&node, index)?;
         let gem = if D::FEATURES.contains(Features::GEM) {
             match GemCore::new(node, driver.gem_dma(&dev), D::MAX_MEMORY, ctx) {
                 Ok(g) => Some(g),
@@ -126,16 +131,6 @@ impl<D: Driver> Device<D> {
             dev.warn(format_args!("device {index} is registered twice"));
             return Err(DdiError);
         }
-        let nodes = Self::nodes(&dev, index);
-        let (card, render) = match nodes {
-            Ok(n) => n,
-            Err(e) => {
-                if gem.is_some() {
-                    registry::remove(index);
-                }
-                return Err(e);
-            }
-        };
         dev.report();
         Ok(Device {
             driver,
@@ -150,17 +145,20 @@ impl<D: Driver> Device<D> {
         })
     }
 
-    fn nodes(dev: &DevInfo, index: u32) -> Result<(MinorNode, Option<MinorNode>), DdiError> {
-        let card = Self::node(dev, NodeKind::Primary, index)?;
-        let render =
-            if D::FEATURES.contains(Features::RENDER) { Some(Self::node(dev, NodeKind::Render, index)?) } else { None };
+    fn nodes(node: &OwnNode, index: u32) -> Result<(MinorNode, Option<MinorNode>), DdiError> {
+        let card = Self::node(node, NodeKind::Primary, index)?;
+        let render = if D::FEATURES.contains(Features::RENDER) {
+            Some(Self::node(node, NodeKind::Render, index)?)
+        } else {
+            None
+        };
         Ok((card, render))
     }
 
-    fn node(dev: &DevInfo, kind: NodeKind, index: u32) -> Result<MinorNode, DdiError> {
+    fn node(node: &OwnNode, kind: NodeKind, index: u32) -> Result<MinorNode, DdiError> {
         let name = minor::node_name(kind, index).ok_or(DdiError)?;
         let m = minor::node_minor(kind, index).ok_or(DdiError)?;
-        dev.create_minor_node(name, MinorKind::Char, Minor(m), NodeType::Custom(sys::DDI_NT_DISPLAY_DRM))
+        node.create_minor_node(name, MinorKind::Char, Minor(m), NodeType::Custom(sys::DDI_NT_DISPLAY_DRM))
     }
 
     /// Unregisters the device. Refuses, and hands the device back, while

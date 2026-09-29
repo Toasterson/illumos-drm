@@ -56,7 +56,7 @@
 //! ```
 //!
 //! The logic that decides things ([`state`], [`caps`], [`ioctl`],
-//! [`minor`], [`objects`], [`idmap`], [`offsets`], [`dumb`], [`karc`],
+//! [`minor`], [`objects`], [`idmap`], [`offsets`], [`dumb`], [`dmaerr`], [`karc`],
 //! [`defer`]) is plain data and is unit-tested on the host, several parts
 //! from many threads; [`Device`] and [`gem`] are the kernel layer that
 //! copies arguments, holds the locks and calls the DDI.
@@ -70,6 +70,7 @@ pub mod caps;
 pub mod defer;
 #[cfg(not(test))]
 mod device;
+pub mod dmaerr;
 pub mod driver;
 pub mod dumb;
 #[cfg(not(test))]

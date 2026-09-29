@@ -265,6 +265,23 @@ only with the test-only cargo feature `panic-drill` of `drm` and
 another node at all: it refuses `dma-mode="root-node"` at attach with a
 warning, and its module has no reference to `ddi_root_node`. The drill
 module is built with `cargo xtask build rdrmnull --features panic-drill`.
+The minor nodes are created from the same `OwnNode`, which illumos-ddi
+requires for them too.
+
+A failed DMA allocation or binding makes the creating ioctl fail with the
+errno Linux's DRM gives a failed object allocation (`drm::dmaerr`):
+`ENOMEM` when DMA resources are short or the memory cannot be mapped for
+the device (`DDI_DMA_NORESOURCES`, `DDI_DMA_TOOBIG`, `DDI_DMA_NOMAPPING`),
+`EINVAL` for attributes that can never be satisfied, `ENXIO` for a node
+illumos-ddi's own-node guard refuses, and `EIO` for framework faults a
+fresh handle cannot produce. Before 28 September 2026 `DDI_DMA_NOMAPPING`
+reached userland as `EFAULT`, which in a create ioctl reads as a bad user
+pointer. `tools/test/rdrmnull-dma-self-tiny.conf` lowers the largest DMA
+transfer of the `self` drill to one page, and
+`tools/test/drm_dma_errno_test.c` checks that a one-page dumb buffer binds
+and a four-page one fails with `ENOMEM` and leaves nothing behind in the
+`gem` kstat; it did on 28 September 2026 (illumos `cda5b9a49f`).
+
 Object memory is locked, so a driver sets
 limits per object and per device (`MAX_OBJECT_SIZE`, `MAX_MEMORY`; 256 MiB
 and 1 GiB by default, 16 and 64 MiB in `rdrmnull`); requests above them are
