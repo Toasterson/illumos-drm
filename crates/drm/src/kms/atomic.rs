@@ -437,6 +437,20 @@ impl<B: FbBacking> KmsCore<B> {
                     s.mode = None;
                     s.mode_blob = None;
                 }
+                // The CRTC goes off, so nothing else on it can be shown
+                // either: its other planes go off with it. Otherwise a legacy
+                // cursor, whose framebuffer belongs to no file, would stay on
+                // a dark CRTC and keep its buffer referenced after every file
+                // is closed, which refuses the device's detach.
+                for q in 0..self.layout.planes.len() {
+                    if q != p
+                        && self.cur.planes.get(q).is_some_and(|s| s.crtc == Some(c))
+                        && let Some(s) = st.plane_mut(&self.cur, q)
+                    {
+                        s.crtc = None;
+                        s.fb = None;
+                    }
+                }
                 for k in 0..self.layout.connectors.len() {
                     if self.cur.connectors.get(k).is_some_and(|s| s.crtc == Some(c))
                         && let Some(s) = st.connector_mut(&self.cur, k)

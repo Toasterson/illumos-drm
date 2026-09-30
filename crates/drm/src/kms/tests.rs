@@ -562,3 +562,29 @@ fn gamma() {
     k.set_gamma(23, 256, &lut, &m).unwrap();
     assert_eq!(k.get_gamma(23, 256).unwrap().2[0], 512);
 }
+
+/// Closing the file whose framebuffer the primary plane shows turns the
+/// CRTC off and every other plane on it: a legacy cursor, whose internal
+/// framebuffer belongs to no file, does not stay on the dark CRTC with its
+/// buffer referenced (modetest -C left one, which refused virtio_gpu's
+/// detach on 30 September 2026).
+#[test]
+fn close_turns_off_the_cursor_of_the_crtc_it_turns_off() {
+    let (m, mut k) = setup();
+    let (crtc, ..) = ids(&k);
+    let fb = add_fb(&m, &mut k, FILE, 1024, 768, XRGB8888);
+    let mut st = modeset_state(&mut k, fb, true).unwrap();
+    k.check(&mut st, 0, &m).unwrap();
+    let done = k.commit(st, &m, &ctx());
+    super::core::release_old(done.old, &ctx());
+    let r = req(64, 64, ARGB8888);
+    let cfb = k.add_fb(None, &r, [Some(m.buf(64 * 64 * 4)), None, None, None], (0, 0), false, &ctx()).unwrap();
+    let mut st = k.cursor(crtc, Some(Some(cfb)), Some((5, 5))).unwrap();
+    k.check(&mut st, 0, &m).unwrap();
+    let done = k.commit(st, &m, &ctx());
+    super::core::release_old(done.old, &ctx());
+    assert_eq!(k.counts().0, 2, "the file's framebuffer and the internal cursor one");
+    k.file_close(FILE, &m, &ctx()).unwrap();
+    assert!(k.cur.planes.iter().all(|p| p.fb.is_none() && p.crtc.is_none()), "no plane left on");
+    assert_eq!(k.detach_check(&ctx()), Ok(()), "no framebuffer left referenced");
+}
