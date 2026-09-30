@@ -208,7 +208,7 @@ impl VirtioGpu {
             uapi::DRM_IOCTL_VIRTGPU_WAIT => self.wait(dev, file, arg, ctx),
             uapi::DRM_IOCTL_VIRTGPU_GET_CAPS => self.get_caps(arg, ctx),
             uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB => self.create_blob(dev, file, arg, ctx),
-            uapi::DRM_IOCTL_VIRTGPU_CONTEXT_INIT => self.context_init(file, arg, ctx),
+            uapi::DRM_IOCTL_VIRTGPU_CONTEXT_INIT => self.context_init(dev, file, arg, ctx),
             uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER
             | uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V1
             | uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V2 => {
@@ -356,7 +356,7 @@ impl Driver for VirtioGpuModule {
     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
         let gpu = VirtioGpu::probe(&node, ctx)?;
         let dev = drm::Device::attach(node, gpu, ctx)?;
-        dev.driver().virtio.state().set_domain(dev.sync().domain().clone());
+        dev.driver().virtio.state().set_fence_context(dev.sync().domain());
         if let Some(k) = dev.kms() {
             dev.driver().kms.set_vblank(k.vblank_handle());
         }

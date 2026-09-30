@@ -225,7 +225,7 @@ impl VirtioGpu {
             stride: t.stride,
             layer_stride: t.layer_stride,
         };
-        let fence = self.submit_with(file, &req, None, core::slice::from_ref(&obj), None, ctx);
+        let fence = self.submit_with(dev, file, &req, None, core::slice::from_ref(&obj), None, ctx);
         let r = match fence {
             Ok(f) => {
                 let r = add_fence(&obj, &f, ctx);
@@ -241,8 +241,10 @@ impl VirtioGpu {
     /// Sends `req` (with `data` as its extra data, from user memory) as a
     /// fenced request of `file` that holds `objs` until the device has
     /// completed it, and returns its fence.
+    #[allow(clippy::too_many_arguments, reason = "the parts of one fenced request")]
     fn submit_with<T: proto::Wire>(
         &self,
+        dev: &drm::Device<Self>,
         file: CloneId,
         req: &T,
         data: Option<(&IoctlArg<'_>, u64, u32)>,
@@ -269,7 +271,7 @@ impl VirtioGpu {
         }
         c.hold(held);
         let fr = gpu.file_fence(file, ring)?;
-        gpu.submit(self.dev(), &c, Some(fr), ctx)?.ok_or(Errno::EIO)
+        gpu.submit(self.dev(), &c, Some((fr, dev.sync().domain())), ctx)?.ok_or(Errno::EIO)
     }
 
     /// `DRM_IOCTL_VIRTGPU_WAIT`: waits for the object's readers and writers
@@ -371,7 +373,7 @@ impl VirtioGpu {
                 size: v.cmd_size,
                 num_in_fences: 0,
             };
-            let f = self.submit_with(file, &req, Some((arg, v.cmd, v.cmd_size)), &[], None, ctx)?;
+            let f = self.submit_with(dev, file, &req, Some((arg, v.cmd, v.cmd_size)), &[], None, ctx)?;
             f.put(Ctx::Sleep(ctx));
         }
         let how = Create::Blob {
@@ -391,7 +393,13 @@ impl VirtioGpu {
     }
 
     /// `DRM_IOCTL_VIRTGPU_CONTEXT_INIT`.
-    pub(crate) fn context_init(&self, file: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    pub(crate) fn context_init(
+        &self,
+        dev: &drm::Device<Self>,
+        file: CloneId,
+        arg: &IoctlArg<'_>,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
         let a = UserArg::<uapi::drm_virtgpu_context_init>::read(arg)?;
         let v = *a.get();
         let gpu = self.dev().state();
@@ -429,7 +437,7 @@ impl VirtioGpu {
             });
         }
         let parsed = parse_context_params(params, caps.capset_mask())?;
-        gpu.init_context(self.dev(), file, &parsed, ctx)
+        gpu.init_context(self.dev(), file, &parsed, dev.sync().domain(), ctx)
     }
 
     /// `DRM_IOCTL_VIRTGPU_EXECBUFFER`, in any of its three layouts (`size`
@@ -543,7 +551,7 @@ impl VirtioGpu {
         }
         let ctx_id = gpu.ensure_context(self.dev(), file, ctx)?;
         let req = proto::CmdSubmit { hdr: CtrlHdr::ctx(proto::CMD_SUBMIT_3D, ctx_id), size: x.size, num_in_fences: 0 };
-        let fence = self.submit_with(file, &req, Some((arg, x.command, x.size)), bos, ring, ctx)?;
+        let fence = self.submit_with(dev, file, &req, Some((arg, x.command, x.size)), bos, ring, ctx)?;
         // The work is queued; what follows only publishes its fence.
         let mut r = Ok(());
         for b in bos.iter() {

@@ -92,8 +92,9 @@ modetest_steps() {
 	# The rate is the mode's: QEMU's EDID prefers 1024x768 at 75 Hz.
 	if modetest_run vsync 5 -M virtio_gpu -s "$conn@$crtc:$mode" -v &&
 	    awk '/setting mode/ {split($3, a, "-"); r = a[2] + 0}
-	        /freq:/ {f = $2 + 0; n++; if (r > 0 && f > r * 0.95 && f < r * 1.05) ok++}
-	        END {exit !(ok >= 2)}' modetest-vsync.out; then
+	        /freq:/ {f[n++] = $2 + 0}
+	        END {for (i = 0; i < n; i++) if (r > 0 && f[i] > r * 0.95 && f[i] < r * 1.05) ok++; exit !(ok >= 2)}' \
+	        modetest-vsync.out; then
 		echo "PASS modetest -v page-flips with vblank events at the mode's refresh rate"
 	else
 		echo "FAIL modetest -v"

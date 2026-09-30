@@ -382,9 +382,10 @@ pub struct Gpu {
     submit: Mutex<()>,
     next_fence_id: AtomicU64,
     next_resource: AtomicU32,
-    /// The device's fence domain and its context for fenced requests, set
-    /// once the DRM device exists.
-    domain: Mutex<Option<KArc<FenceDomain>>>,
+    /// The fence context of fenced requests outside a ring, set once the
+    /// DRM device exists. The fence domain itself is the DRM device's and is
+    /// passed in by the ioctls: a reference kept here would make the core's
+    /// detach check find the domain still in use.
     fence_context: AtomicU64,
     /// Capability set contents, fetched on first use.
     capset_cache: Mutex<Vec<(u32, u32, Vec<u8>)>>,
@@ -438,7 +439,6 @@ impl Gpu {
             submit: Mutex::new(()),
             next_fence_id: AtomicU64::new(0),
             next_resource: AtomicU32::new(0),
-            domain: Mutex::new(None),
             fence_context: AtomicU64::new(0),
             capset_cache: Mutex::new(Vec::new()),
             files: Mutex::new(BTreeMap::new()),
@@ -460,15 +460,10 @@ impl Gpu {
         self.caps.lock().virgl
     }
 
-    /// Connects the device's fence domain, once the DRM device exists.
-    pub fn set_domain(&self, domain: KArc<FenceDomain>) {
+    /// Takes the fence context of fenced requests from the DRM device's
+    /// fence domain, once the device exists.
+    pub fn set_fence_context(&self, domain: &FenceDomain) {
         self.fence_context.store(domain.alloc_contexts(1), Ordering::Release);
-        *self.domain.lock() = Some(domain);
-    }
-
-    /// The fence domain.
-    pub fn domain(&self) -> Result<KArc<FenceDomain>, Errno> {
-        self.domain.lock().clone().ok_or(Errno::ENXIO)
     }
 
     /// The fence context of fenced requests outside a ring.
@@ -541,14 +536,13 @@ impl Gpu {
         &self,
         dev: &Dev,
         cmd: &KArc<Cmd>,
-        fence: Option<FenceReq>,
+        fence: Option<(FenceReq, &KArc<FenceDomain>)>,
         ctx: &Sleepable,
     ) -> Result<Option<Fence>, Errno> {
         let queue = dev.queue(self.queue_id(cmd.queue)).ok_or(Errno::ENXIO)?;
         let _g = self.submit.lock();
         let mut out = None;
-        if let Some(fr) = fence {
-            let domain = self.domain()?;
+        if let Some((fr, domain)) = fence {
             let id = self.next_fence_id.fetch_add(1, Ordering::AcqRel) + 1;
             let mut hdr: CtrlHdr = {
                 let mut b = [0u8; size_of::<CtrlHdr>()];
@@ -562,7 +556,7 @@ impl Gpu {
                 hdr.ring_idx = r;
             }
             cmd.buf.write(0, proto::bytes_of(&hdr))?;
-            let f = Fence::new(&domain, fr.context, id, ctx)?;
+            let f = Fence::new(domain, fr.context, id, ctx)?;
             *cmd.fence.lock() = Some(f.clone());
             out = Some(f);
             self.stats.fenced.fetch_add(1, Ordering::Relaxed);
@@ -796,9 +790,15 @@ impl Gpu {
     /// the context of `file` and creates it, all under the context lock,
     /// so that of two concurrent calls the second finds the context and
     /// fails with `EEXIST`, as Linux's `context_lock` makes it.
-    pub fn init_context(&self, dev: &Dev, file: CloneId, p: &ContextParams, ctx: &Sleepable) -> Result<(), Errno> {
+    pub fn init_context(
+        &self,
+        dev: &Dev,
+        file: CloneId,
+        p: &ContextParams,
+        domain: &FenceDomain,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
         let id = Self::ctx_id(file);
-        let domain = self.domain()?;
         let _g = self.ctx_lock.lock();
         {
             let mut files = self.files.lock();
