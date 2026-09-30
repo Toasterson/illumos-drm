@@ -38,9 +38,45 @@
 
 #include "drm.h"
 
-#define	CARD	"/dev/dri/card0"
-#define	RENDER	"/dev/dri/renderD128"
-#define	BUSID	"pseudo:rdrmnull@0"
+/*
+ * The nodes under test. Device numbers are shared by every DRM driver
+ * (misc/drm_minor), so rdrmnull's devices are card<N> and renderD<128+N>
+ * for whatever N they were given; the run scripts pass them in DRM_CARD
+ * and DRM_RENDER, and the driver instance (for the kstats and the bus ID) in
+ * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.
+ */
+static const char *card_path __attribute__((unused)) = "/dev/dri/card0";
+static const char *render_path __attribute__((unused)) = "/dev/dri/renderD128";
+static int drm_instance __attribute__((unused));
+static char busid_str[32] = "pseudo:rdrmnull@0";
+
+static void nodes_from_env(void) __attribute__((constructor));
+static void
+nodes_from_env(void)
+{
+	const char *s;
+
+	if ((s = getenv("DRM_CARD")) != NULL && *s != '\0')
+		card_path = s;
+	if ((s = getenv("DRM_RENDER")) != NULL && *s != '\0')
+		render_path = s;
+	if ((s = getenv("DRM_INSTANCE")) != NULL && *s != '\0')
+		drm_instance = atoi(s);
+	(void) snprintf(busid_str, sizeof (busid_str), "pseudo:rdrmnull@%d", drm_instance);
+}
+
+#define	CARD	card_path
+#define	RENDER	render_path
+#define	BUSID	busid_str
+
+/* The minor of the render node under test, for drmOpenRender(). */
+static int __attribute__((unused))
+render_minor(void)
+{
+	const char *d = strrchr(render_path, 'D');
+
+	return (d != NULL ? atoi(d + 1) : 128);
+}
 #define	NOBODY	60001
 
 static int failures;
@@ -67,7 +103,7 @@ main(void)
 	struct drm_get_cap cap;
 	int fd = open(CARD, O_RDWR);
 
-	check(fd >= 0, "32-bit open " CARD);
+	check(fd >= 0, "32-bit open of the card node");
 	if (fd < 0)
 		return (1);
 	(void) memset(&v, 0, sizeof (v));
@@ -218,7 +254,7 @@ auth_client(int to_parent, int from_parent)
 
 	drop_to_nobody();
 	fd = open(CARD, O_RDWR);
-	check(fd >= 0, "nobody: open " CARD);
+	check(fd >= 0, "nobody: open the card node");
 	if (fd < 0)
 		exit(failures);
 	print_minor("nobody card0 client", fd);
@@ -239,8 +275,8 @@ auth_client(int to_parent, int from_parent)
 	(void) close(fd);
 
 	/* Render node as nobody: no authentication, no master, no magic. */
-	fd = drmOpenRender(128);
-	check(fd >= 0, "nobody: drmOpenRender(128)");
+	fd = drmOpenRender(render_minor());
+	check(fd >= 0, "nobody: drmOpenRender(render node)");
 	if (fd >= 0) {
 		print_minor("nobody renderD128", fd);
 		test_version(fd, "renderD128 as nobody");
@@ -381,20 +417,38 @@ main(int argc, char **argv)
 	if (argc == 3 && strcmp(argv[1], "hold") == 0)
 		return (hold(argv[2]));
 
-	/* drmOpen by name: first primary open, so this file is master. */
+	/*
+	 * drmOpen by name: the first rdrmnull card without a bus ID, opened
+	 * first, so this file is master. That is the device under test unless
+	 * another rdrmnull device has a lower number; then the test opens its
+	 * own card node, again as the first open.
+	 */
+	(void) printf("INFO nodes under test: %s %s, instance %d, bus ID %s\n", CARD, RENDER, drm_instance, BUSID);
 	fd = drmOpen("rdrmnull", NULL);
 	check(fd >= 0, "drmOpen(\"rdrmnull\", NULL) as root");
 	if (fd < 0)
 		return (1);
-	master_fd = fd;
-	print_minor("root card0 master", fd);
+	print_minor("drmOpen", fd);
 	{
 		char *name = drmGetDeviceNameFromFd(fd);
+		struct stat fst, nst;
 		(void) printf("INFO drmGetDeviceNameFromFd: %s\n", name ? name : "(null)");
-		check(name != NULL && strcmp(name, CARD) == 0,
-		    "drmGetDeviceNameFromFd strips the clone bits and finds " CARD);
+		check(name != NULL && fstat(fd, &fst) == 0 && stat(name, &nst) == 0 &&
+		    major(nst.st_rdev) == major(fst.st_rdev) &&
+		    minor(nst.st_rdev) == (minor(fst.st_rdev) & ~0x3fe00),
+		    "drmGetDeviceNameFromFd strips the clone bits and finds the node of the file");
+		if (name != NULL && strcmp(name, CARD) != 0) {
+			(void) printf("INFO drmOpen found %s first; the device under test is %s\n", name, CARD);
+			(void) close(fd);
+			fd = open(CARD, O_RDWR);
+			check(fd >= 0, "root: open the card node under test");
+			if (fd < 0)
+				return (1);
+		}
 		free(name);
 	}
+	master_fd = fd;
+	print_minor("root card master", fd);
 	test_version(fd, "card0 as root");
 	test_caps(fd, "card0 as root");
 	test_client_caps(fd);
@@ -418,7 +472,7 @@ main(int argc, char **argv)
 	    "drmSetInterfaceVersion 2.0 is EINVAL and reports 1.4");
 	busid = drmGetBusid(fd);
 	(void) printf("INFO busid \"%s\"\n", busid ? busid : "(null)");
-	check(busid != NULL && strcmp(busid, BUSID) == 0, "GET_UNIQUE reports " BUSID " after SET_VERSION 1.4");
+	check(busid != NULL && strcmp(busid, BUSID) == 0, "GET_UNIQUE reports the bus ID after SET_VERSION 1.4");
 	drmFreeBusid(busid);
 	errno = 0;
 	check(is_err(drmSetBusid(fd, "pci:0000:00:02.0"), EINVAL), "SET_UNIQUE with a foreign bus ID is EINVAL");
@@ -431,9 +485,22 @@ main(int argc, char **argv)
 		errno = 0;
 		check(ioctl(fd, _IOWR('d', 0x99, struct drm_version), buf) == -1 && errno == ENOTTY,
 		    "unknown DRM ioctl 0x99 is ENOTTY");
+		/*
+		 * Another size of a core command is the same command, copied with
+		 * Linux's drm_ioctl() size rule: a 36-byte VERSION is served
+		 * zero-extended (name_len and the rest arrive as 0) and 36 bytes
+		 * come back; another direction is ENOTTY.
+		 */
+		int vmajor = 0;
+		(void) memset(buf, 0x5a, sizeof (buf));
+		(void) memset(buf, 0, 36);
+		check(ioctl(fd, _IOWR('d', 0x00, char[36]), buf) == 0 &&
+		    memcpy(&vmajor, buf, sizeof (vmajor)) != NULL && vmajor == 1 &&
+		    (unsigned char)buf[36] == 0x5a && (unsigned char)buf[63] == 0x5a,
+		    "DRM_IOCTL_VERSION with a 36-byte size is served, 36 bytes copied back");
 		errno = 0;
-		check(ioctl(fd, _IOWR('d', 0x00, char[36]), buf) == -1 && errno == ENOTTY,
-		    "DRM_IOCTL_VERSION with a 36-byte (ILP32) size is ENOTTY");
+		check(ioctl(fd, _IOR('d', 0x00, struct drm_version), buf) == -1 && errno == ENOTTY,
+		    "DRM_IOCTL_VERSION as _IOR (another direction) is ENOTTY");
 		errno = 0;
 		(void) memset(buf, 0, sizeof (buf));
 		check(ioctl(fd, DRM_IOCTL_GEM_CLOSE, buf) == -1 && errno == EINVAL,
@@ -465,7 +532,7 @@ main(int argc, char **argv)
 
 	/* Master hand-over between two root files. */
 	fd2 = open(CARD, O_RDWR);
-	check(fd2 >= 0, "root: second open of " CARD);
+	check(fd2 >= 0, "root: second open of the card node");
 	errno = 0;
 	check(is_err(drmSetMaster(fd2), EBUSY), "second file: drmSetMaster while another is master is EBUSY");
 	check(drmDropMaster(fd) == 0, "master: drmDropMaster");
@@ -481,8 +548,8 @@ main(int argc, char **argv)
 	(void) close(fd2);
 
 	/* Render node as root. */
-	rfd = drmOpenRender(128);
-	check(rfd >= 0, "root: drmOpenRender(128)");
+	rfd = drmOpenRender(render_minor());
+	check(rfd >= 0, "root: drmOpenRender(render node)");
 	if (rfd >= 0) {
 		print_minor("root renderD128", rfd);
 		test_version(rfd, "renderD128 as root");

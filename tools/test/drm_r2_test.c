@@ -59,9 +59,37 @@
 #include "drm.h"
 #include "drm_mode.h"
 
-#define	CARD	"/dev/dri/card0"
-#define	RENDER	"/dev/dri/renderD128"
-#define	CARD1	"/dev/dri/card1"
+/*
+ * The nodes under test. Device numbers are shared by every DRM driver
+ * (misc/drm_minor), so rdrmnull's devices are card<N> and renderD<128+N>
+ * for whatever N they were given; the run scripts pass them in DRM_CARD
+ * and DRM_RENDER (DRM_CARD1 for the second device), and the driver instance (for the kstats) in
+ * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.
+ */
+static const char *card_path __attribute__((unused)) = "/dev/dri/card0";
+static const char *render_path __attribute__((unused)) = "/dev/dri/renderD128";
+static const char *card1_path __attribute__((unused)) = "/dev/dri/card1";
+static int drm_instance __attribute__((unused));
+
+static void nodes_from_env(void) __attribute__((constructor));
+static void
+nodes_from_env(void)
+{
+	const char *s;
+
+	if ((s = getenv("DRM_CARD")) != NULL && *s != '\0')
+		card_path = s;
+	if ((s = getenv("DRM_RENDER")) != NULL && *s != '\0')
+		render_path = s;
+	if ((s = getenv("DRM_CARD1")) != NULL && *s != '\0')
+		card1_path = s;
+	if ((s = getenv("DRM_INSTANCE")) != NULL && *s != '\0')
+		drm_instance = atoi(s);
+}
+
+#define	CARD	card_path
+#define	RENDER	render_path
+#define	CARD1	card1_path
 
 /* The test ioctls of rdrmnull (examples/rdrmnull/src/lib.rs). */
 struct rdrmnull_fence {
@@ -160,7 +188,7 @@ main(void)
 	struct drm_prime_handle ph;
 	int fd = open(RENDER, O_RDWR);
 
-	check(fd >= 0, "32-bit open " RENDER);
+	check(fd >= 0, "32-bit open of the render node");
 	if (fd < 0)
 		return (1);
 	(void) memset(&sc, 0, sizeof (sc));
@@ -209,7 +237,7 @@ kstat_values(const char *name, const char *const *keys, uint64_t *out, int n)
 
 	if (kc == NULL)
 		return (-1);
-	ks = kstat_lookup(kc, "rdrmnull", 0, (char *)name);
+	ks = kstat_lookup(kc, "rdrmnull", drm_instance, (char *)name);
 	if (ks == NULL || kstat_read(kc, ks, NULL) == -1) {
 		(void) kstat_close(kc);
 		return (-1);
@@ -1435,7 +1463,7 @@ test_two_devices(int card)
 	struct drm_prime_handle ph;
 
 	if (c1 < 0) {
-		(void) printf("INFO no " CARD1 ": cross-device checks skipped\n");
+		(void) printf("INFO no %s: cross-device checks skipped\n", CARD1);
 		return;
 	}
 	h = dumb(card, 64, 64, NULL);

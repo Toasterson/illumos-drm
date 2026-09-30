@@ -10,6 +10,9 @@
 #
 #   pkgsend publish -s <repo> -d <proto> -d . packaging/virtio-gpu.p5m
 #
+# The module is linked with -N misc/drm_minor, so the package depends on
+# driver/graphics/drm-minor (packaging/drm-minor.p5m), which delivers it.
+#
 # The driver action binds the module to the modern virtio-gpu PCI function
 # (1af4:1050) and gives the card and render nodes mode 0666, as other DRM
 # drivers on OpenIndiana have. The devlink attribute makes devfsadm create
@@ -35,4 +38,5 @@ dir  path=kernel/drv/amd64 owner=root group=sys mode=0755
 file path=kernel/drv/amd64/virtio_gpu owner=root group=sys mode=0755 reboot-needed=true
 driver name=virtio_gpu alias=pci1af4,1050 perms="* 0666 root sys" \
     devlink=type=ddi_display:drm;name=virtio_gpu\tdri/\M0
+depend fmri=pkg:/driver/graphics/drm-minor@0.0.1 type=require
 license LICENSE license=MPL-2.0
