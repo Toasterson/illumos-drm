@@ -127,6 +127,44 @@ pub fn is_kms_nr(cmd: u32) -> bool {
 mod tests {
     use super::*;
 
+    /// The size of the structure each handler of `kms::dev` reads and
+    /// writes (the no-op `MODESET_CTL`, `ATTACHMODE` and `DETACHMODE` read
+    /// nothing; their commands' structures are named). Exhaustive, so a new
+    /// operation must name its structure here.
+    fn handler_size(op: KmsOp) -> usize {
+        use core::mem::size_of;
+        match op {
+            KmsOp::ModesetCtl => size_of::<uapi::drm_modeset_ctl>(),
+            KmsOp::AttachMode | KmsOp::DetachMode => size_of::<uapi::drm_mode_mode_cmd>(),
+            KmsOp::WaitVblank => size_of::<uapi::drm_wait_vblank>(),
+            KmsOp::CrtcGetSequence => size_of::<uapi::drm_crtc_get_sequence>(),
+            KmsOp::CrtcQueueSequence => size_of::<uapi::drm_crtc_queue_sequence>(),
+            KmsOp::GetResources => size_of::<uapi::drm_mode_card_res>(),
+            KmsOp::GetCrtc | KmsOp::SetCrtc => size_of::<uapi::drm_mode_crtc>(),
+            KmsOp::Cursor => size_of::<uapi::drm_mode_cursor>(),
+            KmsOp::Cursor2 => size_of::<uapi::drm_mode_cursor2>(),
+            KmsOp::GetGamma | KmsOp::SetGamma => size_of::<uapi::drm_mode_crtc_lut>(),
+            KmsOp::GetEncoder => size_of::<uapi::drm_mode_get_encoder>(),
+            KmsOp::GetConnector => size_of::<uapi::drm_mode_get_connector>(),
+            KmsOp::GetProperty => size_of::<uapi::drm_mode_get_property>(),
+            KmsOp::SetProperty => size_of::<uapi::drm_mode_connector_set_property>(),
+            KmsOp::GetPropBlob => size_of::<uapi::drm_mode_get_blob>(),
+            KmsOp::GetFb | KmsOp::AddFb => size_of::<uapi::drm_mode_fb_cmd>(),
+            KmsOp::GetFb2 | KmsOp::AddFb2 => size_of::<uapi::drm_mode_fb_cmd2>(),
+            KmsOp::RmFb => size_of::<u32>(),
+            KmsOp::PageFlip => size_of::<uapi::drm_mode_crtc_page_flip>(),
+            KmsOp::DirtyFb => size_of::<uapi::drm_mode_fb_dirty_cmd>(),
+            KmsOp::GetPlaneResources => size_of::<uapi::drm_mode_get_plane_res>(),
+            KmsOp::GetPlane => size_of::<uapi::drm_mode_get_plane>(),
+            KmsOp::SetPlane => size_of::<uapi::drm_mode_set_plane>(),
+            KmsOp::ObjGetProperties => size_of::<uapi::drm_mode_obj_get_properties>(),
+            KmsOp::ObjSetProperty => size_of::<uapi::drm_mode_obj_set_property>(),
+            KmsOp::Atomic => size_of::<uapi::drm_mode_atomic>(),
+            KmsOp::CreatePropBlob => size_of::<uapi::drm_mode_create_blob>(),
+            KmsOp::DestroyPropBlob => size_of::<uapi::drm_mode_destroy_blob>(),
+        }
+    }
+
     #[test]
     fn table() {
         for (i, x) in TABLE.iter().enumerate() {
@@ -141,8 +179,11 @@ mod tests {
                 x.op
             );
             assert!(!x.perm.render_allow && !x.perm.auth && !x.perm.root_only);
-            // Its size is in the command exactly (below 256 bytes).
-            assert!(ioc::ioc_size(x.cmd) < 256, "{:?}", x.op);
+            // The handler's structure is below 256 bytes and is the size
+            // the command carries (see crate::ioctl).
+            let size = handler_size(x.op);
+            assert!(size < 256, "{:?}: {size} bytes", x.op);
+            assert_eq!(ioc::ioc_size(x.cmd), size, "{:?}", x.op);
             // Any size of the command finds it; another direction does not.
             for size in [0, 4, 255] {
                 assert_eq!(lookup(ioc::with_size(x.cmd, size)).map(|e| e.op), Some(x.op));

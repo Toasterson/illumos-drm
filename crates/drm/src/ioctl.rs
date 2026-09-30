@@ -35,10 +35,10 @@
 //!
 //! The illumos `_IOWR` encoding keeps only the low eight bits of the size,
 //! so a caller's size is known exactly only below 256 bytes; every core
-//! and mode-setting structure is smaller than that (the tests check the
-//! table), and a command that carries a size of 256 bytes or more
-//! arrives with its size modulo 256, which is then what is copied, as the
-//! C macros encoded it.
+//! and mode-setting structure is smaller than that (the tests check each
+//! handler's structure against its command), and a caller's structure of
+//! 256 bytes or more arrives with its size modulo 256, which is then what
+//! is copied, as the C macros encoded it.
 //!
 //! Driver-private commands keep the exact match on the complete value
 //! ([`lookup_driver`]); a driver that accepts several sizes of a structure
@@ -480,25 +480,50 @@ mod tests {
         assert_eq!(assemble_out(&p, &[0u8; 16], &[0u8; 8], &mut [0u8; 23]), None);
     }
 
-    #[test]
-    fn structures_fit_the_size_field() {
-        // Commands carry at most 255 bytes of size; every structure of the
-        // table must be smaller than 256 bytes so that its own command
-        // carries its size exactly. The generated numbers come from gcc's
-        // _IOWR, so a larger structure would show up here as a size that
-        // disagrees with the layout table of drm-uapi.
-        for e in TABLE {
-            assert!(ioc::ioc_size(e.cmd) < 256, "{:?}", e.op);
+    /// The size of the structure each handler reads and writes
+    /// (`UserArg::<T>` in `device.rs`, `prime.rs`, `syncobj_ioctl.rs`), 0
+    /// for the `_IO` commands. The match is exhaustive, so a new operation
+    /// must name its structure here.
+    fn handler_size(op: Op) -> usize {
+        use core::mem::size_of;
+        match op {
+            Op::Version => size_of::<uapi::drm_version>(),
+            Op::GetUnique | Op::SetUnique => size_of::<uapi::drm_unique>(),
+            Op::GetMagic | Op::AuthMagic => size_of::<uapi::drm_auth>(),
+            Op::GetClient => size_of::<uapi::drm_client>(),
+            Op::SetVersion => size_of::<uapi::drm_set_version>(),
+            Op::GetCap => size_of::<uapi::drm_get_cap>(),
+            Op::SetClientCap => size_of::<uapi::drm_set_client_cap>(),
+            Op::SetMaster | Op::DropMaster => 0,
+            Op::GemClose => size_of::<uapi::drm_gem_close>(),
+            Op::GemFlink => size_of::<uapi::drm_gem_flink>(),
+            Op::GemOpen => size_of::<uapi::drm_gem_open>(),
+            Op::CreateDumb => size_of::<uapi::drm_mode_create_dumb>(),
+            Op::MapDumb => size_of::<uapi::drm_mode_map_dumb>(),
+            Op::DestroyDumb => size_of::<uapi::drm_mode_destroy_dumb>(),
+            Op::PrimeHandleToFd | Op::PrimeFdToHandle => size_of::<uapi::drm_prime_handle>(),
+            Op::SyncobjCreate => size_of::<uapi::drm_syncobj_create>(),
+            Op::SyncobjDestroy => size_of::<uapi::drm_syncobj_destroy>(),
+            Op::SyncobjHandleToFd | Op::SyncobjFdToHandle => size_of::<uapi::drm_syncobj_handle>(),
+            Op::SyncobjWait => size_of::<uapi::drm_syncobj_wait>(),
+            Op::SyncobjReset | Op::SyncobjSignal => size_of::<uapi::drm_syncobj_array>(),
+            Op::SyncobjTimelineWait => size_of::<uapi::drm_syncobj_timeline_wait>(),
+            Op::SyncobjQuery | Op::SyncobjTimelineSignal => size_of::<uapi::drm_syncobj_timeline_array>(),
+            Op::SyncobjTransfer => size_of::<uapi::drm_syncobj_transfer>(),
         }
-        let sizes = [
-            (uapi::DRM_IOCTL_VERSION, core::mem::size_of::<uapi::drm_version>()),
-            (uapi::DRM_IOCTL_SYNCOBJ_WAIT, core::mem::size_of::<uapi::drm_syncobj_wait>()),
-            (uapi::DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, core::mem::size_of::<uapi::drm_syncobj_timeline_wait>()),
-            (uapi::DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, core::mem::size_of::<uapi::drm_syncobj_handle>()),
-            (uapi::DRM_IOCTL_MODE_CREATE_DUMB, core::mem::size_of::<uapi::drm_mode_create_dumb>()),
-        ];
-        for (cmd, size) in sizes {
-            assert_eq!(ioc::ioc_size(cmd), size);
+    }
+
+    #[test]
+    fn handler_structures_match_their_commands() {
+        // The size bits of a command are the size of its structure modulo
+        // 256. Every handler's structure must be below 256 bytes and have
+        // exactly the size its table command carries, or uaccess::CoreArg
+        // would refuse every call to it (EINVAL) and a caller's size could
+        // not be told from the command.
+        for e in TABLE {
+            let size = handler_size(e.op);
+            assert!(size < 256, "{:?}: {size} bytes", e.op);
+            assert_eq!(ioc::ioc_size(e.cmd), size, "{:?}", e.op);
         }
     }
 

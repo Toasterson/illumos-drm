@@ -303,7 +303,7 @@ waits(int fd)
 	n.deadline_nsec = 1;
 	en = xioctl(fd, sized(DRM_IOCTL_SYNCOBJ_WAIT, 40), &n);
 	check(en == EINVAL, "WAIT_FLAGS_WAIT_DEADLINE is an unknown flag (EINVAL), as before Linux had it");
-	/* A shorter caller, 24 bytes: no flags, no first_signaled back. */
+	/* A shorter caller, 24 bytes: first_signaled and pad are zero-extended. */
 	{
 		unsigned char buf[40];
 
@@ -314,7 +314,7 @@ waits(int fd)
 		(void) memcpy(buf, &o, 24);
 		en = xioctl(fd, sized(DRM_IOCTL_SYNCOBJ_WAIT, 24), buf);
 		check(en == 0 && buf[24] == 0xee && buf[31] == 0xee && buf[39] == 0xee,
-		    "WAIT at 24 bytes: flags zero-extended, first_signaled not copied back");
+		    "WAIT at 24 bytes: first_signaled and pad zero-extended, not copied back");
 	}
 	/* Another direction is another command. */
 	SETW(o, 0, 0);

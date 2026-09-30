@@ -196,12 +196,6 @@ impl<D: Driver> Device<D> {
                 return Err(DdiError);
             }
         };
-        if let Some(g) = &gem
-            && !registry::insert(index, &**g)
-        {
-            dev.warn(format_args!("device {index} is registered twice"));
-            return Err(DdiError);
-        }
         let kms = match driver.kms() {
             Some(k) if gem.is_some() && D::FEATURES.contains(Features::MODESET) => {
                 let modifiers = D::MODE_CONFIG.fb_modifiers;
@@ -219,6 +213,20 @@ impl<D: Driver> Device<D> {
             }
             None => None,
         };
+        // The devmap callbacks find the GEM state through this registry.
+        // Recording it is the last step that can fail, so that no failed
+        // attach leaves an entry behind: the device number is the lowest
+        // free one of the system, and the next attach of this driver would
+        // usually be handed the same number and find the entry taken.
+        if let Some(g) = &gem
+            && !registry::insert(index, &**g)
+        {
+            dev.warn(format_args!("device {index} is registered twice"));
+            if let Some(k) = &kms {
+                k.teardown(ctx);
+            }
+            return Err(DdiError);
+        }
         dev.report();
         Ok(Device {
             driver,

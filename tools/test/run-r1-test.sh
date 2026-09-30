@@ -280,8 +280,8 @@ if [ $fail -eq 0 ]; then
 		echo "FAIL modunload failed after the file was closed"
 		fail=1
 	fi
-	wait_log "detach cancelled 1 pending test fences" "$cancels"
 	if [ $R2 = yes ]; then
+		wait_log "detach cancelled 1 pending test fences" "$cancels"
 		if [ "$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)" -gt "$cancels" ]; then
 			echo "PASS the detach cancelled the pending fence"
 		else

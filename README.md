@@ -423,7 +423,13 @@ A device's `/dev/dri` links outlive a detach (until `devfsadm -C`), and
 opening one attaches the device again through devfs, which then takes the
 lowest free number: its old one unless another device took it in the
 meantime, in which case the link names a minor node that no longer
-exists.
+exists. The same holds when the system detaches idle devices on its own
+(the drivers do not set `ddi-no-autodetach`): if two idle devices are
+detached and come back in the other order, their numbers are swapped
+until devfsadm renews the links. Linux numbers devices once per driver
+bind as well; a stable name for a particular device is its
+`/devices` path (libdrm's `drmGetDevice2` reports it), not `card<N>`.
+Whether the drivers should keep their devices attached is open.
 
 **GEM objects and references (R1).** A driver's buffer type implements
 `drm::gem::GemObject` (size, the `ddi_umem` cookie its mappings show,
@@ -717,7 +723,8 @@ for every table entry, direction and size; `drm::uaccess::CoreArg` applies
 it), where it used to match the complete command value and answer any
 other size with `ENOTTY`. The size field of an illumos command has eight
 bits, so a size is known exactly below 256 bytes; every core and
-mode-setting structure is smaller (the tests check it). What stays
+mode-setting structure is smaller (the tests check each handler's
+structure against the size its command carries). What stays
 different from Linux: a command must have the table's direction (Linux
 uses the intersection of both, here another direction is `ENOTTY`), an
 unused number is `ENOTTY` (Linux: `EINVAL`), the handlers copy their
