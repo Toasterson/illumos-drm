@@ -156,7 +156,9 @@ X yet, because OpenIndiana's Xorg 1.19.7 is built without glamor, and it
 needs a workaround for libdrm's device enumeration (see *R4: Mesa*).
 The guest's disk is a transitional virtio-blk device (`disable-modern=on`),
 because illumos bug 18358, fixed after `cda5b9a49f`, makes the virtio
-framework map the wrong BAR for the second modern device.
+framework map the wrong BAR for the second modern device. A last run
+with the final code, including the close of a file that set a cursor on
+a dark CRTC, passed all of the above again.
 
 ## What is in the repository
 
