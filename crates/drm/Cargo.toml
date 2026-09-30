@@ -22,8 +22,11 @@ panic-drill = []
 # docs/anon-fd.md).
 ddi = { workspace = true, features = ["unstable-gate-cda5b9a49f"] }
 drm-uapi.workspace = true
+# The device numbers shared by every driver module (misc/drm_minor); this
+# dependency gives each driver its -N misc/drm_minor.
+drm-minor-sys.workspace = true
 
 [package.metadata.kmod]
-# The core is a library linked into each driver module; it needs nothing
-# beyond genunix and unix.
+# The core is a library linked into each driver module; its own symbols
+# need nothing beyond genunix and unix (drm-minor-sys brings misc/drm_minor).
 depends = []

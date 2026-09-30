@@ -82,26 +82,78 @@ pub struct Device<D: Driver> {
     // Dropping these removes the minor nodes.
     _card: MinorNode,
     _render: Option<MinorNode>,
+    // The device number goes back last, after the nodes that carry it.
+    _number: Number,
+}
+
+/// A device number from `misc/drm_minor`, recorded as this module's
+/// instance's (`minor::bind`); dropping it forgets the instance and gives
+/// the number back.
+struct Number {
+    index: u32,
+    inst: Instance,
+    /// The owner token, the device's `dev_info_t`.
+    owner: usize,
+}
+
+impl Number {
+    /// Takes the lowest free device number of the system for `dev`.
+    fn claim(dev: &DevInfo) -> Result<Number, DdiError> {
+        let owner = dev.as_raw() as usize;
+        // SAFETY: drm_minor_alloc treats the pointer as an opaque token and
+        // may be called from any context; the -N misc/drm_minor dependency
+        // keeps the module loaded while this one is.
+        let id = unsafe { drm_minor_sys::drm_minor_alloc(owner as *const core::ffi::c_void) };
+        let Some(index) = u32::try_from(id).ok().filter(|i| *i < MAX_DEVICES) else {
+            if id >= 0 {
+                // A number this core cannot use; give it back.
+                // SAFETY: as above; id was just allocated for owner.
+                unsafe { drm_minor_sys::drm_minor_free(id, owner as *const core::ffi::c_void) };
+            }
+            dev.warn(format_args!("all {MAX_DEVICES} DRM device numbers are in use"));
+            return Err(DdiError);
+        };
+        let n = Number { index, inst: dev.instance(), owner };
+        if !minor::bind(index, n.inst) {
+            // Unreachable while misc/drm_minor hands each number to one
+            // device; refuse rather than share a number.
+            dev.warn(format_args!("device number {index} is already recorded in this driver"));
+            // SAFETY: as above.
+            unsafe { drm_minor_sys::drm_minor_free(id, owner as *const core::ffi::c_void) };
+            return Err(DdiError);
+        }
+        Ok(n)
+    }
+}
+
+impl Drop for Number {
+    fn drop(&mut self) {
+        minor::unbind(self.index, self.inst);
+        // SAFETY: the number was allocated for this owner in claim. A
+        // refusal is logged by drm_minor and changes nothing.
+        unsafe {
+            drm_minor_sys::drm_minor_free(self.index as core::ffi::c_int, self.owner as *const core::ffi::c_void)
+        };
+    }
 }
 
 impl<D: Driver> Device<D> {
     /// Registers a device for the driver instance `node`, the capability for
     /// the driver's own node that `ddi::Driver::attach` received; the GEM
-    /// state keeps it to allocate DMA handles. Creates the
-    /// primary node `card<N>` and, if the driver has [`Features::RENDER`],
-    /// the render node `renderD<128+N>`, where `N` is the instance number.
+    /// state keeps it to allocate DMA handles. Takes the lowest free device
+    /// number `N` of the system from `misc/drm_minor`, shared by every
+    /// driver built on the core, and creates the primary node `card<N>`
+    /// and, if the driver has [`Features::RENDER`], the render node
+    /// `renderD<128+N>`. The number stays the device's until it detaches.
     /// Both nodes have the node type `ddi_display:drm`
     /// (`DDI_NT_DISPLAY_DRM`), for which devfsadm creates the `/dev/dri`
     /// links (see `packaging/devlink.tab`).
     pub fn attach(node: OwnNode, driver: D, ctx: &Sleepable) -> Result<Device<D>, DdiError> {
         let dev = node.dev();
-        let Some(index) = u32::try_from(dev.instance().0).ok().filter(|i| *i < MAX_DEVICES) else {
-            dev.warn(format_args!(
-                "instance {} is above the {MAX_DEVICES} DRM devices a driver can have",
-                dev.instance().0
-            ));
-            return Err(DdiError);
-        };
+        // Taken first and dropped last: every early return below gives it
+        // back after the nodes are gone.
+        let number = Number::claim(&dev)?;
+        let index = number.index;
         let mut bus_id = BusId::new();
         if driver.bus_id(&dev, &mut bus_id).is_err() {
             dev.warn(format_args!("bus ID does not fit in {BUS_ID_MAX} bytes"));
@@ -180,6 +232,7 @@ impl<D: Driver> Device<D> {
             sync,
             _card: card,
             _render: render,
+            _number: number,
         })
     }
 

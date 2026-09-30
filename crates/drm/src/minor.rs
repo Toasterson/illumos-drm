@@ -4,11 +4,21 @@
 
 //! The minor number layout of DRM devices.
 //!
-//! Device `N` (the instance number of the driver) has two minor nodes: the
-//! primary node `cardN` with node minor `N`, and the render node
-//! `renderD(128+N)` with node minor `128 + N`, the numbering Linux uses and
-//! Mesa's loader expects. Node minors occupy the low nine bits, as in the
-//! gfx-drm driver (`DRM_MINOR_NBITS`).
+//! Device `N` has two minor nodes: the primary node `cardN` with node
+//! minor `N`, and the render node `renderD(128+N)` with node minor
+//! `128 + N`, the numbering Linux uses and Mesa's loader expects. Node
+//! minors occupy the low nine bits, as in the gfx-drm driver
+//! (`DRM_MINOR_NBITS`).
+//!
+//! `N`, the device number, is not the driver's instance number: every
+//! device of every driver built on the core takes the lowest free number
+//! from the one table of the kernel module `misc/drm_minor`
+//! (`drm-minor-sys`) when it attaches and gives it back when it detaches,
+//! so that `rdrmnull` and `virtio_gpu`, which link separate copies of this
+//! crate, never both name a device `card0`. Each driver module records
+//! which of its instances holds which number ([`bind`]), so that
+//! [`instance_of_minor`] can map a minor number back to the instance for
+//! `getinfo(9E)` and the entry points.
 //!
 //! Every open is a clone open: the driver gives the new file its own minor
 //! number, with a clone id from 1 to 511 in bits 9 to 17 above the node
@@ -18,6 +28,8 @@
 //! which is why the clone id is limited to nine bits and a device can have
 //! at most [`MAX_FILES`] open files at a time. Clone id 0 is never used, so
 //! a file's device number never equals that of the node itself.
+
+use core::sync::atomic::{AtomicI32, Ordering};
 
 use ddi::{Instance, Minor};
 
@@ -31,7 +43,8 @@ pub const CLONE_MASK: u32 = ((1 << CLONE_BITS) - 1) << NODE_BITS;
 pub const MAX_FILES: u32 = (1 << CLONE_BITS) - 1;
 /// The first node minor of render nodes.
 pub const RENDER_BASE: u32 = 128;
-/// The number of devices one driver can register (instances 0 to 63).
+/// The number of DRM devices on the system, of all drivers together
+/// (device numbers 0 to 63, `misc/drm_minor`).
 pub const MAX_DEVICES: u32 = 64;
 
 /// The kind of a minor node.
@@ -67,7 +80,8 @@ impl CloneId {
 pub struct Decoded {
     /// Which node the minor number belongs to.
     pub kind: NodeKind,
-    /// The device index, which is the driver instance number.
+    /// The device number (not the driver instance number; see the module
+    /// documentation).
     pub index: u32,
     /// The clone id of an open file, or `None` for the node itself.
     pub clone: Option<CloneId>,
@@ -112,13 +126,37 @@ pub const fn decode(minor: u32) -> Option<Decoded> {
     }
 }
 
+/// The instance of this driver module that holds each device number, or
+/// -1. Each driver module has its own copy (the core is linked into each),
+/// and a number is held by at most one device on the system.
+static INSTANCES: [AtomicI32; MAX_DEVICES as usize] = [const { AtomicI32::new(-1) }; MAX_DEVICES as usize];
+
+/// Records that device number `index` belongs to instance `inst` of this
+/// driver. `false`, and no change, if `index` is out of range, `inst` is
+/// negative or the number is already recorded.
+pub fn bind(index: u32, inst: Instance) -> bool {
+    let Some(slot) = INSTANCES.get(index as usize) else { return false };
+    inst.0 >= 0 && slot.compare_exchange(-1, inst.0, Ordering::AcqRel, Ordering::Relaxed).is_ok()
+}
+
+/// Forgets that device number `index` belongs to instance `inst`; `false`,
+/// and no change, if it does not.
+pub fn unbind(index: u32, inst: Instance) -> bool {
+    let Some(slot) = INSTANCES.get(index as usize) else { return false };
+    slot.compare_exchange(inst.0, -1, Ordering::AcqRel, Ordering::Relaxed).is_ok()
+}
+
 /// Maps a minor number to the driver instance that owns it. Drivers built
 /// on the core use this as their `ddi::Driver::instance_of_minor`, so that
 /// `getinfo(9E)` and the entry-point glue find the device for every node,
-/// every clone and every anonymous file ([`crate::anon_fd`]).
+/// every clone and every anonymous file ([`crate::anon_fd`]). `None` for a
+/// device number no instance of this driver holds (a device that has
+/// detached, or one of another driver).
 pub fn instance_of_minor(minor: Minor) -> Option<Instance> {
     let anon = || crate::anon_fd::decode(minor.0).map(|(index, _)| index);
-    decode(minor.0).map(|d| d.index).or_else(anon).map(|i| Instance(i as i32))
+    let index = decode(minor.0).map(|d| d.index).or_else(anon)?;
+    let inst = INSTANCES.get(index as usize)?.load(Ordering::Acquire);
+    if inst < 0 { None } else { Some(Instance(inst)) }
 }
 
 /// A NUL-terminated minor node name in a fixed buffer.
@@ -203,9 +241,31 @@ mod tests {
 
     #[test]
     fn instance_mapping() {
-        assert_eq!(instance_of_minor(Minor(3)), Some(Instance(3)));
-        assert_eq!(instance_of_minor(Minor(131 | (7 << 9))), Some(Instance(3)));
+        // Device number 3 held by instance 0 of this driver, 4 by
+        // instance 1; 5 by nobody here (another driver's device).
+        assert!(bind(3, Instance(0)));
+        assert!(bind(4, Instance(1)));
+        assert_eq!(instance_of_minor(Minor(3)), Some(Instance(0)));
+        assert_eq!(instance_of_minor(Minor(131 | (7 << 9))), Some(Instance(0)));
+        assert_eq!(instance_of_minor(Minor(4)), Some(Instance(1)));
+        assert_eq!(instance_of_minor(Minor(132)), Some(Instance(1)));
+        let anon = crate::anon_fd::minor(4, 9).unwrap();
+        assert_eq!(instance_of_minor(Minor(anon)), Some(Instance(1)));
+        assert_eq!(instance_of_minor(Minor(5)), None);
+        assert_eq!(instance_of_minor(Minor(133)), None);
         assert_eq!(instance_of_minor(Minor(200)), None);
+        // One holder per number; only the holder can let go.
+        assert!(!bind(3, Instance(2)));
+        assert!(!unbind(3, Instance(1)));
+        assert!(!bind(64, Instance(0)));
+        assert!(!bind(6, Instance(-1)));
+        assert!(unbind(3, Instance(0)));
+        assert_eq!(instance_of_minor(Minor(3)), None);
+        assert!(!unbind(3, Instance(0)), "a second unbind");
+        // Reused after the detach, by another instance.
+        assert!(bind(3, Instance(2)));
+        assert_eq!(instance_of_minor(Minor(3)), Some(Instance(2)));
+        assert!(unbind(3, Instance(2)) && unbind(4, Instance(1)));
     }
 
     #[test]

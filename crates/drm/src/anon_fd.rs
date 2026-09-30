@@ -561,6 +561,12 @@ mod tests {
         }
         assert_eq!(decode(ANON_BIT), None, "number 0 is never used");
         assert_eq!(decode(m | (1 << 31)), None);
-        assert_eq!(minor::instance_of_minor(ddi::Minor(m)), Some(ddi::Instance(3)));
+        // The instance comes from the device number's holder in this
+        // driver (number 10: no other test uses it).
+        let m = minor(10, 77).unwrap();
+        assert_eq!(minor::instance_of_minor(ddi::Minor(m)), None);
+        assert!(minor::bind(10, ddi::Instance(2)));
+        assert_eq!(minor::instance_of_minor(ddi::Minor(m)), Some(ddi::Instance(2)));
+        assert!(minor::unbind(10, ddi::Instance(2)));
     }
 }

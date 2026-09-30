@@ -1,0 +1,22 @@
+[package]
+name = "drm_minor"
+description = "misc/drm_minor: the table of DRM device numbers (card<N>, renderD<128+N>) shared by every illumos-drm driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+ddi-sys.workspace = true
+
+[package.metadata.kmod]
+# Install class: /kernel/misc/amd64/drm_minor (or /usr/kernel/misc/amd64).
+class = "misc"
+depends = []
+# Linked with -B reduce -M exports.mapfile: only _init, _fini, _info and
+# the two functions of drm-minor-sys stay global.
+exports = "exports.mapfile"

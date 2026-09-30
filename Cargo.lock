@@ -23,12 +23,24 @@ name = "drm"
 version = "0.0.1"
 dependencies = [
  "ddi",
+ "drm-minor-sys",
  "drm-uapi",
 ]
 
 [[package]]
+name = "drm-minor-sys"
+version = "0.0.1"
+
+[[package]]
 name = "drm-uapi"
 version = "0.0.1"
+
+[[package]]
+name = "drm_minor"
+version = "0.0.1"
+dependencies = [
+ "ddi-sys",
+]
 
 [[package]]
 name = "illumos-kernel-private-sys"
