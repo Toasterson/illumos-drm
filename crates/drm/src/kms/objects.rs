@@ -342,6 +342,19 @@ pub struct Framebuffer<B> {
     pub hot_y: i32,
     /// The buffer object of each plane.
     pub objs: [Option<B>; 4],
+    /// For an internal legacy cursor framebuffer, the file whose `CURSOR`
+    /// call made it: planes that show it go off when that file closes.
+    pub cursor_of: Option<u32>,
+}
+
+/// Who a new framebuffer belongs to ([`super::core::KmsCore::add_fb`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FbOwner {
+    /// `ADDFB`/`ADDFB2` of a file: the file owns it (`RMFB`, `GETRESOURCES`).
+    File(u32),
+    /// A legacy `CURSOR` call of a file: owned by no file, as in Linux,
+    /// but shown only until that file closes.
+    Cursor(u32),
 }
 
 /// A counted reference to a framebuffer.

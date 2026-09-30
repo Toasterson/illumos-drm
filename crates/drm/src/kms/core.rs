@@ -25,7 +25,7 @@ use drm_uapi as uapi;
 use super::edid;
 use super::formats;
 use super::modes::{self, DisplayMode};
-use super::objects::{Blob, BlobRef, FbRef, FbRequest, Framebuffer, Ids, Layout, ObjKind, check_fb_request};
+use super::objects::{Blob, BlobRef, FbOwner, FbRef, FbRequest, Framebuffer, Ids, Layout, ObjKind, check_fb_request};
 use super::props::{CONNECTOR_PROPS, CRTC_PROPS, PLANE_PROPS, Prop, PropDef};
 use super::state::{ConnectorStatus, Current, FbBacking, KmsDriver, OldState};
 
@@ -317,11 +317,17 @@ impl<B: FbBacking> KmsCore<B> {
     }
 
     /// Forgets a closed file: its framebuffers are removed (planes that show
-    /// one are turned off, see [`KmsCore::rm_fb`]) and its blobs are
-    /// destroyed.
+    /// one are turned off, see [`KmsCore::rm_fb`]), planes that show a
+    /// legacy cursor it set are turned off, and its blobs are destroyed.
+    ///
+    /// Linux leaves such a cursor on. Here it would keep its buffer
+    /// referenced with no file open (after `SETCRTC` turned the CRTC off,
+    /// or when set on a CRTC that was never on), which refuses the
+    /// device's detach until another master hides it.
     pub fn file_close(&mut self, file: u32, drv: &dyn KmsDriver<B>, ctx: &Sleepable) -> Result<(), Errno> {
         let Some(f) = self.files.remove(&file) else { return Ok(()) };
-        let fbs: Vec<FbRef<B>> = f.fbs.iter().filter_map(|id| self.fbs.get(id).cloned()).collect();
+        let mut fbs: Vec<FbRef<B>> = f.fbs.iter().filter_map(|id| self.fbs.get(id).cloned()).collect();
+        fbs.extend(self.fbs.values().filter(|fb| fb.cursor_of == Some(file)).cloned());
         for id in &f.fbs {
             self.orphan_fbs.insert(*id);
         }
@@ -717,14 +723,15 @@ impl<B: FbBacking> KmsCore<B> {
 
     /// Creates a framebuffer from a checked request and the objects its
     /// handles name: each object must be large enough for its plane
-    /// (`EINVAL`). `file` is the owner, or `None` for an internal one (the
-    /// legacy cursor). Returns the new framebuffer; the objects are
+    /// (`EINVAL`). `owner` is the file that owns it, or, for the internal
+    /// framebuffer of a legacy cursor, the file whose call made it (see
+    /// [`FbOwner`]). Returns the new framebuffer; the objects are
     /// released on failure. The current master (`master`) is exempt from
     /// [`MAX_DEVICE_FBS`], as for blobs.
     #[allow(clippy::too_many_arguments, reason = "the parts of a framebuffer")]
     pub fn add_fb(
         &mut self,
-        file: Option<u32>,
+        owner: FbOwner,
         r: &FbRequest,
         objs: [Option<B>; 4],
         hot: (i32, i32),
@@ -741,6 +748,10 @@ impl<B: FbBacking> KmsCore<B> {
                 }
             }
         }
+        let file = match owner {
+            FbOwner::File(f) => Some(f),
+            FbOwner::Cursor(_) => None,
+        };
         let file_full = file.and_then(|f| self.files.get(&f)).is_some_and(|f| f.fbs.len() >= MAX_FILE_FBS);
         if file_full || (!master && self.fbs.len() >= MAX_DEVICE_FBS) {
             release(objs);
@@ -765,6 +776,10 @@ impl<B: FbBacking> KmsCore<B> {
             hot_x: hot.0,
             hot_y: hot.1,
             objs,
+            cursor_of: match owner {
+                FbOwner::Cursor(f) => Some(f),
+                FbOwner::File(_) => None,
+            },
         });
         self.fbs.insert(id, fb.clone());
         match file.and_then(|f| self.files.get_mut(&f)) {

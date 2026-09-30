@@ -143,11 +143,12 @@ resources created, none left. Xorg's modesetting driver runs on it (EDID,
 virtio-gpu scanout (QMP `screendump`). The R0 to R3 suites pass unchanged
 with `rdrmnull` in the same boot. The runs found three bugs, fixed on
 this branch: a legacy cursor kept a framebuffer on a CRTC that a close had
-turned off (a core fix), the driver held the fence domain so the module
+turned off (a core fix, extended after review to every legacy cursor of
+the closing file), the driver held the fence domain so the module
 never unloaded, and the test's rate check. Mesa's virgl driver (Mesa
 21.3.9) renders on the host through `virtio_gpu`: through EGL on a GBM
 device, `GL_RENDERER` is `virgl` (GL 3.1), a cleared framebuffer reads
-back exactly, and 600 clear-and-read-back frames take 0.45 s; drawn to a
+back exactly, and 600 clear-and-read-back frames take about 0.46 s; drawn to a
 GBM scanout surface and page-flipped, 600 frames show at 74.8 per second
 on the 75 Hz mode, and a host screendump shows the picture. The module
 then unloads with no resources left. Mesa's virgl driver cannot run under
@@ -663,7 +664,11 @@ its commit hooks (CRTCs that end off, planes, CRTCs that end on,
 connectors) and swaps the states in. Framebuffers hold `GemRef`s; `RMFB`
 and the close of the owning file turn off every plane that shows the
 framebuffer and the CRTC whose primary plane that was, as Linux's
-`atomic_remove_fb`. Blobs and framebuffers are counted; one that userland
+`atomic_remove_fb`, together with the other planes of that CRTC. Unlike
+Linux, a file's close also turns off the legacy cursors it set (their
+framebuffers belong to no file), because a cursor left on a dark CRTC
+would keep its buffer, and so the device, referenced with no file open.
+Blobs and framebuffers are counted; one that userland
 removed stays findable until no state uses it, then its ID is freed.
 Connectors are probed when the device attaches and when the master asks
 `GETCONNECTOR` with `count_modes` 0; the core parses the EDID the driver
@@ -805,7 +810,8 @@ work that runs anyway. A context is named after the process ID, because
 the DDI offers no process name.
 
 **R4: Mesa.** Mesa 21.3.9 with the virgl gallium driver comes from
-oi-userland's `hephaistos/virgl-gallium` branch. Two things outside this
+oi-userland's `hephaistos/virgl-gallium` branch (`d69854c287`) plus the
+local build-ID patch described below. Two things outside this
 repository stand between it and the device. First, Mesa's virgl disk
 cache used the driver's GNU build ID without checking for one, and
 illumos' link-editor emits none, so it crashed; a Mesa patch uses Mesa's

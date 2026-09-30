@@ -61,7 +61,7 @@ use super::formats;
 use super::ioctl::KmsOp;
 use super::legacy::SetCrtc;
 use super::modes::DisplayMode;
-use super::objects::{FbRequest, ObjKind};
+use super::objects::{FbOwner, FbRequest, ObjKind};
 use super::props::{Prop, PropKind};
 use super::state::{AtomicState, CommitFlags, DirtyRect, FbBacking, KmsDriver};
 use crate::caps::{ClientCaps, EOPNOTSUPP};
@@ -1068,7 +1068,7 @@ impl<O: GemObject> Kms<O> {
                 }
             }
         }
-        Ok(core.add_fb(Some(file.get()), r, objs, (0, 0), master, ctx)?.id)
+        Ok(core.add_fb(FbOwner::File(file.get()), r, objs, (0, 0), master, ctx)?.id)
     }
 
     fn setcrtc(&self, who: &Caller<'_>, arg: &IoctlArg<'_>, drv: Drv<'_, O>, ctx: &Sleepable) -> Result<(), Errno> {
@@ -1175,7 +1175,7 @@ impl<O: GemObject> Kms<O> {
                 core.check_fb(&r, drv)?;
                 let g = gem.ok_or(Errno::ENOENT)?;
                 let o = g.lookup(file, handle)?;
-                Some(Some(core.add_fb(None, &r, [Some(o), None, None, None], hot, true, ctx)?))
+                Some(Some(core.add_fb(FbOwner::Cursor(file.get()), &r, [Some(o), None, None, None], hot, true, ctx)?))
             }
         } else {
             None
