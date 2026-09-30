@@ -14,15 +14,12 @@ nodes, authentication, capabilities, GEM, PRIME, syncobj, KMS), and a Rust
 virtio-gpu driver on top of it. Existing vendor drivers stay in C and would
 be carried later through a C interface of the core. The milestones are R0
 (uAPI, device registration, per-file state, core ioctls), R1 (GEM and dumb
-buffers), R2 (fences, syncobj, PRIME), R3 (KMS and atomic), all four
-done, R4 (virtio-gpu, written, verification in a guest pending) and R5
-(C interface).
+buffers), R2 (fences, syncobj, PRIME), R3 (KMS and atomic), R4
+(virtio-gpu), all five done, and R5 (C interface).
 
 ## Where things stand
 
-Milestones R0, R1, R2 and R3 work. R4, the virtio-gpu driver, is written
-and checked on the host and on illumos, but has not run in a guest yet
-(see *R4* below).
+Milestones R0, R1, R2, R3 and R4 work.
 
 R0 (uAPI, device registration, per-file state, core ioctls): on 28
 September 2026 the test driver `rdrmnull` was built for the kernel target,
@@ -120,23 +117,45 @@ working: after the refused `modunload`, `modetest` lists it and
 page-flips with vblank events at 60 Hz, and the module unloads once the
 object is released (29 September 2026, same guest image).
 
-R4 (virtio-gpu), 30 September 2026: `drivers/virtio-gpu` (module
-`virtio_gpu`, PCI `1af4:1050`) builds for the kernel target, links with
-`ld -ztype=kmod -N misc/virtio -N fs/specfs` on OpenIndiana Hipster
-2026.04 (illumos `cda5b9a49f`), where every one of its 127 undefined
-symbols is exported by the running kernel, and its IPS package passes
-`pkglint` and publishes. illumos-ddi's `xtask kernel-check` resolves all
-48 virtio framework symbols the driver binds from the `virtio` module of
-the same kernel. The uAPI layouts, including the older `EXECBUFFER` and
-transfer layouts, agree with gcc on illumos (111 sizes, 497 offsets, 121
-ioctl numbers). The host tests of the driver's logic pass. What has not
-happened yet is the run in a QEMU guest with a virtio-gpu device (the test
-host was unreachable): `tools/test/run-r4-test.sh` (attach, the
-`drm_r4_test` ioctl and virgl test, modetest, refused detaches), Xorg
-with the modesetting driver, and Mesa's virgl driver (built from
-oi-userland `hephaistos/virgl-gallium`, Mesa 21.3.9) with `glxinfo -B`
-and `glxgears`. Until then, nothing here claims that the driver works on
-a device.
+R4 (virtio-gpu), 30 September 2026, on a disposable Hipster guest
+(illumos `cda5b9a49f`) in QEMU 6.2 with `-device virtio-gpu-gl-pci` and
+`-display egl-headless` (virglrenderer 0.9.1 on the host's GPU):
+`virtio_gpu` attaches to the device (`virgl true, edid true`, two
+capability sets, virgl and virgl2, the modern interface), and
+`tools/test/run-r4-test.sh` passes: `drm_r4_test` checks 63 things, among
+them a minimal virgl command stream (surface, framebuffer, clear) whose
+result reads back from the host renderer with `TRANSFER_FROM_HOST`, fence
+descriptors across the three `EXECBUFFER` layouts, binary and timeline
+sync objects, a timeline wait that times out with `ETIME` after 100 ms,
+PRIME into another file's context, every refusal (unknown `EXECBUFFER`
+flags `EINVAL`, rings without `CONTEXT_INIT`, unknown handles and sync
+objects, bad strides, oversized and unreadable streams), 2000 submissions
+in a row and eight threads creating, clearing, fencing, reading back and
+closing 800 textures at once; modetest lists the display with the
+device's EDID (1024x768 at 75 Hz preferred), sets the mode, page-flips at
+the mode's 75 Hz with vblank events, moves a cursor and commits
+atomically; the module refuses to unload while a process holds a file,
+and while only a dma-buf is left, works again afterwards, and unloads
+once released, with `/etc` and `/devices` as before. At detach the driver
+counted 19,543 requests, 7,224 of them fenced, none failed, and 2,011
+resources created, none left. Xorg's modesetting driver runs on it (EDID,
+1024x768, damage through `DIRTYFB`), and `glxgears` shows on the
+virtio-gpu scanout (QMP `screendump`). The R0 to R3 suites pass unchanged
+with `rdrmnull` in the same boot. The runs found three bugs, fixed on
+this branch: a legacy cursor kept a framebuffer on a CRTC that a close had
+turned off (a core fix), the driver held the fence domain so the module
+never unloaded, and the test's rate check. Mesa's virgl driver (Mesa
+21.3.9) renders on the host through `virtio_gpu`: through EGL on a GBM
+device, `GL_RENDERER` is `virgl` (GL 3.1), a cleared framebuffer reads
+back exactly, and 600 clear-and-read-back frames take 0.45 s; drawn to a
+GBM scanout surface and page-flipped, 600 frames show at 74.8 per second
+on the 75 Hz mode, and a host screendump shows the picture. The module
+then unloads with no resources left. Mesa's virgl driver cannot run under
+X yet, because OpenIndiana's Xorg 1.19.7 is built without glamor, and it
+needs a workaround for libdrm's device enumeration (see *R4: Mesa*).
+The guest's disk is a transitional virtio-blk device (`disable-modern=on`),
+because illumos bug 18358, fixed after `cda5b9a49f`, makes the virtio
+framework map the wrong BAR for the second modern device.
 
 ## What is in the repository
 
@@ -784,6 +803,24 @@ and to a new sync file can fail for lack of memory after the work was
 queued (Linux reserves those first); the ioctl then reports the error for
 work that runs anyway. A context is named after the process ID, because
 the DDI offers no process name.
+
+**R4: Mesa.** Mesa 21.3.9 with the virgl gallium driver comes from
+oi-userland's `hephaistos/virgl-gallium` branch. Two things outside this
+repository stand between it and the device. First, Mesa's virgl disk
+cache used the driver's GNU build ID without checking for one, and
+illumos' link-editor emits none, so it crashed; a Mesa patch uses Mesa's
+common identifier, which falls back to the library's modification time.
+Second, OpenIndiana's libdrm 2.4.109 finds DRM devices only among device
+nodes named `display` (VGA-class PCI functions), and the virtio-gpu
+function (class 0x0380) is `pci1af4,1100`, so the loader cannot identify
+it and EGL finds no device. The fix belongs in libdrm (match minors of
+node type `ddi_display:drm`); until then `tools/test/drm_devshim.c`, loaded
+with `LD_PRELOAD_64`, answers `drmGetDevice2` for the test guest's device.
+`tools/test/virgl_egl_test.c` checks rendering through EGL on GBM, and
+`tools/test/virgl_kms_gears.c` renders to the screen with page flips.
+Under Xorg, the modesetting driver works, but OpenIndiana's Xorg is
+built without glamor, so it offers neither DRI2 nor DRI3 and `glxinfo`
+reports softpipe; GLX with virgl needs an Xorg built with glamor.
 
 ## Building
 
