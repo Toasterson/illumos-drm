@@ -7,8 +7,10 @@
 //! The flags are those of Linux's `drm_ioctls[]`: the ioctls that change
 //! what is on screen need the master (`DRM_MASTER`), the others need
 //! nothing beyond a primary node; none is allowed on render nodes. As for
-//! the core table ([`crate::ioctl`]), commands are matched on their full
-//! 32-bit value.
+//! the core table ([`crate::ioctl`]), commands are matched on their group,
+//! number and direction, and the caller's structure may be shorter or
+//! longer than the kernel's (Linux's `drm_ioctl()` size rule, see
+//! [`crate::ioctl`]).
 
 use drm_uapi as uapi;
 use drm_uapi::ioc;
@@ -109,9 +111,10 @@ pub const TABLE: &[KmsEntry] = &[
     e(uapi::DRM_IOCTL_MODE_GETFB2, KmsOp::GetFb2, ANY),
 ];
 
-/// Finds a mode-setting ioctl by its full command value.
+/// Finds a mode-setting ioctl by its group, number and direction, whatever
+/// its size bits.
 pub fn lookup(cmd: u32) -> Option<&'static KmsEntry> {
-    TABLE.iter().find(|x| x.cmd == cmd)
+    TABLE.iter().find(|x| crate::ioctl::same_command(x.cmd, cmd))
 }
 
 /// Whether a command has the group and number of a mode-setting ioctl,
@@ -127,9 +130,25 @@ mod tests {
     #[test]
     fn table() {
         for (i, x) in TABLE.iter().enumerate() {
-            assert!(TABLE[i + 1..].iter().all(|o| o.cmd != x.cmd && o.op != x.op), "{:?}", x.op);
-            assert!(crate::ioctl::lookup(x.cmd).is_none(), "{:?} is in the core table", x.op);
+            assert!(
+                TABLE[i + 1..].iter().all(|o| ioc::ioc_nr(o.cmd) != ioc::ioc_nr(x.cmd) && o.op != x.op),
+                "{:?}",
+                x.op
+            );
+            assert!(
+                crate::ioctl::TABLE.iter().all(|c| ioc::ioc_nr(c.cmd) != ioc::ioc_nr(x.cmd)),
+                "{:?} has the number of a core ioctl",
+                x.op
+            );
             assert!(!x.perm.render_allow && !x.perm.auth && !x.perm.root_only);
+            // Its size is in the command exactly (below 256 bytes).
+            assert!(ioc::ioc_size(x.cmd) < 256, "{:?}", x.op);
+            // Any size of the command finds it; another direction does not.
+            for size in [0, 4, 255] {
+                assert_eq!(lookup(ioc::with_size(x.cmd, size)).map(|e| e.op), Some(x.op));
+            }
+            let other = if ioc::ioc_dir(x.cmd) == ioc::IOC_INOUT { ioc::IOC_OUT } else { ioc::IOC_INOUT };
+            assert!(lookup((x.cmd & !ioc::IOC_DIRMASK) | other).is_none(), "{:?}", x.op);
         }
         let master = [
             KmsOp::SetCrtc,

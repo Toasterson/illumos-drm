@@ -2,15 +2,47 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The table of core ioctls and their decoding.
+//! The table of core ioctls, their decoding, and the argument sizes.
 //!
-//! The illumos `_IOWR` encoding keeps only the low eight bits of the
-//! argument size, so the command number cannot tell the kernel how many
-//! bytes to copy. The core therefore matches the complete 32-bit command
-//! against the table: direction, size bits, group and number must all be
-//! those of the `DRM_IOCTL_*` value in `drm-uapi`. Anything else, including
-//! a known number with a different size or direction, fails with `ENOTTY`
-//! rather than being guessed at.
+//! # Argument sizes
+//!
+//! Core and mode-setting commands are matched on their group, number and
+//! direction, not on the size bits, and the caller's structure may be
+//! shorter or longer than the kernel's, as with Linux's `drm_ioctl()`
+//! (`drivers/gpu/drm/drm_ioctl.c`, read at v7.3-rc5). There, with `U` the
+//! size in the caller's command, `K` the size in the kernel's definition,
+//! `in = U` if both commands have `IOC_IN` (else 0) and `out = U` if both
+//! have `IOC_OUT` (else 0), the kernel buffer is `max(in, out, K)` bytes,
+//! `in` bytes are copied in, the rest of the buffer is zeroed, the handler
+//! works on the first `K` bytes, and `out` bytes are copied out. So:
+//!
+//! * a shorter structure (`U < K`) is zero-extended, and only `U` bytes go
+//!   back;
+//! * a longer structure (`U > K`) has its extra bytes copied in and copied
+//!   back unchanged if the command copies in, or zeroed on the way out if
+//!   it only copies out; the handler never sees them, and an unreadable or
+//!   unwritable tail is `EFAULT` like the rest of the structure.
+//!
+//! [`SizePlan`] is that computation. The core follows it byte for byte,
+//! with two differences that come from its own design, not from the size
+//! rule: a command whose direction differs from the table's is `ENOTTY`
+//! (Linux uses the intersection of both directions), and a handler copies
+//! its result out when it has one, as before, instead of the dispatcher
+//! copying the buffer back after every call, including failed ones (the
+//! handlers were written against Linux's errnos and undo work whose result
+//! cannot be copied out). An unknown number stays `ENOTTY` (Linux answers
+//! `EINVAL` for an unused number of the DRM group).
+//!
+//! The illumos `_IOWR` encoding keeps only the low eight bits of the size,
+//! so a caller's size is known exactly only below 256 bytes; every core
+//! and mode-setting structure is smaller than that (the tests check the
+//! table), and a command that carries a size of 256 bytes or more
+//! arrives with its size modulo 256, which is then what is copied, as the
+//! C macros encoded it.
+//!
+//! Driver-private commands keep the exact match on the complete value
+//! ([`lookup_driver`]); a driver that accepts several sizes of a structure
+//! lists each (as `virtio_gpu` does for `EXECBUFFER`).
 
 use drm_uapi as uapi;
 use drm_uapi::ioc;
@@ -204,9 +236,94 @@ pub fn is_driver_nr(table: &[DriverIoctl], cmd: u32) -> bool {
         && table.iter().any(|e| e.in_driver_range() && ioc::ioc_nr(e.cmd) == ioc::ioc_nr(cmd))
 }
 
-/// Finds the table entry for a command, or `None` (`ENOTTY`).
+/// Reports whether `cmd` is the command `table_cmd` with any argument
+/// size: the same group, number and direction.
+pub const fn same_command(table_cmd: u32, cmd: u32) -> bool {
+    table_cmd & !(ioc::IOCPARM_MASK << 16) == cmd & !(ioc::IOCPARM_MASK << 16)
+}
+
+/// Finds the table entry for a command, whatever its size bits, or `None`
+/// (`ENOTTY`).
 pub fn lookup(cmd: u32) -> Option<&'static Entry> {
-    TABLE.iter().find(|e| e.cmd == cmd)
+    TABLE.iter().find(|e| same_command(e.cmd, cmd))
+}
+
+/// How the argument of one call is copied, from the caller's command and
+/// the table's (see the module documentation). All sizes are in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizePlan {
+    /// The caller's size `U`, from its command.
+    pub user: usize,
+    /// The kernel's size `K`, from the table's command.
+    pub kernel: usize,
+    /// Whether the argument is copied in (`IOC_IN` in both commands).
+    pub input: bool,
+    /// Whether the argument is copied out (`IOC_OUT` in both commands).
+    pub output: bool,
+}
+
+impl SizePlan {
+    /// The plan for a caller's command `cmd` that matched the table command
+    /// `table_cmd`.
+    pub const fn new(table_cmd: u32, cmd: u32) -> SizePlan {
+        SizePlan {
+            user: ioc::ioc_size(cmd),
+            kernel: ioc::ioc_size(table_cmd),
+            input: cmd & table_cmd & ioc::IOC_IN != 0,
+            output: cmd & table_cmd & ioc::IOC_OUT != 0,
+        }
+    }
+    /// The plan of a caller whose structure is the kernel's own.
+    pub const fn exact(table_cmd: u32) -> SizePlan {
+        SizePlan::new(table_cmd, table_cmd)
+    }
+    /// The bytes of the kernel structure filled from the caller; the rest
+    /// of it is zero.
+    pub const fn copy_in(&self) -> usize {
+        if self.input { min(self.user, self.kernel) } else { 0 }
+    }
+    /// The bytes after the kernel structure that are copied in, kept, and
+    /// copied back out unchanged (`U - K` when the caller's structure is
+    /// longer and the command copies in).
+    pub const fn tail_in(&self) -> usize {
+        if self.input { self.user.saturating_sub(self.kernel) } else { 0 }
+    }
+    /// The bytes of the kernel structure copied out.
+    pub const fn copy_out(&self) -> usize {
+        if self.output { min(self.user, self.kernel) } else { 0 }
+    }
+    /// The bytes after the kernel structure that are copied out: the tail
+    /// that was copied in, or zeros if the command does not copy in.
+    pub const fn tail_out(&self) -> usize {
+        if self.output { self.user.saturating_sub(self.kernel) } else { 0 }
+    }
+    /// Reports whether the caller's structure is exactly the kernel's.
+    pub const fn is_exact(&self) -> bool {
+        self.user == self.kernel
+    }
+}
+
+const fn min(a: usize, b: usize) -> usize {
+    if a < b { a } else { b }
+}
+
+/// Builds the bytes the caller receives, `U` of them, from the kernel
+/// structure after the handler (`kernel`, `K` bytes) and the tail copied
+/// in (`tail`, `plan.tail_in()` bytes), as Linux's `drm_ioctl()` copies
+/// its buffer out. Returns the number of bytes written to `out`, which must
+/// hold at least `plan.copy_out() + plan.tail_out()` bytes; `None` if a
+/// length does not fit.
+pub fn assemble_out(plan: &SizePlan, kernel: &[u8], tail: &[u8], out: &mut [u8]) -> Option<usize> {
+    let head = plan.copy_out();
+    let rest = plan.tail_out();
+    out.get_mut(..head)?.copy_from_slice(kernel.get(..head)?);
+    let t = out.get_mut(head..head + rest)?;
+    if plan.tail_in() == rest {
+        t.copy_from_slice(tail.get(..rest)?);
+    } else {
+        t.fill(0);
+    }
+    Some(head + rest)
 }
 
 /// Reports whether a command has the group and number of a core ioctl,
@@ -218,24 +335,171 @@ pub fn is_core_nr(cmd: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
+    use std::vec;
+    use std::vec::Vec;
 
     #[test]
-    fn exact_match_only() {
+    fn match_ignores_size_but_not_direction() {
         assert_eq!(lookup(uapi::DRM_IOCTL_VERSION).map(|e| e.op), Some(Op::Version));
         assert_eq!(lookup(uapi::DRM_IOCTL_DROP_MASTER).map(|e| e.op), Some(Op::DropMaster));
-        // The 32-bit drm_version is 36 bytes: same number, other size.
-        assert_eq!(lookup(ioc::drm_iowr::<[u8; 36]>(0x00)), None);
-        // Same number and size, other direction.
+        // Another size of the same command is the same command (Linux's
+        // drm_ioctl() zero-extends or truncates): the 36-byte ILP32
+        // drm_version, a zero size, the largest size the encoding carries.
+        for size in [0usize, 1, 36, 63, 65, 255] {
+            let cmd = ioc::with_size(uapi::DRM_IOCTL_VERSION, size);
+            assert_eq!(lookup(cmd).map(|e| e.op), Some(Op::Version), "size {size}");
+        }
+        // Same number, other direction: not the command.
         assert_eq!(lookup(ioc::drm_ior::<uapi::drm_version>(0x00)), None);
+        assert_eq!(lookup(ioc::drm_iow::<uapi::drm_version>(0x00)), None);
+        assert_eq!(lookup(ioc::drm_iowr::<[u8; 0]>(0x1e)), None, "SET_MASTER is _IO");
         // Another group letter.
         assert_eq!(lookup(uapi::DRM_IOCTL_VERSION ^ 0x0100), None);
         assert_eq!(lookup(uapi::DRM_IOCTL_GEM_CLOSE).map(|e| e.op), Some(Op::GemClose));
         assert_eq!(lookup(uapi::DRM_IOCTL_MODE_DESTROY_DUMB).map(|e| e.op), Some(Op::DestroyDumb));
         assert_eq!(lookup(uapi::DRM_IOCTL_PRIME_HANDLE_TO_FD).map(|e| e.op), Some(Op::PrimeHandleToFd));
         assert_eq!(lookup(uapi::DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL).map(|e| e.op), Some(Op::SyncobjTimelineSignal));
-        // Ioctls of later milestones are not in the table yet.
+        // Mode setting has its own table (crate::kms::ioctl).
         assert_eq!(lookup(uapi::DRM_IOCTL_MODE_ATOMIC), None);
+        // Unused numbers of the group.
+        assert_eq!(lookup(ioc::drm_iowr::<[u8; 8]>(0x3f)), None);
+    }
+
+    /// The structures that grew between the libdrm 2.4.109 headers, which
+    /// the kernel's uAPI comes from, and libdrm 2.4.134 (gfx-drm
+    /// `README.illumos`): the command, the 2.4.109 size and the 2.4.134
+    /// size.
+    const GROWN: [(u32, usize, usize); 4] = [
+        (uapi::DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, 16, 24),
+        (uapi::DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, 16, 24),
+        (uapi::DRM_IOCTL_SYNCOBJ_WAIT, 32, 40),
+        (uapi::DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, 40, 48),
+    ];
+
+    #[test]
+    fn grown_syncobj_commands() {
+        for (cmd, old, new) in GROWN {
+            assert_eq!(ioc::ioc_size(cmd), old, "the kernel's structure is the 2.4.109 one");
+            let e = lookup(cmd).unwrap();
+            let grown = ioc::with_size(cmd, new);
+            assert_ne!(grown, cmd);
+            assert_eq!(lookup(grown), Some(e), "libdrm 2.4.134's command reaches the same entry");
+            let p = SizePlan::new(e.cmd, grown);
+            assert_eq!((p.user, p.kernel, p.copy_in(), p.tail_in()), (new, old, old, new - old));
+            assert_eq!((p.copy_out(), p.tail_out()), (old, new - old));
+            assert!(SizePlan::new(e.cmd, cmd).is_exact());
+        }
+    }
+
+    /// Linux's drm_ioctl() (v7.3-rc5), restated: the bytes the handler
+    /// sees and the bytes the caller finds after the call, for a caller
+    /// buffer `user_buf` (whose length is at least the caller's size) and
+    /// a handler that sets every byte of its K-byte structure to `fill`.
+    fn linux_model(table_cmd: u32, cmd: u32, user_buf: &[u8], fill: u8) -> (Vec<u8>, Vec<u8>) {
+        let drv_size = ioc::ioc_size(table_cmd);
+        let mut in_size = ioc::ioc_size(cmd);
+        let mut out_size = in_size;
+        if cmd & table_cmd & ioc::IOC_IN == 0 {
+            in_size = 0;
+        }
+        if cmd & table_cmd & ioc::IOC_OUT == 0 {
+            out_size = 0;
+        }
+        let ksize = in_size.max(out_size).max(drv_size);
+        let mut kdata = vec![0u8; ksize];
+        kdata[..in_size].copy_from_slice(&user_buf[..in_size]);
+        let seen = kdata[..drv_size].to_vec();
+        kdata[..drv_size].fill(fill);
+        let mut after = user_buf.to_vec();
+        after[..out_size].copy_from_slice(&kdata[..out_size]);
+        (seen, after)
+    }
+
+    /// The same through SizePlan, as uaccess::CoreArg applies it.
+    fn plan_model(table_cmd: u32, cmd: u32, user_buf: &[u8], fill: u8) -> (Vec<u8>, Vec<u8>) {
+        let p = SizePlan::new(table_cmd, cmd);
+        let mut k = vec![0u8; p.kernel];
+        k[..p.copy_in()].copy_from_slice(&user_buf[..p.copy_in()]);
+        let tail = user_buf[p.kernel.min(p.user)..][..p.tail_in()].to_vec();
+        let seen = k.clone();
+        k.fill(fill);
+        let mut out = [0u8; 256];
+        let n = assemble_out(&p, &k, &tail, &mut out).unwrap();
+        let mut after = user_buf.to_vec();
+        after[..n].copy_from_slice(&out[..n]);
+        (seen, after)
+    }
+
+    #[test]
+    fn sizes_follow_linux_drm_ioctl() {
+        // Every entry of the table, every size the encoding can carry and
+        // every direction, against the restated Linux code.
+        let user_buf: Vec<u8> = (0..256u32).map(|i| (i as u8).wrapping_mul(7).wrapping_add(1)).collect();
+        let dirs = [ioc::IOC_VOID, ioc::IOC_IN, ioc::IOC_OUT, ioc::IOC_INOUT];
+        let mut n = 0;
+        for e in TABLE {
+            for dir in dirs {
+                for size in 0..=255usize {
+                    let cmd = ioc::with_size((e.cmd & !ioc::IOC_DIRMASK) | dir, size);
+                    let a = linux_model(e.cmd, cmd, &user_buf, 0xa5);
+                    let b = plan_model(e.cmd, cmd, &user_buf, 0xa5);
+                    assert_eq!(a, b, "{:?} dir {dir:#x} size {size}", e.op);
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, TABLE.len() * 4 * 256);
+    }
+
+    #[test]
+    fn plan_cases() {
+        let wr = |n: u8, size: usize| ioc::with_size(ioc::drm_iowr::<[u8; 0]>(n), size);
+        let t = wr(0x10, 16);
+        // Shorter: zero-extended in, truncated out.
+        let p = SizePlan::new(t, wr(0x10, 8));
+        assert_eq!((p.copy_in(), p.tail_in(), p.copy_out(), p.tail_out()), (8, 0, 8, 0));
+        // Longer: the tail is copied in and back.
+        let p = SizePlan::new(t, wr(0x10, 24));
+        assert_eq!((p.copy_in(), p.tail_in(), p.copy_out(), p.tail_out()), (16, 8, 16, 8));
+        // Longer, read-only command: the tail comes back as zeros.
+        let r = ioc::with_size(ioc::drm_ior::<[u8; 0]>(0x02), 4);
+        let p = SizePlan::new(r, ioc::with_size(r, 8));
+        assert_eq!((p.copy_in(), p.tail_in(), p.copy_out(), p.tail_out()), (0, 0, 4, 4));
+        let (k, tail, mut out) = ([1u8; 4], [9u8; 4], [0xffu8; 8]);
+        assert_eq!(assemble_out(&p, &k, &tail, &mut out), Some(8));
+        assert_eq!(out, [1, 1, 1, 1, 0, 0, 0, 0]);
+        // Write-only command: nothing goes back.
+        let w = ioc::with_size(ioc::drm_iow::<[u8; 0]>(0x11), 4);
+        let p = SizePlan::new(w, ioc::with_size(w, 12));
+        assert_eq!((p.copy_in(), p.tail_in(), p.copy_out(), p.tail_out()), (4, 8, 0, 0));
+        // An output buffer too small is refused, not overrun.
+        let p = SizePlan::new(t, wr(0x10, 24));
+        assert_eq!(assemble_out(&p, &[0u8; 16], &[0u8; 8], &mut [0u8; 23]), None);
+    }
+
+    #[test]
+    fn structures_fit_the_size_field() {
+        // Commands carry at most 255 bytes of size; every structure of the
+        // table must be smaller than 256 bytes so that its own command
+        // carries its size exactly. The generated numbers come from gcc's
+        // _IOWR, so a larger structure would show up here as a size that
+        // disagrees with the layout table of drm-uapi.
+        for e in TABLE {
+            assert!(ioc::ioc_size(e.cmd) < 256, "{:?}", e.op);
+        }
+        let sizes = [
+            (uapi::DRM_IOCTL_VERSION, core::mem::size_of::<uapi::drm_version>()),
+            (uapi::DRM_IOCTL_SYNCOBJ_WAIT, core::mem::size_of::<uapi::drm_syncobj_wait>()),
+            (uapi::DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, core::mem::size_of::<uapi::drm_syncobj_timeline_wait>()),
+            (uapi::DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, core::mem::size_of::<uapi::drm_syncobj_handle>()),
+            (uapi::DRM_IOCTL_MODE_CREATE_DUMB, core::mem::size_of::<uapi::drm_mode_create_dumb>()),
+        ];
+        for (cmd, size) in sizes {
+            assert_eq!(ioc::ioc_size(cmd), size);
+        }
     }
 
     #[test]
@@ -255,7 +519,8 @@ mod tests {
     fn table_is_consistent() {
         for (i, e) in TABLE.iter().enumerate() {
             assert_eq!(ioc::ioc_group(e.cmd), ioc::DRM_IOCTL_BASE);
-            assert!(TABLE[i + 1..].iter().all(|o| o.cmd != e.cmd && o.op != e.op));
+            // One entry per number, whatever the size and direction.
+            assert!(TABLE[i + 1..].iter().all(|o| ioc::ioc_nr(o.cmd) != ioc::ioc_nr(e.cmd) && o.op != e.op));
         }
         // Render nodes may query the version and capabilities and close GEM
         // handles, as in Linux's drm_ioctls[]; FLINK and OPEN need

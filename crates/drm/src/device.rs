@@ -50,14 +50,14 @@ use crate::driver::{BUS_ID_MAX, BusId, Driver, Features};
 use crate::dumb::DumbRequest;
 use crate::fence_dev::SyncCore;
 use crate::gem::{GemCore, registry};
-use crate::ioctl::{self, Entry, Op};
+use crate::ioctl::{self, Entry, Op, SizePlan};
 use crate::karc::KArc;
 use crate::kms::dev::{Caller, Kms};
 use crate::kms::ioctl as kmsioctl;
 use crate::minor::{self, CloneId, MAX_DEVICES, NodeKind};
 use crate::offsets::PAGE_SIZE;
 use crate::state::{DeviceState, IF_MAJOR, IF_MINOR, Opener, SetVersion};
-use crate::uaccess::{UserArg, copy_in_bytes, copy_out_bytes};
+use crate::uaccess::{CoreArg, UserArg, copy_in_bytes, copy_out_bytes};
 
 /// One DRM device: the driver's state, the card and render minor nodes, and
 /// the per-file state.
@@ -277,7 +277,7 @@ impl<D: Driver> Device<D> {
         c: CloneId,
         perm: crate::state::Perm,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
     ) -> Result<(), Errno> {
         let mut v = UserArg::<uapi::drm_version>::read(arg)?;
         self.state.lock().permit(c, perm, privileged)?;
@@ -297,7 +297,7 @@ impl<D: Driver> Device<D> {
         c: CloneId,
         perm: crate::state::Perm,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
     ) -> Result<(), Errno> {
         let mut u = UserArg::<uapi::drm_unique>::read(arg)?;
         let set = {
@@ -322,7 +322,7 @@ impl<D: Driver> Device<D> {
         c: CloneId,
         perm: crate::state::Perm,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
     ) -> Result<(), Errno> {
         let u = UserArg::<uapi::drm_unique>::read(arg)?;
         // Check permission before touching the string, so that a caller
@@ -350,7 +350,7 @@ impl<D: Driver> Device<D> {
 /// `value` go to the caller's buffer, and `*len` becomes the full length of
 /// `value`. A short buffer is the documented way for libdrm to learn the
 /// length, so the partial copy is the ABI, not a silent truncation.
-fn copy_field(arg: &IoctlArg<'_>, len: &mut usize, addr: usize, value: &[u8]) -> Result<(), Errno> {
+fn copy_field(arg: &CoreArg<'_>, len: &mut usize, addr: usize, value: &[u8]) -> Result<(), Errno> {
     let n = value.len().min(*len);
     copy_out_bytes(arg, addr, value.get(..n).ok_or(Errno::EINVAL)?)?;
     *len = value.len();
@@ -518,12 +518,18 @@ impl<D: Driver> CharDevice for Device<D> {
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
         // drv_priv(9F) is only called when an ioctl's permission needs it.
         let privileged = &|| cred.has_sys_devices_priv();
+        // Core and mode-setting commands match whatever their size bits,
+        // and their argument is copied with Linux's size rule (a shorter
+        // structure is zero-extended, a longer one keeps its extra bytes;
+        // crate::ioctl). Driver commands match on their complete value.
         if let Some(entry) = ioctl::lookup(cmd) {
-            self.core_ioctl(entry, c, privileged, &arg, ctx)?;
+            let a = CoreArg::new(&arg, SizePlan::new(entry.cmd, cmd))?;
+            self.core_ioctl(entry, c, privileged, &a, ctx)?;
             return Ok(0);
         }
         if let Some(entry) = kmsioctl::lookup(cmd) {
-            self.kms_ioctl(entry, c, privileged, &arg, ctx)?;
+            let a = CoreArg::new(&arg, SizePlan::new(entry.cmd, cmd))?;
+            self.kms_ioctl(entry, c, privileged, &a, ctx)?;
             return Ok(0);
         }
         let entry = ioctl::lookup_driver(D::IOCTLS, cmd).ok_or(Errno::ENOTTY)?;
@@ -550,7 +556,7 @@ impl<D: Driver> Device<D> {
         entry: &kmsioctl::KmsEntry,
         c: CloneId,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         let (caps, master) = {
@@ -582,7 +588,7 @@ impl<D: Driver> Device<D> {
         entry: &Entry,
         c: CloneId,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         let perm = entry.perm;
