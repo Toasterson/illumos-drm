@@ -68,7 +68,9 @@ state() {
 	# $1: before or after
 	digest -a sha256 $ETC > "state-$1.etc"
 	find /devices -print | sort > "state-$1.devices"
-	ls -la /dev/dri > "state-$1.dri" 2>&1
+	# The links only: the directory's own line changes whenever a link
+	# comes and goes, and it may exist before the test (another driver).
+	ls -l /dev/dri 2>&1 | grep -v '^total' > "state-$1.dri"
 	echo "::vmem" | mdb -k 2>&1 | awk 'NR == 1 || /umem_np|rdrmnull/' > "state-$1.vmem"
 	echo "\$ state $1"
 	cat "state-$1.etc"

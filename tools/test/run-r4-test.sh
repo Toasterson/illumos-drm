@@ -216,7 +216,8 @@ step sh -c "tail -n +$((msgs + 1)) /var/adm/messages | grep -i -E 'virtio|drm'"
 step sh -c 'modinfo | grep -E "virtio|drm"'
 step sh -c 'find /devices -name "*virtio_gpu*" | sort'
 step ls -lL /dev/dri
-DRM_CARD=$(dri_link pci1af4,1100@ card) && DRM_RENDER=$(dri_link pci1af4,1100@ renderD) || fail=1
+DRM_CARD=$(dri_link pci1af4,1100@ card) || fail=1
+DRM_RENDER=$(dri_link pci1af4,1100@ renderD) || fail=1
 export DRM_CARD DRM_RENDER
 echo "virtio_gpu nodes: DRM_CARD=$DRM_CARD DRM_RENDER=$DRM_RENDER"
 gemstat "after attach"

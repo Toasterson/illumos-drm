@@ -46,12 +46,15 @@ pass() { echo "PASS $*"; }
 bad() { echo "FAIL $*"; fail=1; }
 
 T=/opt/drm-tests/amd64
+# /etc/path_to_inst is left out, as in run-r4-test.sh: rem_drv keeps the
+# instance number of the virtio-gpu PCI function (its diff is shown).
 ETC="/etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/driver_classes /etc/devlink.tab
-    /etc/security/device_policy /etc/path_to_inst"
+    /etc/security/device_policy"
 
 state() {
 	digest -a sha256 $ETC > "g6-state-$1.etc"
 	find /devices -print | sort > "g6-state-$1.devices"
+	cp /etc/path_to_inst "g6-state-$1.path_to_inst"
 	echo "\$ state $1"
 	cat "g6-state-$1.etc"
 	echo "/devices entries: $(wc -l < "g6-state-$1.devices")"
@@ -110,7 +113,7 @@ g6() {
 	step ./drm_g6_test "$1" "$2" > "g6-$(basename "$1").out" 2>&1
 	cat "g6-$(basename "$1").out"
 	if grep -q ', 0 failed' "g6-$(basename "$1").out"; then
-		pass "drm_g6_test on $1: $(tail -1 "g6-$(basename "$1").out")"
+		pass "drm_g6_test on $1: $(grep '^drm_g6_test:' "g6-$(basename "$1").out")"
 	else
 		bad "drm_g6_test on $1"
 	fi
@@ -131,7 +134,8 @@ truss_check() {
 		[ "$new" -eq 1 ] && [ "$old" -eq 0 ] || ok=0
 		echo "command $1: $new call(s) at $3 bytes, $old at $2 bytes"
 	done
-	if [ $ok -eq 1 ] && ! grep -q ENOTTY truss.out && [ $rc -eq 0 ]; then
+	# (stdio's isatty() is a TCGETA on fd 1, ENOTTY by design.)
+	if [ $ok -eq 1 ] && ! grep "('d'," truss.out | grep -q ENOTTY && [ $rc -eq 0 ]; then
 		pass "libdrm 2.4.134 sends the grown commands once at their new size, no ENOTTY, no retry"
 	else
 		bad "libdrm's grown commands under truss"
@@ -164,7 +168,7 @@ r4test() {
 	step ./drm_r4_test "$1" "$2" > "drm_r4_test-$(basename "$1").out" 2>&1
 	tail -3 "drm_r4_test-$(basename "$1").out"
 	if grep -q ', 0 failed' "drm_r4_test-$(basename "$1").out"; then
-		pass "drm_r4_test on virtio_gpu ($1): $(tail -1 "drm_r4_test-$(basename "$1").out")"
+		pass "drm_r4_test on virtio_gpu ($1): $(grep '^drm_r4_test:' "drm_r4_test-$(basename "$1").out")"
 	else
 		cat "drm_r4_test-$(basename "$1").out"
 		bad "drm_r4_test on virtio_gpu ($1)"
@@ -387,7 +391,11 @@ echo "=== Clean up"
 DRM_MINOR_OURS=yes
 drm_minor_remove || fail=1
 [ $had_dri = no ] && [ -d /dev/dri ] && step rmdir /dev/dri
+# devfs drops the clone@0 nodes of idle drivers a while after devfsadm
+# made them; make them again before both snapshots (as run-r1-test.sh).
+step devfsadm -C
 state after
+step sh -c 'diff g6-state-before.path_to_inst g6-state-after.path_to_inst'
 for f in etc devices; do
 	if cmp -s "g6-state-before.$f" "g6-state-after.$f"; then
 		pass "state $f unchanged"

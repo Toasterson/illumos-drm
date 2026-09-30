@@ -57,15 +57,16 @@ drm_minor_remove() {
 }
 
 # dri_link DEVICE KIND: prints the /dev/dri link of kind KIND (card or
-# renderD) whose target is a minor node of the device node DEVICE (the
-# last component of its /devices path, such as rdrmnull@0 or
-# pci1af4,1100@10), waiting up to 10 seconds for devfsadm.
+# renderD) whose target is a minor node of the device node DEVICE, the
+# last component of its /devices path up to the ':' (rdrmnull@0) or a
+# prefix of it (pci1af4,1100@ for the virtio-gpu function in any slot),
+# waiting up to 10 seconds for devfsadm.
 dri_link() {
 	i=0
 	while [ $i -lt 10 ]; do
 		for l in /dev/dri/"$2"*; do
 			case $(ls -l "$l" 2>/dev/null) in
-			*"/$1:$2"[0-9]*) echo "$l"; return 0 ;;
+			*"/$1"*":$2"[0-9]*) echo "$l"; return 0 ;;
 			esac
 		done
 		sleep 1
