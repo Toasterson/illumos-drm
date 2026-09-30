@@ -188,6 +188,12 @@ panicked. `run-r4-test.sh` (kept attached), `run-r1-test.sh` with two
 their own `/dev/dri` links as before. Under `truss`, libdrm 2.4.134
 sent each of the four grown sync object commands once, at its new size,
 and the kernel answered 0; its retry at the 2.4.109 size never ran.
+The run used the kernel code of commit `0155ded`; the later changes to
+the kernel code (the GEM registry entry is recorded as the last step of
+attach, and the anonymous-file id space is named after the instance)
+were tested on the host and linked on illumos, and wait for the next
+guest run, as does `cargo xtask kernel-check` with `misc/drm_minor`
+loaded.
 
 ## What is in the repository
 
