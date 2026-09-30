@@ -164,6 +164,8 @@ refused_detach_steps() {
 }
 
 fail=0
+had_dri=no
+[ -d /dev/dri ] && had_dri=yes
 [ -f REVISION ] && step cat REVISION
 step uname -a
 step sh -c 'prtconf -v 2>/dev/null | grep -i -B2 -A2 "pci1af4,1050" | head -20'
@@ -227,6 +229,14 @@ step sh -c "tail -n +$((msgs + 1)) /var/adm/messages | grep -i 'virtio_gpu' | ta
 step rem_drv virtio_gpu || fail=1
 step rm -f /kernel/drv/amd64/virtio_gpu
 step devfsadm -C
+# devfsadm -C only removes links that a link module claims; remove the
+# /dev/dri links to virtio_gpu's nodes, and the directory if the test made it.
+for l in /dev/dri/*; do
+	case $(ls -l "$l" 2>/dev/null) in
+	*"-> "*/pci1af4,1100@*) step rm -f "$l" ;;
+	esac
+done
+[ $had_dri = no ] && [ -d /dev/dri ] && step rmdir /dev/dri
 state after
 if cmp -s state-before.etc state-after.etc && cmp -s state-before.devices state-after.devices; then
 	echo "PASS /etc driver files and /devices are as before"
