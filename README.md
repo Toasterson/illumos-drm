@@ -158,7 +158,8 @@ The guest's disk is a transitional virtio-blk device (`disable-modern=on`),
 because illumos bug 18358, fixed after `cda5b9a49f`, makes the virtio
 framework map the wrong BAR for the second modern device. A last run
 with the final code, including the close of a file that set a cursor on
-a dark CRTC, passed all of the above again.
+a dark CRTC, passed the driver test, the R0 to R3 suites and both virgl
+tests again (Xorg was not rerun).
 
 ## What is in the repository
 
