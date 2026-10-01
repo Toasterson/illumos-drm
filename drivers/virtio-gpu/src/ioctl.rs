@@ -8,24 +8,24 @@
 //!
 //! All of them are allowed on render nodes and need no authentication
 //! (`DRM_RENDER_ALLOW`, as Linux declares them).
+//!
+//! The core copies an argument in before the handler and out after it
+//! returns success ([`IoctlData`]); the arrays, command streams and
+//! buffers an argument points to are copied with `drm_facade::ioctl`.
 
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::time::Duration;
 
 use ddi::prelude::*;
-use drm::defer::Ctx;
-use drm::fence::Fence;
-use drm::gem::GemRef;
-use drm::kvec::KVec;
-use drm::minor::CloneId;
-use drm::resv::Usage;
-use drm::syncobj::Syncobj;
-use drm::uaccess::{UserArg, copy_in_array, copy_in_bytes, copy_out_bytes};
+use drm_facade::ioctl::{copy_in, copy_in_array, copy_out};
+use drm_facade::kvec::KVec;
+use drm_facade::sync::{sync_file_export, sync_file_fence};
+use drm_facade::{ENOSYS, Fence, File, GemRef, IoctlData, Plain, Syncobj, Usage};
 use drm_uapi as uapi;
 
 use crate::VirtioGpu;
-use crate::gpu::{self, ContextParam, Dev, FenceReq, Q, parse_context_params};
+use crate::gpu::{self, ContextParam, Dev, DrmDev, FenceReq, Q, parse_context_params};
 use crate::object::{self, Create, Kind, VgObject};
 use crate::proto::{self, CtrlHdr};
 
@@ -36,25 +36,122 @@ const CONTEXT_PARAM_DEBUG_NAME: u64 = 4;
 const MAX_COMMAND: u32 = gpu::MAX_DATA as u32;
 /// How long `WAIT` waits (Linux: 15 seconds, then `EBUSY`).
 const WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+/// The most entries of an array an ioctl names (buffer handles, sync
+/// objects, context parameters): more is `EINVAL`, as the R4 core's
+/// `copy_in_array` refused them, before any memory is allocated for them.
+const MAX_ARRAY: usize = 1 << 16;
 /// The `EXECBUFFER` flags this driver knows.
 const EXECBUF_FLAGS: u32 =
     uapi::VIRTGPU_EXECBUF_FENCE_FD_IN | uapi::VIRTGPU_EXECBUF_FENCE_FD_OUT | uapi::VIRTGPU_EXECBUF_RING_IDX;
-/// The offset of `fence_fd` in every layout of the `EXECBUFFER` argument.
-const FENCE_FD_OFFSET: isize = 28;
-const _: () = assert!(core::mem::offset_of!(uapi::drm_virtgpu_execbuffer, fence_fd) == FENCE_FD_OFFSET as usize);
-const _: () = assert!(core::mem::offset_of!(uapi::drm_virtgpu_execbuffer_v1, fence_fd) == FENCE_FD_OFFSET as usize);
-const _: () = assert!(core::mem::offset_of!(uapi::drm_virtgpu_execbuffer_v2, fence_fd) == FENCE_FD_OFFSET as usize);
+/// The offset of `fence_fd` in every layout of the `EXECBUFFER` argument,
+/// the only field the ioctl changes.
+const FENCE_FD_OFFSET: usize = 28;
+const _: () = assert!(core::mem::offset_of!(uapi::drm_virtgpu_execbuffer, fence_fd) == FENCE_FD_OFFSET);
+const _: () = assert!(core::mem::offset_of!(uapi::drm_virtgpu_execbuffer_v1, fence_fd) == FENCE_FD_OFFSET);
+const _: () = assert!(core::mem::offset_of!(uapi::drm_virtgpu_execbuffer_v2, fence_fd) == FENCE_FD_OFFSET);
 
-/// `ENOSYS`, which `ddi::Errno` has no constant for.
-const ENOSYS: Errno = match Errno::new(ddi::sys::errno::ENOSYS) {
-    Some(e) => e,
-    None => Errno::EINVAL,
-};
+/// A uAPI structure of this driver's ioctls: integer fields in an order
+/// without padding, so that every bit pattern is a value and writing it
+/// back copies out no uninitialised byte.
+///
+/// # Safety
+/// The implementing type is `#[repr(C)]`, has integer fields only (or
+/// structures of them) and no padding.
+unsafe trait Uapi: Copy + 'static {}
 
-fn put_all(v: KVec<GemRef<VgObject>>, ctx: &Sleepable) {
-    let mut v = v;
-    while let Some(r) = v.swap_remove(0) {
-        r.put(ctx);
+/// A uAPI structure as the facade copies it in and out.
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct Arg<T>(T);
+
+// SAFETY: Arg<T> has the layout of T, which Uapi makes Plain.
+unsafe impl<T: Uapi> Plain for Arg<T> {}
+
+macro_rules! uapi_args {
+    ($($t:ident = $size:literal),* $(,)?) => {
+        $(
+            // SAFETY: integer fields without padding: the size is the sum
+            // of the fields (Linux's layout; checked against gcc by
+            // tools/uapi).
+            unsafe impl Uapi for uapi::$t {}
+            const _: () = assert!(size_of::<uapi::$t>() == $size);
+        )*
+    };
+}
+
+uapi_args! {
+    drm_virtgpu_map = 16,
+    drm_virtgpu_execbuffer = 64,
+    drm_virtgpu_execbuffer_v1 = 32,
+    drm_virtgpu_execbuffer_v2 = 40,
+    drm_virtgpu_execbuffer_syncobj = 16,
+    drm_virtgpu_getparam = 16,
+    drm_virtgpu_resource_create = 56,
+    drm_virtgpu_resource_info = 16,
+    drm_virtgpu_3d_transfer_to_host = 44,
+    drm_virtgpu_3d_transfer_to_host_v1 = 36,
+    drm_virtgpu_3d_wait = 8,
+    drm_virtgpu_get_caps = 24,
+    drm_virtgpu_resource_create_blob = 48,
+    drm_virtgpu_context_init = 16,
+    drm_virtgpu_context_set_param = 16,
+}
+
+/// The argument as the core copied it in.
+fn read<T: Uapi>(a: &IoctlData<'_>) -> Result<T, Errno> {
+    a.read::<Arg<T>>().map(|v| v.0)
+}
+
+/// Leaves `v` in the argument for the core's copy-out.
+fn write<T: Uapi>(a: &mut IoctlData<'_>, v: T) -> Result<(), Errno> {
+    a.write(&Arg(v))
+}
+
+/// Copies `n` structures from user address `addr` (`EINVAL` for more than
+/// [`MAX_ARRAY`]).
+fn copy_in_structs<T: Uapi>(addr: u64, n: usize) -> Result<Vec<T>, Errno> {
+    if n > MAX_ARRAY {
+        return Err(Errno::EINVAL);
+    }
+    Ok(copy_in_array::<Arg<T>>(addr, n)?.into_iter().map(|a| a.0).collect())
+}
+
+/// The token of an ioctl handler.
+fn ctx() -> Sleepable {
+    // SAFETY: the facade calls ioctl handlers in thread context.
+    unsafe { Sleepable::assume() }
+}
+
+/// The handler of every `DRM_IOCTL_VIRTGPU_*` command: dispatches on the
+/// command of the table entry the core matched, as each older layout has
+/// an entry of its own.
+pub(crate) fn ioctl(dev: &DrmDev, a: &mut IoctlData<'_>, file: &File) -> Result<(), Errno> {
+    let ctx = ctx();
+    let d = dev.driver();
+    match a.cmd() {
+        uapi::DRM_IOCTL_VIRTGPU_GETPARAM => d.getparam(a),
+        uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE => d.resource_create(dev, file, a, &ctx),
+        uapi::DRM_IOCTL_VIRTGPU_RESOURCE_INFO => d.resource_info(file, a),
+        uapi::DRM_IOCTL_VIRTGPU_MAP => d.map(file, a),
+        cmd @ (uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST | uapi::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST) => {
+            let t: uapi::drm_virtgpu_3d_transfer_to_host = read(a)?;
+            d.transfer(dev, file, cmd == uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, t, &ctx)
+        }
+        cmd @ (uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST_V1 | uapi::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST_V1) => {
+            let t: uapi::drm_virtgpu_3d_transfer_to_host_v1 = read(a)?;
+            d.transfer(dev, file, cmd == uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST_V1, widen_transfer(&t), &ctx)
+        }
+        uapi::DRM_IOCTL_VIRTGPU_WAIT => d.wait(file, a),
+        uapi::DRM_IOCTL_VIRTGPU_GET_CAPS => d.get_caps(a, &ctx),
+        uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB => d.create_blob(dev, file, a, &ctx),
+        uapi::DRM_IOCTL_VIRTGPU_CONTEXT_INIT => d.context_init(dev, file, a, &ctx),
+        cmd @ (uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER
+        | uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V1
+        | uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V2) => {
+            let x = read_execbuffer(cmd, a)?;
+            d.execbuffer(dev, file, x, a, &ctx)
+        }
+        _ => Err(Errno::ENOTTY),
     }
 }
 
@@ -65,10 +162,10 @@ impl VirtioGpu {
 
     /// `DRM_IOCTL_VIRTGPU_GETPARAM`: writes an `int` to the address in
     /// `value`, as Linux does.
-    pub(crate) fn getparam(&self, arg: &IoctlArg<'_>) -> Result<(), Errno> {
-        let a = UserArg::<uapi::drm_virtgpu_getparam>::read(arg)?;
+    fn getparam(&self, a: &IoctlData<'_>) -> Result<(), Errno> {
+        let v: uapi::drm_virtgpu_getparam = read(a)?;
         let caps = self.dev().state().caps();
-        let v: i32 = match a.get().param {
+        let out: i32 = match v.param {
             p if p == u64::from(uapi::VIRTGPU_PARAM_3D_FEATURES) => i32::from(caps.virgl),
             p if p == u64::from(uapi::VIRTGPU_PARAM_CAPSET_QUERY_FIX) => 1,
             p if p == u64::from(uapi::VIRTGPU_PARAM_RESOURCE_BLOB) => i32::from(caps.blob),
@@ -82,23 +179,15 @@ impl VirtioGpu {
             p if p == u64::from(uapi::VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME) => i32::from(caps.context_init),
             _ => return Err(Errno::EINVAL),
         };
-        copy_out_bytes(arg, a.get().value as usize, &v.to_ne_bytes())
+        copy_out(v.value, &out.to_ne_bytes())
     }
 
     /// `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE`.
-    pub(crate) fn resource_create(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let mut a = UserArg::<uapi::drm_virtgpu_resource_create>::read(arg)?;
-        let v = *a.get();
-        let gem = dev.gem().ok_or(Errno::ENXIO)?;
+    fn resource_create(&self, dev: &DrmDev, file: &File, a: &mut IoctlData<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+        let mut v: uapi::drm_virtgpu_resource_create = read(a)?;
         let gpu = self.dev().state();
         let how = if gpu.virgl() {
-            gpu.ensure_context(self.dev(), file, ctx)?;
+            gpu.ensure_context(self.dev(), file.id(), ctx)?;
             Create::Res3d(proto::ResourceCreate3d {
                 target: v.target,
                 format: v.format,
@@ -120,73 +209,46 @@ impl VirtioGpu {
             Create::Res2d { format: v.format, width: v.width, height: v.height }
         };
         // Linux: "allocate a single page size object" for a size of 0.
-        let size = if v.size == 0 { drm::offsets::PAGE_SIZE as usize } else { v.size as usize };
-        let obj = object::create(gem, self.dr, size, how, ctx)?;
-        let res = obj.object().res();
-        let handle = gem.handle_create(file, obj, ctx)?;
-        // SAFETY: field assignments only.
-        let m = unsafe { a.get_mut() };
-        m.bo_handle = handle;
-        m.res_handle = res;
-        a.write(arg)
+        let size = if v.size == 0 { drm_facade::offsets::PAGE_SIZE as usize } else { v.size as usize };
+        let obj = object::create(dev, self.dr, size, how, ctx)?;
+        v.bo_handle = obj.handle_create(file)?;
+        v.res_handle = obj.res();
+        write(a, v)
     }
 
     /// `DRM_IOCTL_VIRTGPU_RESOURCE_INFO`.
-    pub(crate) fn resource_info(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let mut a = UserArg::<uapi::drm_virtgpu_resource_info>::read(arg)?;
-        let obj = dev.gem().ok_or(Errno::ENXIO)?.lookup(file, a.get().bo_handle)?;
-        let (res, size, blob) = (obj.object().res(), obj.size(), obj.object().blob_mem());
-        obj.put(ctx);
-        // SAFETY: field assignments only.
-        let m = unsafe { a.get_mut() };
-        m.res_handle = res;
-        m.size = size as u32;
-        m.blob_mem = blob;
-        a.write(arg)
+    fn resource_info(&self, file: &File, a: &mut IoctlData<'_>) -> Result<(), Errno> {
+        let mut v: uapi::drm_virtgpu_resource_info = read(a)?;
+        let obj = GemRef::<VgObject>::lookup(file, v.bo_handle)?;
+        v.res_handle = obj.res();
+        v.size = obj.size() as u32;
+        v.blob_mem = obj.blob_mem();
+        write(a, v)
     }
 
     /// `DRM_IOCTL_VIRTGPU_MAP`: the object's mmap offset.
-    pub(crate) fn map(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let mut a = UserArg::<uapi::drm_virtgpu_map>::read(arg)?;
-        let gem = dev.gem().ok_or(Errno::ENXIO)?;
-        let obj = gem.lookup(file, a.get().handle)?;
-        let off = gem.mmap_offset(&obj, ctx);
-        obj.put(ctx);
-        // SAFETY: a field assignment.
-        unsafe { a.get_mut() }.offset = off?;
-        a.write(arg)
+    fn map(&self, file: &File, a: &mut IoctlData<'_>) -> Result<(), Errno> {
+        let mut v: uapi::drm_virtgpu_map = read(a)?;
+        let obj = GemRef::<VgObject>::lookup(file, v.handle)?;
+        v.offset = obj.mmap_offset()?;
+        write(a, v)
     }
 
     /// `DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST` (`to_host` false) and
     /// `TRANSFER_TO_HOST`, in the 44-byte layout (older 36-byte arguments
     /// are widened by the caller).
-    #[allow(clippy::too_many_arguments, reason = "the fields of the transfer structure")]
-    pub(crate) fn transfer(
+    fn transfer(
         &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
+        dev: &DrmDev,
+        file: &File,
         to_host: bool,
         t: uapi::drm_virtgpu_3d_transfer_to_host,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
-        let gem = dev.gem().ok_or(Errno::ENXIO)?;
         let gpu = self.dev().state();
-        let obj = gem.lookup(file, t.bo_handle)?;
+        let obj = GemRef::<VgObject>::lookup(file, t.bo_handle)?;
         if !gpu.virgl() {
             if !to_host {
-                obj.put(ctx);
                 return Err(ENOSYS);
             }
             // 2D: copy the rectangle into the host resource, no fence.
@@ -194,25 +256,16 @@ impl VirtioGpu {
                 hdr: CtrlHdr::new(proto::CMD_TRANSFER_TO_HOST_2D),
                 r: proto::Rect { x: t.box_.x, y: t.box_.y, width: t.box_.w, height: t.box_.h },
                 offset: u64::from(t.offset),
-                resource_id: obj.object().res(),
+                resource_id: obj.res(),
                 padding: 0,
             };
-            let r = gpu.fire(self.dev(), &req, ctx).map(drop);
-            obj.put(ctx);
-            return r;
+            return gpu.fire(self.dev(), &req, ctx).map(drop);
         }
         // A guest-only blob has no host storage to transfer to or from.
-        if obj.object().kind() == (Kind::Blob { mem: proto::BLOB_MEM_GUEST }) {
-            obj.put(ctx);
+        if obj.kind() == (Kind::Blob { mem: proto::BLOB_MEM_GUEST }) {
             return Err(Errno::EINVAL);
         }
-        let ctx_id = match gpu.ensure_context(self.dev(), file, ctx) {
-            Ok(id) => id,
-            Err(e) => {
-                obj.put(ctx);
-                return Err(e);
-            }
-        };
+        let ctx_id = gpu.ensure_context(self.dev(), file.id(), ctx)?;
         let req = proto::TransferHost3d {
             hdr: CtrlHdr::ctx(
                 if to_host { proto::CMD_TRANSFER_TO_HOST_3D } else { proto::CMD_TRANSFER_FROM_HOST_3D },
@@ -220,42 +273,33 @@ impl VirtioGpu {
             ),
             box_: proto::Box3d { x: t.box_.x, y: t.box_.y, z: t.box_.z, w: t.box_.w, h: t.box_.h, d: t.box_.d },
             offset: u64::from(t.offset),
-            resource_id: obj.object().res(),
+            resource_id: obj.res(),
             level: t.level,
             stride: t.stride,
             layer_stride: t.layer_stride,
         };
-        let fence = self.submit_with(dev, file, &req, None, core::slice::from_ref(&obj), None, ctx);
-        let r = match fence {
-            Ok(f) => {
-                let r = add_fence(&obj, &f, ctx);
-                f.put(Ctx::Sleep(ctx));
-                r
-            }
-            Err(e) => Err(e),
-        };
-        obj.put(ctx);
-        r
+        let f = self.submit_with(dev, file, &req, None, core::slice::from_ref(&obj), None, ctx)?;
+        obj.add_fence(&f, Usage::Write)
     }
 
-    /// Sends `req` (with `data` as its extra data, from user memory) as a
-    /// fenced request of `file` that holds `objs` until the device has
-    /// completed it, and returns its fence.
+    /// Sends `req` (with the `n` bytes at user address `addr` as its extra
+    /// data, if `data` is given) as a fenced request of `file` that holds
+    /// `objs` until the device has completed it, and returns its fence.
     #[allow(clippy::too_many_arguments, reason = "the parts of one fenced request")]
     fn submit_with<T: proto::Wire>(
         &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
+        dev: &DrmDev,
+        file: &File,
         req: &T,
-        data: Option<(&IoctlArg<'_>, u64, u32)>,
+        data: Option<(u64, u32)>,
         objs: &[GemRef<VgObject>],
         ring: Option<u32>,
         ctx: &Sleepable,
     ) -> Result<Fence, Errno> {
         let gpu = self.dev().state();
-        let data_len = data.map_or(0, |(_, _, n)| n as usize);
+        let data_len = data.map_or(0, |(_, n)| n as usize);
         let c = gpu.cmd(self.dev(), req, size_of::<CtrlHdr>(), data_len, Q::Ctrl, ctx)?;
-        if let Some((arg, addr, n)) = data
+        if let Some((addr, n)) = data
             && n > 0
         {
             let d = c.data().ok_or(Errno::EINVAL)?;
@@ -263,45 +307,34 @@ impl VirtioGpu {
             // SAFETY: the destination is `n` bytes of DMA memory the request
             // owns and nothing else accesses before it is submitted.
             let dst = unsafe { core::slice::from_raw_parts_mut(d.as_ptr().as_ptr(), n as usize) };
-            copy_in_bytes(arg, addr as usize, dst)?;
+            copy_in(addr, dst)?;
         }
         let mut held = KVec::new();
         for o in objs {
             held.push(o.clone(), ctx)?;
         }
         c.hold(held);
-        let fr = gpu.file_fence(file, ring)?;
-        gpu.submit(self.dev(), &c, Some((fr, dev.sync().domain())), ctx)?.ok_or(Errno::EIO)
+        let fr = gpu.file_fence(file.id(), ring)?;
+        gpu.submit(self.dev(), &c, Some((fr, dev)), ctx)?.ok_or(Errno::EIO)
     }
 
     /// `DRM_IOCTL_VIRTGPU_WAIT`: waits for the object's readers and writers
     /// (15 s, then `EBUSY`), or only tests them with `VIRTGPU_WAIT_NOWAIT`.
-    pub(crate) fn wait(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let a = UserArg::<uapi::drm_virtgpu_3d_wait>::read(arg)?;
-        let obj = dev.gem().ok_or(Errno::ENXIO)?.lookup(file, a.get().handle)?;
-        let r = if a.get().flags & uapi::VIRTGPU_WAIT_NOWAIT != 0 {
-            if obj.resv().test_signaled(Usage::Read) { Ok(()) } else { Err(Errno::EBUSY) }
-        } else {
-            let deadline = HrTime::now().as_nanos().saturating_add(WAIT_TIMEOUT.as_nanos() as i64);
-            match obj.resv().wait(Usage::Read, true, Some(deadline), ctx) {
-                Err(e) if e == Errno::ETIME => Err(Errno::EBUSY),
-                r => r,
-            }
-        };
-        obj.put(ctx);
-        r
+    fn wait(&self, file: &File, a: &IoctlData<'_>) -> Result<(), Errno> {
+        let v: uapi::drm_virtgpu_3d_wait = read(a)?;
+        let obj = GemRef::<VgObject>::lookup(file, v.handle)?;
+        if v.flags & uapi::VIRTGPU_WAIT_NOWAIT != 0 {
+            return if obj.test_signaled(Usage::Read) { Ok(()) } else { Err(Errno::EBUSY) };
+        }
+        match obj.wait(Usage::Read, true, WAIT_TIMEOUT.as_nanos() as i64) {
+            Err(e) if e == Errno::ETIME => Err(Errno::EBUSY),
+            r => r,
+        }
     }
 
     /// `DRM_IOCTL_VIRTGPU_GET_CAPS`.
-    pub(crate) fn get_caps(&self, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
-        let a = UserArg::<uapi::drm_virtgpu_get_caps>::read(arg)?;
-        let v = *a.get();
+    fn get_caps(&self, a: &IoctlData<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+        let v: uapi::drm_virtgpu_get_caps = read(a)?;
         let gpu = self.dev().state();
         let caps = gpu.caps();
         if caps.capsets.is_empty() {
@@ -317,21 +350,13 @@ impl VirtioGpu {
             .ok_or(Errno::EINVAL)?;
         let data = gpu.capset(self.dev(), info.id, v.cap_set_ver, ctx)?;
         let n = (v.size as usize).min(info.max_size as usize).min(data.len());
-        copy_out_bytes(arg, v.addr as usize, data.get(..n).ok_or(Errno::EIO)?)
+        copy_out(v.addr, data.get(..n).ok_or(Errno::EIO)?)
     }
 
     /// `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB`: guest-memory blobs
     /// (`BLOB_MEM_GUEST`, `BLOB_MEM_HOST3D_GUEST`) only.
-    pub(crate) fn create_blob(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let mut a = UserArg::<uapi::drm_virtgpu_resource_create_blob>::read(arg)?;
-        let v = *a.get();
-        let gem = dev.gem().ok_or(Errno::ENXIO)?;
+    fn create_blob(&self, dev: &DrmDev, file: &File, a: &mut IoctlData<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+        let mut v: uapi::drm_virtgpu_resource_create_blob = read(a)?;
         let gpu = self.dev().state();
         let caps = gpu.caps();
         if !caps.blob {
@@ -352,7 +377,7 @@ impl VirtioGpu {
                 false
             }
             uapi::VIRTGPU_BLOB_MEM_HOST3D_GUEST => {
-                if !caps.virgl || v.cmd_size % 4 != 0 {
+                if !caps.virgl || !v.cmd_size.is_multiple_of(4) {
                     return Err(Errno::EINVAL);
                 }
                 true
@@ -366,15 +391,15 @@ impl VirtioGpu {
             return Err(Errno::EINVAL);
         }
         let size = usize::try_from(v.size).map_err(|_| Errno::ENOMEM)?;
-        let ctx_id = if caps.virgl { gpu.ensure_context(self.dev(), file, ctx)? } else { 0 };
+        let ctx_id = if caps.virgl { gpu.ensure_context(self.dev(), file.id(), ctx)? } else { 0 };
         if v.cmd_size > 0 {
             let req = proto::CmdSubmit {
                 hdr: CtrlHdr::ctx(proto::CMD_SUBMIT_3D, ctx_id),
                 size: v.cmd_size,
                 num_in_fences: 0,
             };
-            let f = self.submit_with(dev, file, &req, Some((arg, v.cmd, v.cmd_size)), &[], None, ctx)?;
-            f.put(Ctx::Sleep(ctx));
+            let f = self.submit_with(dev, file, &req, Some((v.cmd, v.cmd_size)), &[], None, ctx)?;
+            drop(f);
         }
         let how = Create::Blob {
             mem: v.blob_mem,
@@ -382,26 +407,15 @@ impl VirtioGpu {
             blob_id: v.blob_id,
             ctx_id: if host3d { ctx_id } else { 0 },
         };
-        let obj = object::create(gem, self.dr, size, how, ctx)?;
-        let res = obj.object().res();
-        let handle = gem.handle_create(file, obj, ctx)?;
-        // SAFETY: field assignments only.
-        let m = unsafe { a.get_mut() };
-        m.bo_handle = handle;
-        m.res_handle = res;
-        a.write(arg)
+        let obj = object::create(dev, self.dr, size, how, ctx)?;
+        v.bo_handle = obj.handle_create(file)?;
+        v.res_handle = obj.res();
+        write(a, v)
     }
 
     /// `DRM_IOCTL_VIRTGPU_CONTEXT_INIT`.
-    pub(crate) fn context_init(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let a = UserArg::<uapi::drm_virtgpu_context_init>::read(arg)?;
-        let v = *a.get();
+    fn context_init(&self, dev: &DrmDev, file: &File, a: &IoctlData<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+        let v: uapi::drm_virtgpu_context_init = read(a)?;
         let gpu = self.dev().state();
         let caps = gpu.caps();
         if !caps.context_init {
@@ -411,12 +425,7 @@ impl VirtioGpu {
         if v.num_params > 4 {
             return Err(Errno::EINVAL);
         }
-        let raw = copy_in_array::<uapi::drm_virtgpu_context_set_param>(
-            arg,
-            v.ctx_set_params as usize,
-            v.num_params as usize,
-            ctx,
-        )?;
+        let raw = copy_in_structs::<uapi::drm_virtgpu_context_set_param>(v.ctx_set_params, v.num_params as usize)?;
         let mut params = Vec::new();
         for p in raw.iter() {
             params.push(match p.param {
@@ -425,10 +434,10 @@ impl VirtioGpu {
                 x if x == u64::from(uapi::VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK) => ContextParam::PollRings(p.value),
                 CONTEXT_PARAM_DEBUG_NAME => {
                     let mut b = [0u8; 64];
-                    copy_in_bytes(arg, p.value as usize, &mut b[..63]).or_else(|_| {
+                    copy_in(p.value, &mut b[..63]).or_else(|_| {
                         // A shorter string at the end of a page: read it
                         // byte by byte up to its NUL.
-                        read_cstr(arg, p.value as usize, &mut b[..63])
+                        read_cstr(p.value, &mut b[..63])
                     })?;
                     let n = b.iter().position(|&c| c == 0).unwrap_or(63);
                     ContextParam::Name(b[..n].to_vec())
@@ -437,17 +446,18 @@ impl VirtioGpu {
             });
         }
         let parsed = parse_context_params(params, caps.capset_mask())?;
-        gpu.init_context(self.dev(), file, &parsed, dev.sync().domain(), ctx)
+        gpu.init_context(self.dev(), file.id(), &parsed, dev, ctx)
     }
 
-    /// `DRM_IOCTL_VIRTGPU_EXECBUFFER`, in any of its three layouts (`size`
-    /// bytes of the argument were copied into `x`, the rest is zero).
-    pub(crate) fn execbuffer(
+    /// `DRM_IOCTL_VIRTGPU_EXECBUFFER`, in any of its three layouts (`x`
+    /// is the argument widened to the current layout, `a` the argument
+    /// itself, whose `fence_fd` takes the out-fence).
+    fn execbuffer(
         &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
+        dev: &DrmDev,
+        file: &File,
         x: uapi::drm_virtgpu_execbuffer,
-        arg: &IoctlArg<'_>,
+        a: &mut IoctlData<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         let gpu = self.dev().state();
@@ -462,26 +472,15 @@ impl VirtioGpu {
         }
         let ring = (x.flags & uapi::VIRTGPU_EXECBUF_RING_IDX != 0).then_some(x.ring_idx);
         // Checks the ring before anything is created (EINVAL).
-        let own = gpu.file_fence(file, ring)?;
-        let sync = dev.sync();
-        let gem = dev.gem().ok_or(Errno::ENXIO)?;
+        let own = gpu.file_fence(file.id(), ring)?;
         if (x.num_in_syncobjs != 0 || x.num_out_syncobjs != 0)
             && x.syncobj_stride as usize != size_of::<uapi::drm_virtgpu_execbuffer_syncobj>()
         {
             return Err(Errno::EINVAL);
         }
-        let ins = copy_in_array::<uapi::drm_virtgpu_execbuffer_syncobj>(
-            arg,
-            x.in_syncobjs as usize,
-            x.num_in_syncobjs as usize,
-            ctx,
-        )?;
-        let outs = copy_in_array::<uapi::drm_virtgpu_execbuffer_syncobj>(
-            arg,
-            x.out_syncobjs as usize,
-            x.num_out_syncobjs as usize,
-            ctx,
-        )?;
+        let ins = copy_in_structs::<uapi::drm_virtgpu_execbuffer_syncobj>(x.in_syncobjs, x.num_in_syncobjs as usize)?;
+        let outs =
+            copy_in_structs::<uapi::drm_virtgpu_execbuffer_syncobj>(x.out_syncobjs, x.num_out_syncobjs as usize)?;
         if ins.iter().chain(outs.iter()).any(|s| s.flags & !uapi::VIRTGPU_EXECBUF_SYNCOBJ_RESET != 0) {
             return Err(Errno::EINVAL);
         }
@@ -489,121 +488,94 @@ impl VirtioGpu {
         // the submission.
         let mut out_objs: Vec<(Syncobj, u64)> = Vec::new();
         for s in outs.iter() {
-            out_objs.push((sync.syncobj(file, s.handle)?, s.point));
+            out_objs.push((Syncobj::find(file, s.handle)?, s.point));
         }
-        let handles = copy_in_array::<u32>(arg, x.bo_handles as usize, x.num_bo_handles as usize, ctx)?;
+        let n = x.num_bo_handles as usize;
+        if n > MAX_ARRAY {
+            return Err(Errno::EINVAL);
+        }
+        let handles = copy_in_array::<u32>(x.bo_handles, n)?;
         let mut bos = KVec::new();
         for &h in handles.iter() {
-            match gem.lookup(file, h) {
-                Ok(o) => {
-                    if let Err(e) = bos.push(o, ctx) {
-                        put_all(bos, ctx);
-                        return Err(e);
-                    }
-                }
-                Err(e) => {
-                    put_all(bos, ctx);
-                    return Err(e);
-                }
-            }
+            bos.push(GemRef::<VgObject>::lookup(file, h)?, ctx)?;
         }
-        let r = self.execbuffer_locked(dev, file, &x, (ring, own), &ins, &out_objs, &bos, arg, ctx);
-        put_all(bos, ctx);
-        for (s, _) in out_objs {
-            drop(s);
+        let fence = self.execbuffer_locked(dev, file, &x, (ring, own), &ins, &out_objs, &bos, ctx)?;
+        if x.flags & uapi::VIRTGPU_EXECBUF_FENCE_FD_OUT != 0 {
+            let fd = sync_file_export(&fence, true)?;
+            // Only fence_fd changes; the core copies the argument out after
+            // the handler returns.
+            set_fence_fd(a, fd)?;
         }
-        r
+        Ok(())
     }
 
+    /// Waits for the in-fences, submits the command stream and publishes its
+    /// fence in the objects and the out sync objects; returns the fence.
     #[allow(clippy::too_many_arguments, reason = "the parsed parts of one EXECBUFFER")]
     fn execbuffer_locked(
         &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
+        dev: &DrmDev,
+        file: &File,
         x: &uapi::drm_virtgpu_execbuffer,
         (ring, own): (Option<u32>, FenceReq),
-        ins: &KVec<uapi::drm_virtgpu_execbuffer_syncobj>,
+        ins: &[uapi::drm_virtgpu_execbuffer_syncobj],
         outs: &[(Syncobj, u64)],
         bos: &KVec<GemRef<VgObject>>,
-        arg: &IoctlArg<'_>,
         ctx: &Sleepable,
-    ) -> Result<(), Errno> {
+    ) -> Result<Fence, Errno> {
         let gpu = self.dev().state();
-        let sync = dev.sync();
         // In-fences: the device orders its own fences; others are waited
         // for here, interruptibly, as Linux does.
         if x.flags & uapi::VIRTGPU_EXECBUF_FENCE_FD_IN != 0 {
-            let f = sync.sync_file_fence(x.fence_fd, arg, ctx)?;
-            let r = self.wait_foreign(own, &f, ctx);
-            f.put(Ctx::Sleep(ctx));
-            r?;
+            let f = sync_file_fence(x.fence_fd)?;
+            wait_foreign(own, &f)?;
         }
         let mut resets = Vec::new();
         for s in ins.iter() {
-            let so = sync.syncobj(file, s.handle)?;
-            let f = so.find_fence(s.point, false, ctx)?;
-            let r = self.wait_foreign(own, &f, ctx);
-            f.put(Ctx::Sleep(ctx));
-            r?;
+            let so = Syncobj::find(file, s.handle)?;
+            let f = Syncobj::find_fence(file, s.handle, s.point, false)?;
+            wait_foreign(own, &f)?;
             if s.flags & uapi::VIRTGPU_EXECBUF_SYNCOBJ_RESET != 0 {
                 resets.push(so);
             }
         }
-        let ctx_id = gpu.ensure_context(self.dev(), file, ctx)?;
+        let ctx_id = gpu.ensure_context(self.dev(), file.id(), ctx)?;
         let req = proto::CmdSubmit { hdr: CtrlHdr::ctx(proto::CMD_SUBMIT_3D, ctx_id), size: x.size, num_in_fences: 0 };
-        let fence = self.submit_with(dev, file, &req, Some((arg, x.command, x.size)), bos, ring, ctx)?;
+        let fence = self.submit_with(dev, file, &req, Some((x.command, x.size)), bos, ring, ctx)?;
         // The work is queued; what follows only publishes its fence.
         let mut r = Ok(());
         for b in bos.iter() {
-            if let Err(e) = add_fence(b, &fence, ctx) {
+            if let Err(e) = b.add_fence(&fence, Usage::Write) {
                 r = Err(e);
             }
         }
         for (so, point) in outs {
-            if let Err(e) = so.add_point(fence.clone(), *point, ctx) {
-                r = Err(e);
-            }
+            so.add_point(&fence, *point);
         }
         for so in resets {
-            so.replace_fence(None, ctx);
+            so.replace_fence(None);
         }
-        if r.is_ok() && x.flags & uapi::VIRTGPU_EXECBUF_FENCE_FD_OUT != 0 {
-            r = sync.export_sync_file(
-                fence.clone(),
-                b"virtio_gpu",
-                arg,
-                |fd| copy_out_bytes(arg, (arg.raw() + FENCE_FD_OFFSET) as usize, &fd.to_ne_bytes()),
-                ctx,
-            );
-        }
-        fence.put(Ctx::Sleep(ctx));
-        r
-    }
-
-    /// Waits for fence `f` unless it is on `own`, the fence context of the
-    /// submission, whose order the device keeps (Linux's
-    /// `dma_fence_match_context`); fences of other contexts, other rings of
-    /// the same file included, are waited for here, interruptibly.
-    fn wait_foreign(&self, own: FenceReq, f: &Fence, ctx: &Sleepable) -> Result<(), Errno> {
-        if f.context() == own.context {
-            return Ok(());
-        }
-        f.wait(true, None, ctx)
+        r.map(|()| fence)
     }
 }
 
-/// Adds `f` to the reservation of `obj` as a writer.
-fn add_fence(obj: &GemRef<VgObject>, f: &Fence, ctx: &Sleepable) -> Result<(), Errno> {
-    let g = obj.resv().lock().lock_plain(ctx);
-    obj.resv().add_fence(&g, f.clone(), Usage::Write, ctx)
+/// Waits for fence `f` unless it is on `own`, the fence context of the
+/// submission, whose order the device keeps (Linux's
+/// `dma_fence_match_context`); fences of other contexts, other rings of
+/// the same file included, are waited for here, interruptibly.
+fn wait_foreign(own: FenceReq, f: &Fence) -> Result<(), Errno> {
+    if f.context() == own.context {
+        return Ok(());
+    }
+    f.wait(true, -1)
 }
 
 /// Reads a NUL-terminated string of at most `out.len()` bytes from user
 /// address `addr`.
-fn read_cstr(arg: &IoctlArg<'_>, addr: usize, out: &mut [u8]) -> Result<(), Errno> {
+fn read_cstr(addr: u64, out: &mut [u8]) -> Result<(), Errno> {
     for (i, b) in out.iter_mut().enumerate() {
         let mut c = [0u8];
-        copy_in_bytes(arg, addr + i, &mut c)?;
+        copy_in(addr + i as u64, &mut c)?;
         *b = c[0];
         if c[0] == 0 {
             break;
@@ -624,14 +596,37 @@ pub(crate) fn widen_transfer(t: &uapi::drm_virtgpu_3d_transfer_to_host_v1) -> ua
     }
 }
 
+/// Sets `fence_fd` in the `EXECBUFFER` argument, in the layout of the
+/// matched command.
+fn set_fence_fd(a: &mut IoctlData<'_>, fd: i32) -> Result<(), Errno> {
+    match a.cmd() {
+        uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER => {
+            let mut v: uapi::drm_virtgpu_execbuffer = read(a)?;
+            v.fence_fd = fd;
+            write(a, v)
+        }
+        uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V2 => {
+            let mut v: uapi::drm_virtgpu_execbuffer_v2 = read(a)?;
+            v.fence_fd = fd;
+            write(a, v)
+        }
+        uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V1 => {
+            let mut v: uapi::drm_virtgpu_execbuffer_v1 = read(a)?;
+            v.fence_fd = fd;
+            write(a, v)
+        }
+        _ => Err(Errno::ENOTTY),
+    }
+}
+
 /// Reads the `EXECBUFFER` argument of command `cmd`, zero-extended to the
 /// current layout.
-pub(crate) fn read_execbuffer(cmd: u32, arg: &IoctlArg<'_>) -> Result<uapi::drm_virtgpu_execbuffer, Errno> {
+pub(crate) fn read_execbuffer(cmd: u32, a: &IoctlData<'_>) -> Result<uapi::drm_virtgpu_execbuffer, Errno> {
     let mut x = uapi::drm_virtgpu_execbuffer::default();
     match cmd {
-        uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER => x = *UserArg::<uapi::drm_virtgpu_execbuffer>::read(arg)?.get(),
+        uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER => x = read(a)?,
         uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V2 => {
-            let v = *UserArg::<uapi::drm_virtgpu_execbuffer_v2>::read(arg)?.get();
+            let v: uapi::drm_virtgpu_execbuffer_v2 = read(a)?;
             x.flags = v.flags;
             x.size = v.size;
             x.command = v.command;
@@ -641,7 +636,7 @@ pub(crate) fn read_execbuffer(cmd: u32, arg: &IoctlArg<'_>) -> Result<uapi::drm_
             x.ring_idx = v.ring_idx;
         }
         uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V1 => {
-            let v = *UserArg::<uapi::drm_virtgpu_execbuffer_v1>::read(arg)?.get();
+            let v: uapi::drm_virtgpu_execbuffer_v1 = read(a)?;
             x.flags = v.flags;
             x.size = v.size;
             x.command = v.command;

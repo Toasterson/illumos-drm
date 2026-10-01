@@ -38,5 +38,5 @@ file path=usr/kernel/drv/cdrmnull.conf owner=root group=sys mode=0644 \
     preserve=true
 driver name=cdrmnull perms="* 0666 root sys" \
     devlink=type=ddi_display:drm;name=cdrmnull\tdri/\M0
-depend fmri=pkg:/driver/graphics/drm@0.0.1 type=require
+depend fmri=pkg:/driver/graphics/illumos-drm@0.0.1 type=require
 license LICENSE license=MPL-2.0

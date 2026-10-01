@@ -21,10 +21,11 @@
 //! after each queue interrupt (`VirtioHandler::queue_work`), or on a
 //! thread that waits for a request and polls the queue itself. Completing a
 //! request records the response type, wakes its waiters, signals its fence
-//! and drops the GEM references it held. Those are dropped through the
-//! interrupt-safe path, which parks the last reference for the GEM task
-//! queue: destroying an object waits for `RESOURCE_UNREF`, and that must not
-//! happen on the thread that completes requests.
+//! and drops the GEM references it held. Those are dropped with
+//! `GemRef::put_deferred`, which parks a last reference for the core's GEM
+//! task queue: destroying an object waits for `RESOURCE_UNREF`, and that
+//! must not happen on the thread that completes requests (which may hold
+//! `submit`, when a submitter found the queue full).
 //!
 //! # Fences
 //!
@@ -34,10 +35,19 @@
 //! under one mutex, so the ids of a fence context reach the device in
 //! order, and the device completes the fences of one context (its own, or
 //! one ring of a context) in that order; nothing orders two contexts, so
-//! an in-fence of another context is waited for before a submission. The request's
-//! completion signals its [`Fence`], on the device's fence context or on a
-//! ring context of the file (`CONTEXT_INIT` with rings).
-
+//! an in-fence of another context is waited for before a submission. The
+//! request's completion signals its [`Fence`], on the device's fence
+//! context or on a ring context of the file (`CONTEXT_INIT` with rings).
+//! Fences and their contexts are the DRM device's, made through the facade.
+//!
+//! # Contexts
+//!
+//! Every open file gets a rendering context id when it is opened: the
+//! smallest id no other open file of the device has, from 1, as Linux
+//! takes them from an IDA. The context itself is created on first use
+//! (`CTX_CREATE`) and destroyed when the file closes (`CTX_DESTROY`); the
+//! id is free again only after that, so a new file never reaches the device
+//! with the id of a context that still exists.
 //!
 //! # Locks
 //!
@@ -56,7 +66,7 @@
 //! threads, own and shared files) exercises these paths together in the
 //! kernel.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::num::NonZeroU32;
@@ -67,12 +77,9 @@ use ddi::prelude::*;
 use ddi::private::virtio::{
     Chain, ChainData, Direction, QueueId, VirtioConfig, VirtioDev, VirtioDma, VirtioError, VirtioHandler,
 };
-use drm::defer::Ctx;
-use drm::fence::{Fence, FenceDomain};
-use drm::gem::GemRef;
-use drm::karc::KArc;
-use drm::kvec::KVec;
-use drm::minor::CloneId;
+use drm_facade::karc::KArc;
+use drm_facade::kvec::KVec;
+use drm_facade::{Fence, FileId, GemRef};
 
 use crate::object::VgObject;
 use crate::proto::{self, CtrlHdr, Wire};
@@ -267,6 +274,8 @@ impl Caps {
 /// The rendering context of a file (created on first use).
 #[derive(Default)]
 pub struct FileCtx {
+    /// The context id, given when the file was opened.
+    pub id: u32,
     /// `CTX_CREATE` was sent.
     pub created: bool,
     /// `CONTEXT_INIT`: the capability set (0: the device's default).
@@ -301,6 +310,27 @@ pub enum ContextParam {
     PollRings(u64),
     /// `VIRTGPU_CONTEXT_PARAM_DEBUG_NAME`.
     Name(Vec<u8>),
+}
+
+/// The smallest context id, from 1, that is not in `used`; `None` when all
+/// four billion are.
+pub fn first_free_id(used: &BTreeSet<u32>) -> Option<u32> {
+    let mut want = 1u32;
+    for &u in used.range(1..) {
+        if u > want {
+            break;
+        }
+        want = want.checked_add(1)?;
+    }
+    Some(want)
+}
+
+/// The contexts of the open files: by file, and the ids in use (those of
+/// open files and of closing files whose context is being destroyed).
+#[derive(Default)]
+struct Files {
+    by_file: BTreeMap<FileId, FileCtx>,
+    ids: BTreeSet<u32>,
 }
 
 /// The most rings of a context (Linux's `VIRTGPU_MAX_RINGS`... 64).
@@ -383,14 +413,13 @@ pub struct Gpu {
     next_fence_id: AtomicU64,
     next_resource: AtomicU32,
     /// The fence context of fenced requests outside a ring, set once the
-    /// DRM device exists. The fence domain itself is the DRM device's and is
-    /// passed in by the ioctls: a reference kept here would make the core's
-    /// detach check find the domain still in use.
+    /// DRM device exists. Fences are made on the DRM device, which the
+    /// ioctls pass in; the state keeps nothing of it.
     fence_context: AtomicU64,
     /// Capability set contents, fetched on first use.
     capset_cache: Mutex<Vec<(u32, u32, Vec<u8>)>>,
-    /// Rendering contexts by file (clone id).
-    files: Mutex<BTreeMap<u32, FileCtx>>,
+    /// Rendering contexts by file.
+    files: Mutex<Files>,
     /// Serialises context creation.
     ctx_lock: Mutex<()>,
     /// The display configuration changed since the last probe.
@@ -405,6 +434,9 @@ pub struct Gpu {
 
 /// The device: the framework object with the driver state.
 pub type Dev = VirtioDev<Gpu>;
+
+/// The DRM device of the driver, on which fences are made.
+pub type DrmDev = drm_facade::Dev<crate::VirtioGpu>;
 
 impl VirtioHandler for Gpu {
     type Config = GpuConfig;
@@ -441,7 +473,7 @@ impl Gpu {
             next_resource: AtomicU32::new(0),
             fence_context: AtomicU64::new(0),
             capset_cache: Mutex::new(Vec::new()),
-            files: Mutex::new(BTreeMap::new()),
+            files: Mutex::new(Files::default()),
             ctx_lock: Mutex::new(()),
             display_changed: AtomicBool::new(true),
             stats: Stats::default(),
@@ -460,10 +492,10 @@ impl Gpu {
         self.caps.lock().virgl
     }
 
-    /// Takes the fence context of fenced requests from the DRM device's
-    /// fence domain, once the device exists.
-    pub fn set_fence_context(&self, domain: &FenceDomain) {
-        self.fence_context.store(domain.alloc_contexts(1), Ordering::Release);
+    /// Takes the fence context of fenced requests from the DRM device,
+    /// once it exists.
+    pub fn set_fence_context(&self, drm: &DrmDev) {
+        self.fence_context.store(Fence::alloc_contexts(drm, 1), Ordering::Release);
     }
 
     /// The fence context of fenced requests outside a ring.
@@ -530,19 +562,19 @@ impl Gpu {
         }
     }
 
-    /// Queues `cmd`, with a fence if `fence` is given, which is returned.
-    /// Waits while the queue is full.
+    /// Queues `cmd`, with a fence of DRM device `drm` if `fence` is given,
+    /// which is returned. Waits while the queue is full.
     pub fn submit(
         &self,
         dev: &Dev,
         cmd: &KArc<Cmd>,
-        fence: Option<(FenceReq, &KArc<FenceDomain>)>,
+        fence: Option<(FenceReq, &DrmDev)>,
         ctx: &Sleepable,
     ) -> Result<Option<Fence>, Errno> {
         let queue = dev.queue(self.queue_id(cmd.queue)).ok_or(Errno::ENXIO)?;
         let _g = self.submit.lock();
         let mut out = None;
-        if let Some((fr, domain)) = fence {
+        if let Some((fr, drm)) = fence {
             let id = self.next_fence_id.fetch_add(1, Ordering::AcqRel) + 1;
             let mut hdr: CtrlHdr = {
                 let mut b = [0u8; size_of::<CtrlHdr>()];
@@ -556,7 +588,7 @@ impl Gpu {
                 hdr.ring_idx = r;
             }
             cmd.buf.write(0, proto::bytes_of(&hdr))?;
-            let f = Fence::new(domain, fr.context, id, ctx)?;
+            let f = Fence::new(drm, fr.context, id)?;
             *cmd.fence.lock() = Some(f.clone());
             out = Some(f);
             self.stats.fenced.fetch_add(1, Ordering::Relaxed);
@@ -580,12 +612,9 @@ impl Gpu {
                 Err((_, e)) => {
                     // Every fence must signal.
                     if let Some(f) = cmd.fence.lock().take() {
-                        f.signal_with_error(Errno::EIO, Ctx::Sleep(ctx));
-                        f.put(Ctx::Sleep(ctx));
+                        f.signal_with_error(Errno::EIO);
                     }
-                    if let Some(f) = out.take() {
-                        f.put(Ctx::Sleep(ctx));
-                    }
+                    drop(out);
                     return Err(e.errno());
                 }
             }
@@ -643,15 +672,16 @@ impl Gpu {
         Ok(c)
     }
 
-    /// Completes every request the device has returned on `q`.
-    pub fn drain(&self, dev: &Dev, q: Q, ctx: &Sleepable) {
+    /// Completes every request the device has returned on `q`. Thread
+    /// context: a completion signals fences, whose callbacks may block.
+    pub fn drain(&self, dev: &Dev, q: Q, _ctx: &Sleepable) {
         let Some(queue) = dev.queue(self.queue_id(q)) else { return };
         while let Some(done) = queue.poll() {
-            self.complete(done.data.0, ctx);
+            self.complete(done.data.0);
         }
     }
 
-    fn complete(&self, cmd: KArc<Cmd>, ctx: &Sleepable) {
+    fn complete(&self, cmd: KArc<Cmd>) {
         let resp = if cmd.resp_len > 0 {
             cmd.buf.sync_for_kernel();
             let mut b = [0u8; 4];
@@ -680,11 +710,13 @@ impl Gpu {
                 );
             }
         }
-        // The objects go through the interrupt-safe path: if this is the
-        // last reference, the GEM task queue destroys the object, whose
-        // RESOURCE_UNREF must not be waited for on this thread.
-        let objs = core::mem::take(&mut *cmd.objs.lock());
-        drop(objs);
+        // If this is the last reference, the core's GEM task queue destroys
+        // the object, whose RESOURCE_UNREF must not be waited for on this
+        // thread.
+        let mut objs = core::mem::take(&mut *cmd.objs.lock());
+        while let Some(o) = objs.swap_remove(0) {
+            o.put_deferred();
+        }
         {
             let mut s = cmd.state.lock();
             s.done = true;
@@ -696,8 +728,8 @@ impl Gpu {
             if !ok {
                 f.set_error(Errno::EIO);
             }
-            f.signal(Ctx::Sleep(ctx));
-            f.put(Ctx::Sleep(ctx));
+            f.signal();
+            drop(f);
         }
         drop(cmd);
     }
@@ -769,40 +801,49 @@ impl Gpu {
 
     // --- contexts ---
 
-    /// The context id of file `file`: its clone id, which the file keeps
-    /// until its close has destroyed the context.
-    pub fn ctx_id(file: CloneId) -> u32 {
-        file.get()
+    /// Gives a new file its context id (`Driver::file_open`).
+    pub fn file_open(&self, file: FileId) -> Result<(), Errno> {
+        let mut files = self.files.lock();
+        if files.by_file.contains_key(&file) {
+            return Err(Errno::EEXIST);
+        }
+        let id = first_free_id(&files.ids).ok_or(Errno::ENOSPC)?;
+        files.ids.insert(id);
+        files.by_file.insert(file, FileCtx { id, ..FileCtx::default() });
+        Ok(())
     }
 
     /// Creates the rendering context of `file` if it does not exist
     /// (Linux's `virtio_gpu_create_context`); returns its id.
-    pub fn ensure_context(&self, dev: &Dev, file: CloneId, ctx: &Sleepable) -> Result<u32, Errno> {
-        let id = Self::ctx_id(file);
-        if self.files.lock().get(&id).is_some_and(|f| f.created) {
-            return Ok(id);
+    pub fn ensure_context(&self, dev: &Dev, file: FileId, ctx: &Sleepable) -> Result<u32, Errno> {
+        {
+            let files = self.files.lock();
+            let f = files.by_file.get(&file).ok_or(Errno::EINVAL)?;
+            if f.created {
+                return Ok(f.id);
+            }
         }
         let _g = self.ctx_lock.lock();
-        self.create_context_locked(dev, id, ctx)
+        self.create_context_locked(dev, file, ctx)
     }
 
     /// `CONTEXT_INIT`: sets the capability set, the rings and the name of
     /// the context of `file` and creates it, all under the context lock,
     /// so that of two concurrent calls the second finds the context and
-    /// fails with `EEXIST`, as Linux's `context_lock` makes it.
+    /// fails with `EEXIST`, as Linux's `context_lock` makes it. The rings'
+    /// fence contexts are taken from DRM device `drm`.
     pub fn init_context(
         &self,
         dev: &Dev,
-        file: CloneId,
+        file: FileId,
         p: &ContextParams,
-        domain: &FenceDomain,
+        drm: &DrmDev,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
-        let id = Self::ctx_id(file);
         let _g = self.ctx_lock.lock();
         {
             let mut files = self.files.lock();
-            let f = files.entry(id).or_default();
+            let f = files.by_file.get_mut(&file).ok_or(Errno::EINVAL)?;
             if f.created {
                 return Err(Errno::EEXIST);
             }
@@ -810,21 +851,21 @@ impl Gpu {
             // sets them again and takes fresh ring contexts.
             f.capset = p.capset;
             f.num_rings = p.rings;
-            f.ring_base = if p.rings > 0 { domain.alloc_contexts(u64::from(p.rings)) } else { 0 };
+            f.ring_base = if p.rings > 0 { Fence::alloc_contexts(drm, p.rings) } else { 0 };
             f.name = p.name.clone();
         }
-        self.create_context_locked(dev, id, ctx).map(drop)
+        self.create_context_locked(dev, file, ctx).map(drop)
     }
 
-    /// Sends `CTX_CREATE` for context `id` unless it exists; the caller
-    /// holds `ctx_lock`.
-    fn create_context_locked(&self, dev: &Dev, id: u32, ctx: &Sleepable) -> Result<u32, Errno> {
-        let (capset, name) = {
+    /// Sends `CTX_CREATE` for the context of `file` unless it exists; the
+    /// caller holds `ctx_lock`.
+    fn create_context_locked(&self, dev: &Dev, file: FileId, ctx: &Sleepable) -> Result<u32, Errno> {
+        let (id, capset, name) = {
             let files = self.files.lock();
-            match files.get(&id) {
-                Some(f) if f.created => return Ok(id),
-                Some(f) => (f.capset, f.name.clone()),
-                None => (0, Vec::new()),
+            match files.by_file.get(&file) {
+                Some(f) if f.created => return Ok(f.id),
+                Some(f) => (f.id, f.capset, f.name.clone()),
+                None => return Err(Errno::EINVAL),
             }
         };
         let mut req = proto::CtxCreate {
@@ -848,18 +889,20 @@ impl Gpu {
         }
         req.nlen = n as u32;
         self.run(dev, &req, size_of::<CtrlHdr>(), proto::RESP_OK_NODATA, ctx)?;
-        self.files.lock().entry(id).or_default().created = true;
+        if let Some(f) = self.files.lock().by_file.get_mut(&file) {
+            f.created = true;
+        }
         Ok(id)
     }
 
     /// The fence request of a submission of `file` on `ring` (`None`: the
     /// device's own context).
-    pub fn file_fence(&self, file: CloneId, ring: Option<u32>) -> Result<FenceReq, Errno> {
+    pub fn file_fence(&self, file: FileId, ring: Option<u32>) -> Result<FenceReq, Errno> {
         match ring {
             None => Ok(FenceReq { context: self.fence_context(), ring: None }),
             Some(r) => {
                 let files = self.files.lock();
-                let f = files.get(&Self::ctx_id(file)).ok_or(Errno::EINVAL)?;
+                let f = files.by_file.get(&file).ok_or(Errno::EINVAL)?;
                 if r >= f.num_rings || f.ring_base == 0 {
                     return Err(Errno::EINVAL);
                 }
@@ -868,22 +911,24 @@ impl Gpu {
         }
     }
 
-    /// Destroys the context of a closing file.
-    pub fn file_close(&self, dev: &Dev, file: CloneId, ctx: &Sleepable) {
-        let id = Self::ctx_id(file);
+    /// Destroys the context of a closing file and frees its id
+    /// (`Driver::file_close`).
+    pub fn file_close(&self, dev: &Dev, file: FileId, ctx: &Sleepable) {
         let _g = self.ctx_lock.lock();
-        let f = self.files.lock().remove(&id);
-        if f.is_some_and(|f| f.created) {
-            let req = CtrlHdr::ctx(proto::CMD_CTX_DESTROY, id);
+        let f = self.files.lock().by_file.remove(&file);
+        let Some(f) = f else { return };
+        if f.created {
+            let req = CtrlHdr::ctx(proto::CMD_CTX_DESTROY, f.id);
             if let Err(e) = self.run(dev, &req, size_of::<CtrlHdr>(), proto::RESP_OK_NODATA, ctx) {
-                dev_warn(self.instance, format_args!("CTX_DESTROY of context {id}: {e:?}"));
+                dev_warn(self.instance, format_args!("CTX_DESTROY of context {}: {e:?}", f.id));
             }
         }
+        self.files.lock().ids.remove(&f.id);
     }
 
-    /// Whether the file has a context.
-    pub fn has_context(&self, file: CloneId) -> bool {
-        self.files.lock().get(&Self::ctx_id(file)).is_some_and(|f| f.created)
+    /// The context id of `file` if its context exists.
+    pub fn context(&self, file: FileId) -> Option<u32> {
+        self.files.lock().by_file.get(&file).filter(|f| f.created).map(|f| f.id)
     }
 }
 

@@ -3,16 +3,18 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Host tests of the driver's pure logic: response codes, damage merging,
-//! `CONTEXT_INIT` parameters, capability-set masks and the wire layout.
+//! `CONTEXT_INIT` parameters, capability-set masks, context ids and the
+//! wire layout.
 
 extern crate std;
 
+use alloc::collections::BTreeSet;
 use alloc::vec;
 
 use ddi::Errno;
-use drm::kms::DirtyRect;
+use drm_facade::kms::DirtyRect;
 
-use crate::gpu::{Caps, CapsetInfo, ContextParam, ContextParams, check, parse_context_params};
+use crate::gpu::{Caps, CapsetInfo, ContextParam, ContextParams, check, first_free_id, parse_context_params};
 use crate::kms::merge_clips;
 use crate::proto;
 
@@ -84,6 +86,19 @@ fn capset_mask_has_a_bit_per_id() {
         CapsetInfo { id: 70, max_version: 1, max_size: 4 },
     ];
     assert_eq!(c.capset_mask(), 0b110);
+}
+
+#[test]
+fn context_ids_are_the_smallest_free_from_1() {
+    let set = |v: &[u32]| v.iter().copied().collect::<BTreeSet<u32>>();
+    assert_eq!(first_free_id(&set(&[])), Some(1));
+    assert_eq!(first_free_id(&set(&[1, 2, 3])), Some(4));
+    // The id of a closed file is taken again first.
+    assert_eq!(first_free_id(&set(&[1, 3, 4])), Some(2));
+    assert_eq!(first_free_id(&set(&[2, 3])), Some(1));
+    // 0 is never given (Linux's ids start at 1 too).
+    assert_eq!(first_free_id(&set(&[0, 1])), Some(2));
+    assert_eq!(first_free_id(&set(&[u32::MAX - 1, u32::MAX])), Some(1));
 }
 
 #[test]
