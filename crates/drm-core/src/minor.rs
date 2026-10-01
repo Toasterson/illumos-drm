@@ -12,7 +12,7 @@
 //!
 //! `N`, the device number, is not the driver's instance number: every
 //! device of every driver takes the lowest free number from the one table
-//! of the system ([`crate::slots`], in the core module `misc/drm`) when it
+//! of the system ([`crate::slots`], in the core module `misc/drm_core`) when it
 //! registers and gives it back when it unregisters, so that no two devices
 //! are ever both named `card0`. The core records which driver instance
 //! holds which number ([`bind`]), so that [`instance_of_minor`] can map a

@@ -102,7 +102,9 @@ pub unsafe extern "C" fn drm_gem_object_put(obj: *mut f::drm_gem_object) {
     let Some(p) = (unsafe { crate::fobj::raw_of(obj) }) else { return };
     // SAFETY: one of the caller's counted references.
     let r = unsafe { GemRef::<FObj>::from_raw(p) };
-    super::with_ctx(|c| r.put_in(c));
+    // SAFETY: drm_gem.h: an interrupt handler or a thread that may block;
+    // other contexts use drm_illumos_gem_object_put_deferred.
+    unsafe { super::with_ctx(|c| r.put_in(c)) };
 }
 
 #[unsafe(no_mangle)]

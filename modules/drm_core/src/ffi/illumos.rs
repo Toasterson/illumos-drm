@@ -48,7 +48,10 @@ unsafe fn with_backing<R>(
     // SAFETY: the caller's contract.
     let r = unsafe { gem_ref(obj) }?;
     let out = r.object().with_backing(i as usize, f);
-    super::with_ctx(|c| r.put_in(c));
+    // Never the last reference (the caller holds one): no release here.
+    // SAFETY: nothing on this path blocks.
+    let a = unsafe { ddi::Atomic::assume() };
+    r.put_in(drm_core::defer::Ctx::Atomic(&a));
     out
 }
 
@@ -119,7 +122,10 @@ pub unsafe extern "C" fn drm_illumos_gem_foreach_mapping(
             unsafe { func(&m as *const Mapping as *mut f::drm_illumos_mapping, arg) };
         }
     });
-    super::with_ctx(|c| r.put_in(c));
+    // Never the last reference (the caller holds one): no release here.
+    // SAFETY: nothing on this path blocks.
+    let a = unsafe { ddi::Atomic::assume() };
+    r.put_in(drm_core::defer::Ctx::Atomic(&a));
 }
 
 #[unsafe(no_mangle)]
@@ -206,10 +212,8 @@ pub unsafe extern "C" fn drm_illumos_fence_create(
         return neg(Errno::ENODEV) as isize as *mut f::dma_fence;
     };
     let domain = d.sync().domain();
-    let fence = super::with_ctx(|c| match c {
-        drm_core::defer::Ctx::Sleep(s) => Fence::new(domain, context, seqno, s).ok(),
-        drm_core::defer::Ctx::Atomic(_) => Fence::try_new(domain, context, seqno).ok(),
-    });
+    // Without sleeping for memory, in any context.
+    let fence = Fence::try_new(domain, context, seqno).ok();
     match fence.map(super::fence::proxy) {
         Some(p) if !p.is_null() => p,
         _ => err,

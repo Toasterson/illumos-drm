@@ -166,7 +166,11 @@ extern long dma_fence_wait_timeout(struct dma_fence *fence, bool intr,
  * Runs `func` when the fence signals, in the signaller's context. Returns
  * 0, or -ENOENT if the fence has signalled already (func is not called),
  * or -ENOMEM (an illumos addition: the core could not allocate its
- * callback record without sleeping).
+ * callback record without sleeping). May be called from any context up
+ * to low-level interrupts. `func` may drop the last reference to this
+ * structure (dma_fence_put()), as on Linux; callbacks still added when
+ * the last reference goes are removed and never run, and the release
+ * waits for a callback function running on another processor.
  */
 extern int dma_fence_add_callback(struct dma_fence *fence,
     struct dma_fence_cb *cb, dma_fence_func_t func);
@@ -174,7 +178,8 @@ extern int dma_fence_add_callback(struct dma_fence *fence,
 /*
  * Removes a callback that has not run. Returns true if it was removed;
  * false if it has run or is running, and in that case waits until it has
- * finished. Thread context only.
+ * finished. Thread context only, and not from a callback of the same
+ * fence (as on Linux, where that would deadlock on the fence's lock).
  */
 extern bool dma_fence_remove_callback(struct dma_fence *fence,
     struct dma_fence_cb *cb);

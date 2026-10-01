@@ -903,7 +903,10 @@ impl Fence {
     /// `false` if it has run (this waits until a running callback has
     /// finished) or was never registered with this fence.
     pub fn remove_callback<T: FenceCallback>(&self, cb: &FenceCb<T>, ctx: &Sleepable) -> bool {
-        self.remove_callback_with(cb, || ksync::yield_briefly(ctx))
+        self.remove_callback_with(cb, || {
+            ksync::yield_briefly(ctx);
+            true
+        })
     }
 
     /// As [`Fence::remove_callback`], for a caller without the token, such
@@ -911,10 +914,25 @@ impl Fence {
     /// runs on another processor, this spins. Callbacks do not block, so
     /// the spin is short. Never call it from the fence's own callback.
     pub fn remove_callback_spin<T: FenceCallback>(&self, cb: &FenceCb<T>) -> bool {
-        self.remove_callback_with(cb, core::hint::spin_loop)
+        self.remove_callback_with(cb, || {
+            core::hint::spin_loop();
+            true
+        })
     }
 
-    fn remove_callback_with<T: FenceCallback>(&self, cb: &FenceCb<T>, pause: impl Fn()) -> bool {
+    /// As [`Fence::remove_callback`], but never waits: a callback that runs
+    /// or is queued to run (by the thread that signals the fence) is left
+    /// to it, and `false` returned. For a caller that makes the callback
+    /// harmless by other means first (the facade's released structures),
+    /// and that may itself be the thread running the fence's callbacks.
+    /// Any context.
+    pub fn remove_callback_nowait<T: FenceCallback>(&self, cb: &FenceCb<T>) -> bool {
+        self.remove_callback_with(cb, || false)
+    }
+
+    /// `pause` runs while the callback runs; it returns `false` to stop
+    /// waiting.
+    fn remove_callback_with<T: FenceCallback>(&self, cb: &FenceCb<T>, pause: impl Fn() -> bool) -> bool {
         let inner = self.inner();
         let h = cb.hdr();
         // SAFETY: the handle keeps the node alive.
@@ -951,7 +969,9 @@ impl Fence {
             }
         }
         while hdr.state.load(Ordering::Acquire) == CB_RUNNING {
-            pause();
+            if !pause() {
+                break;
+            }
         }
         false
     }

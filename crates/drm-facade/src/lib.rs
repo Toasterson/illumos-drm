@@ -4,7 +4,7 @@
 
 //! The safe Rust interface of the DRM facade, for Rust DRM drivers.
 //!
-//! Since milestone R5a the DRM core is the kernel module `misc/drm`, and
+//! Since milestone R5a the DRM core is the kernel module `misc/drm_core`, and
 //! every driver, in C or in Rust, uses it through the same C functions
 //! (`include/drm`, bound by `drm-facade-sys`). This crate wraps those
 //! functions in safe types; it calls nothing else in the core, holds no
@@ -19,7 +19,7 @@
 //!   created with [`Device::register`] in `attach(9E)` and given back with
 //!   [`Device::unregister`] in `detach(9E)`;
 //! * points its `cb_ops` at the core: `ddi::module! { driver: X, cb_ops:
-//!   drm_facade::CB_OPS.get() }`, and maps minors with
+//!   unsafe drm_facade::CB_OPS.get() }`, and maps minors with
 //!   [`instance_of_minor`];
 //! * makes its buffer objects [`GemRef<T>`](GemRef) of a [`GemObject`]
 //!   type, its fences [`Fence`]s, and describes its display with

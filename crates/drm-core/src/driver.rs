@@ -196,7 +196,7 @@ pub struct DumbCreated {
 /// ([`DriverInfo`]), its buffer-object type and dumb-buffer rules, its
 /// private ioctls and the hooks the core calls.
 ///
-/// Since milestone R5a the core is the kernel module `misc/drm`, and the
+/// Since milestone R5a the core is the kernel module `misc/drm_core`, and the
 /// only implementation is the module's facade driver, which forwards every
 /// hook to a driver's C table (`struct drm_driver` of `include/drm`): the
 /// core is monomorphised once, inside the module. A driver module, in C or

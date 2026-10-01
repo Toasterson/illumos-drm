@@ -110,7 +110,8 @@ pub struct Settings<'a> {
 /// driver's state after it.
 #[repr(C)]
 pub struct Dev<D: Driver> {
-    ddev: sys::drm_device,
+    /// Changed by the core through raw pointers while references exist.
+    ddev: core::cell::UnsafeCell<sys::drm_device>,
     driver: D,
 }
 
@@ -128,14 +129,14 @@ impl<D: Driver> Dev<D> {
 
     /// The C device.
     pub fn raw(&self) -> *mut sys::drm_device {
-        &self.ddev as *const sys::drm_device as *mut sys::drm_device
+        self.ddev.get()
     }
 
     /// The device's node.
     pub fn dev_info(&self) -> ddi::DevInfo {
         // SAFETY: the node of the driver's attach, live while the device
         // exists.
-        unsafe { ddi::DevInfo::from_raw(self.ddev.dev as dsys::dev_info_t) }
+        unsafe { ddi::DevInfo::from_raw((*self.raw()).dev as dsys::dev_info_t) }
     }
 
     /// A handle for the driver's timers and interrupt handlers.
@@ -279,7 +280,7 @@ pub struct File {
 }
 
 /// A number that names an open file, unique among the files of the system
-/// since `misc/drm` loaded (`drm_file.client_id`).
+/// since `misc/drm_core` loaded (`drm_file.client_id`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FileId(pub u64);
 
@@ -407,7 +408,10 @@ unsafe extern "C" fn before_teardown_thunk<D: Driver>(dev: *mut sys::drm_device)
 // --- cb_ops ---------------------------------------------------------------
 
 /// The `cb_ops` of every Rust DRM driver: the core's entry points, for
-/// `ddi::module! { driver: X, cb_ops: drm_facade::CB_OPS.get() }`.
+/// `ddi::module! { driver: X, cb_ops: unsafe drm_facade::CB_OPS.get() }`.
+/// The `unsafe` is the driver's promise that the devices of its module
+/// are registered with [`Device::register`], so that the entry points find
+/// them in `misc/drm_core`'s table (illumos-ddi `CharTable`).
 #[allow(
     clippy::missing_transmute_annotations,
     clippy::useless_transmute,

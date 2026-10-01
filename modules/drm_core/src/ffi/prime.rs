@@ -149,7 +149,13 @@ pub unsafe extern "C" fn dma_buf_fd(dmabuf: *mut f::dma_buf, flags: i32) -> i32 
         Ok(out)
     });
     match r {
-        Some(Ok(fd)) => fd,
+        Some(Ok(fd)) => {
+            // As on Linux, the descriptor takes over the caller's
+            // reference (its file holds its own object reference).
+            // SAFETY: the caller's reference, given up on success.
+            unsafe { dma_buf_put(dmabuf) };
+            fd
+        }
         Some(Err(e)) => neg(e),
         None => neg(Errno::EINVAL),
     }
@@ -178,5 +184,6 @@ pub unsafe extern "C" fn dma_buf_put(dmabuf: *mut f::dma_buf) {
         Box::from_raw(dmabuf as *mut DmaBuf)
     };
     let DmaBuf { obj, .. } = *b;
-    super::with_ctx(|c| obj.put_in(c));
+    // SAFETY: dma_buf.h: an interrupt handler or a thread that may block.
+    unsafe { super::with_ctx(|c| obj.put_in(c)) };
 }

@@ -29,13 +29,19 @@ use crate::cdriver::CDriver;
 static DEVICES: [AtomicPtr<Device<CDriver>>; MAX_DEVICES as usize] =
     [const { AtomicPtr::new(ptr::null_mut()) }; MAX_DEVICES as usize];
 static MAJORS: [AtomicU32; MAX_DEVICES as usize] = [const { AtomicU32::new(u32::MAX) }; MAX_DEVICES as usize];
+/// The node of each published device, for getinfo(9E), which the DDI does
+/// not serialise with detach(9E) and which therefore never touches the
+/// device itself.
+static DIPS: [AtomicPtr<c_void>; MAX_DEVICES as usize] =
+    [const { AtomicPtr::new(ptr::null_mut()) }; MAX_DEVICES as usize];
 
 /// Publishes device `d` under its number, after it is fully registered.
 pub(crate) fn publish(d: &Device<CDriver>) {
     let i = d.index() as usize;
     // SAFETY: the device's node is live while it registers.
     let major = unsafe { sys::ddi_driver_major(d.dev_info().as_raw()) };
-    if let (Some(p), Some(m)) = (DEVICES.get(i), MAJORS.get(i)) {
+    if let (Some(p), Some(m), Some(n)) = (DEVICES.get(i), MAJORS.get(i), DIPS.get(i)) {
+        n.store(d.dev_info().as_raw() as *mut c_void, Ordering::Release);
         m.store(major, Ordering::Release);
         p.store(d as *const Device<CDriver> as *mut Device<CDriver>, Ordering::Release);
     }
@@ -43,9 +49,11 @@ pub(crate) fn publish(d: &Device<CDriver>) {
 
 /// Withdraws device number `index` (before it unregisters).
 pub(crate) fn withdraw(index: u32) {
-    if let (Some(p), Some(m)) = (DEVICES.get(index as usize), MAJORS.get(index as usize)) {
+    let i = index as usize;
+    if let (Some(p), Some(m), Some(n)) = (DEVICES.get(i), MAJORS.get(i), DIPS.get(i)) {
         p.store(ptr::null_mut(), Ordering::Release);
         m.store(u32::MAX, Ordering::Release);
+        n.store(ptr::null_mut(), Ordering::Release);
     }
 }
 
@@ -172,13 +180,24 @@ pub unsafe extern "C" fn drm_getinfo(
     resultp: *mut *mut c_void,
 ) -> c_int {
     let dev = arg as usize as sys::dev_t;
-    let Some((m, d)) = device_of(dev) else { return sys::DDI_FAILURE };
+    // SAFETY: plain arithmetic on a device number.
+    let (maj, min) = unsafe { (sys::getmajor(dev), sys::getminor(dev)) };
+    let Some(i) = index_of(min).map(|i| i as usize) else { return sys::DDI_FAILURE };
+    if MAJORS.get(i).map(|m| m.load(Ordering::Acquire)) != Some(maj) {
+        return sys::DDI_FAILURE;
+    }
     let r = match cmd {
-        sys::ddi_info_cmd_t::DDI_INFO_DEVT2INSTANCE => match minor::instance_of_minor(m) {
+        sys::ddi_info_cmd_t::DDI_INFO_DEVT2INSTANCE => match minor::instance_of_minor(Minor(min)) {
             Some(Instance(i)) => i as usize as *mut c_void,
             None => return sys::DDI_FAILURE,
         },
-        sys::ddi_info_cmd_t::DDI_INFO_DEVT2DEVINFO => d.dev_info().as_raw() as *mut c_void,
+        sys::ddi_info_cmd_t::DDI_INFO_DEVT2DEVINFO => {
+            let n = DIPS.get(i).map_or(ptr::null_mut(), |n| n.load(Ordering::Acquire));
+            if n.is_null() {
+                return sys::DDI_FAILURE;
+            }
+            n
+        }
         _ => return sys::DDI_FAILURE,
     };
     if !resultp.is_null() {

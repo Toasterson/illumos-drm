@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "ddi"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=7fbd6028b734ce52c045f82cfde3df49e01aa706#7fbd6028b734ce52c045f82cfde3df49e01aa706"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=d630acd05425a10a907c6bd209f8b936a772f223#d630acd05425a10a907c6bd209f8b936a772f223"
 dependencies = [
  "ddi-sys",
  "illumos-kernel-private-sys",
@@ -16,17 +16,7 @@ dependencies = [
 [[package]]
 name = "ddi-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=7fbd6028b734ce52c045f82cfde3df49e01aa706#7fbd6028b734ce52c045f82cfde3df49e01aa706"
-
-[[package]]
-name = "drm"
-version = "0.0.1"
-dependencies = [
- "ddi",
- "drm-core",
- "drm-facade-sys",
- "drm-uapi",
-]
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=d630acd05425a10a907c6bd209f8b936a772f223#d630acd05425a10a907c6bd209f8b936a772f223"
 
 [[package]]
 name = "drm-core"
@@ -51,13 +41,23 @@ name = "drm-facade-sys"
 version = "0.0.1"
 
 [[package]]
+name = "drm-module"
+version = "0.0.1"
+dependencies = [
+ "ddi",
+ "drm-core",
+ "drm-facade-sys",
+ "drm-uapi",
+]
+
+[[package]]
 name = "drm-uapi"
 version = "0.0.1"
 
 [[package]]
 name = "illumos-kernel-private-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=7fbd6028b734ce52c045f82cfde3df49e01aa706#7fbd6028b734ce52c045f82cfde3df49e01aa706"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=d630acd05425a10a907c6bd209f8b936a772f223#d630acd05425a10a907c6bd209f8b936a772f223"
 dependencies = [
  "ddi-sys",
 ]
@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "illumos-kernel-private-virtio-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=7fbd6028b734ce52c045f82cfde3df49e01aa706#7fbd6028b734ce52c045f82cfde3df49e01aa706"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=d630acd05425a10a907c6bd209f8b936a772f223#d630acd05425a10a907c6bd209f8b936a772f223"
 dependencies = [
  "ddi-sys",
 ]

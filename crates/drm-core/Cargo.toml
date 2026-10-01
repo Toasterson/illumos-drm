@@ -10,7 +10,7 @@ rust-version.workspace = true
 [features]
 default = ["kernel"]
 # The core proper: devices, files, GEM, fences, PRIME, sync objects and mode
-# setting, for the kernel module misc/drm (modules/drm), the only crate that
+# setting, for the kernel module misc/drm_core (modules/drm_core), the only crate that
 # enables it. Without it the crate is only its value helpers (dumb-buffer
 # layouts, display modes and formats, EDID, KArc/KVec/ksync, the software
 # vblank), which drivers may compile in: they hold no state of the core.
@@ -31,7 +31,7 @@ ddi = { workspace = true, features = ["unstable-gate-cda5b9a49f"] }
 drm-uapi.workspace = true
 
 [package.metadata.kmod]
-# The core is the library of the kernel module misc/drm (modules/drm), the
+# The core is the library of the kernel module misc/drm_core (modules/drm_core), the
 # only crate that links it; its own symbols need nothing beyond genunix,
 # unix and (from the private tier) fs/specfs.
 depends = []

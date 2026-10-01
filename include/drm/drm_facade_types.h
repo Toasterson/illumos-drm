@@ -3,7 +3,7 @@
  * Copyright 2026 The illumos-drm authors
  *
  * The DRM facade of illumos-drm: the C interface of the kernel module
- * misc/drm. This header holds the base types that the facade structures
+ * misc/drm_core. This header holds the base types that the facade structures
  * are built from.
  *
  * Origin: the types mirror the names and the role of Linux's struct
@@ -41,7 +41,8 @@ extern "C" {
 #define	MAX_ERRNO	4095
 #endif
 #ifndef	IS_ERR_VALUE
-#define	IS_ERR_VALUE(x)	((unsigned long)(void *)(x) >= (unsigned long)-MAX_ERRNO)
+#define	IS_ERR_VALUE(x)	\
+	((unsigned long)(void *)(x) >= (unsigned long)-MAX_ERRNO)
 static inline void *
 ERR_PTR(long error)
 {

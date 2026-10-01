@@ -113,6 +113,9 @@ enum Owner {
     Free,
     /// Held without a transaction.
     Plain,
+    /// Held without a transaction and without a guard by the thread with
+    /// this id (`lock_raw`, the facade's `dma_resv_lock`).
+    Raw(u64),
     /// Held by the transaction with this stamp.
     Ctx(u64),
 }
@@ -213,20 +216,38 @@ impl<T> WwMutex<T> {
     /// caller whose unlock comes in a separate call (the facade's
     /// `dma_resv_lock`). `EINTR` if `intr` and a signal arrives while
     /// waiting.
+    /// The mutex records the calling thread as its holder: only that
+    /// thread may [`unlock_raw`](WwMutex::unlock_raw) it, and it gets
+    /// `EDEADLK` instead of waiting for itself when it locks it again.
     pub fn lock_raw(&self, intr: bool, ctx: &Sleepable) -> Result<(), Errno> {
-        self.acquire(None, false, intr, ctx)
+        let me = crate::ksync::thread_id();
+        if *self.owner.lock() == Owner::Raw(me) {
+            return Err(EDEADLK);
+        }
+        self.acquire(None, false, intr, ctx)?;
+        // Held: acquire set Plain, and nobody else changes a held owner.
+        *self.owner.lock() = Owner::Raw(me);
+        Ok(())
     }
 
-    /// Releases a mutex taken with [`WwMutex::lock_raw`].
-    ///
-    /// # Safety
-    /// The caller took the mutex with `lock_raw` and holds it: no guard
-    /// refers to it.
-    pub unsafe fn unlock_raw(&self) {
+    /// Releases a mutex the calling thread took with
+    /// [`WwMutex::lock_raw`]; `EPERM` (and nothing changes) if it does not
+    /// hold it that way, whoever else holds it.
+    pub fn unlock_raw(&self) -> Result<(), Errno> {
         let mut g = self.owner.lock();
+        if *g != Owner::Raw(crate::ksync::thread_id()) {
+            return Err(Errno::EPERM);
+        }
         *g = Owner::Free;
         drop(g);
         self.cv.notify_all();
+        Ok(())
+    }
+
+    /// Reports whether the calling thread holds the mutex through
+    /// [`WwMutex::lock_raw`].
+    pub fn held_raw_by_current(&self) -> bool {
+        *self.owner.lock() == Owner::Raw(crate::ksync::thread_id())
     }
 
     /// Reports whether the mutex is held by anyone.
@@ -321,6 +342,41 @@ mod tests {
 
     static CLASS: WwClass = WwClass::new();
     static OTHER: WwClass = WwClass::new();
+
+    #[test]
+    fn raw_lock_belongs_to_its_thread() {
+        let ctx = sleep();
+        let m = Arc::new(WwMutex::new(0u32, &CLASS));
+        m.lock_raw(false, &ctx).unwrap();
+        assert!(m.held_raw_by_current());
+        assert_eq!(m.lock_raw(false, &ctx).err(), Some(EDEADLK), "relock by the holder");
+        let m2 = m.clone();
+        thread::spawn(move || {
+            assert!(!m2.held_raw_by_current());
+            assert_eq!(m2.unlock_raw().err(), Some(Errno::EPERM), "unlock by another thread");
+        })
+        .join()
+        .unwrap();
+        assert!(m.is_locked(), "a foreign unlock changes nothing");
+        // A guard holder is not a raw holder either.
+        m.unlock_raw().unwrap();
+        let g = m.lock_plain(&ctx);
+        assert_eq!(m.unlock_raw().err(), Some(Errno::EPERM));
+        drop(g);
+        assert!(!m.is_locked());
+        // Another thread waits for the raw holder, then takes it.
+        m.lock_raw(false, &ctx).unwrap();
+        let m3 = m.clone();
+        let t = thread::spawn(move || {
+            let c = sleep();
+            m3.lock_raw(false, &c).unwrap();
+            m3.unlock_raw().unwrap();
+        });
+        thread::sleep(std::time::Duration::from_millis(20));
+        m.unlock_raw().unwrap();
+        t.join().unwrap();
+        assert!(!m.is_locked());
+    }
 
     #[test]
     fn already_class_and_slow_rules() {

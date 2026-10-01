@@ -136,6 +136,13 @@ mod imp {
     pub fn yield_briefly(ctx: &Sleepable) {
         ddi::time::delay(ddi::Ticks::from_micros(1), ctx)
     }
+
+    /// The calling kernel thread's id (`ddi_get_kt_did(9F)`), unique among
+    /// live threads. Any context.
+    pub fn thread_id() -> u64 {
+        // SAFETY: ddi_get_kt_did may be called from any context.
+        unsafe { ddi::sys::ddi_get_kt_did() as u64 }
+    }
 }
 
 #[cfg(test)]
@@ -221,11 +228,19 @@ mod imp {
     pub fn yield_briefly(_ctx: &Sleepable) {
         std::thread::yield_now()
     }
+
+    /// The calling thread's id (host: a per-thread counter).
+    pub fn thread_id() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        std::thread_local!(static ID: u64 = NEXT.fetch_add(1, Ordering::Relaxed));
+        ID.with(|i| *i)
+    }
 }
 
 #[cfg(test)]
 pub(crate) use imp::SIGNAL_PENDING;
-pub use imp::{KCondVar, KGuard, KMutex, now, yield_briefly};
+pub use imp::{KCondVar, KGuard, KMutex, now, thread_id, yield_briefly};
 
 impl Default for KCondVar {
     fn default() -> Self {

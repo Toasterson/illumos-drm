@@ -19,10 +19,10 @@ pub struct Syncobj {
     p: NonNull<sys::drm_syncobj>,
 }
 
-// SAFETY: the facade's sync-object functions are thread-safe.
-unsafe impl Send for Syncobj {}
-// SAFETY: as above.
-unsafe impl Sync for Syncobj {}
+// Neither Send nor Sync (the raw pointer): a handle stays with the thread
+// that found it, so its drop (drm_syncobj_put, which may release the sync
+// object and its fence) runs in thread context, never in a timeout(9F)
+// handler a closure could carry it to.
 
 impl Drop for Syncobj {
     fn drop(&mut self) {

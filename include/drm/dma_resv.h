@@ -21,7 +21,12 @@
 extern "C" {
 #endif
 
-/* How a fence uses a buffer; Linux's order, from strongest to weakest. */
+/*
+ * How a fence uses a buffer; Linux's order, from strongest to weakest.
+ * The functions refuse any other value (with a warning): add_fence waits
+ * for the fence instead, wait_timeout returns -EINVAL and test_signaled
+ * returns false.
+ */
 enum dma_resv_usage {
 	DMA_RESV_USAGE_KERNEL = 0,
 	DMA_RESV_USAGE_WRITE = 1,
@@ -45,8 +50,12 @@ struct dma_resv {
 
 /*
  * Locks the object. Facade version 0 takes only ctx == NULL (one object
- * at a time); a non-NULL acquire context fails with -EINVAL. Returns 0 or
- * -EINTR (dma_resv_lock_interruptible()). Thread context only.
+ * at a time); a non-NULL acquire context fails with -EINVAL. Returns 0,
+ * -EINTR (dma_resv_lock_interruptible()) or -EDEADLK if the calling
+ * thread holds the lock already (where Linux would deadlock). The lock
+ * belongs to the calling thread: only it may add fences and unlock, and
+ * dma_resv_unlock() by another thread is ignored with a warning. Thread
+ * context only.
  */
 extern int dma_resv_lock(struct dma_resv *obj, struct ww_acquire_ctx *ctx);
 extern int dma_resv_lock_interruptible(struct dma_resv *obj,
@@ -60,10 +69,12 @@ extern int dma_resv_reserve_fences(struct dma_resv *obj,
     unsigned int num_fences);
 
 /*
- * Adds a fence with a usage; locked, after dma_resv_reserve_fences(). A
+ * Adds a fence with a usage; locked by the calling thread, after
+ * dma_resv_reserve_fences(). A
  * fence of a context the object already has replaces the older one. If
- * the room was not reserved the fence is waited for instead (with a
- * warning), which keeps the ordering.
+ * the room was not reserved, or the lock is not held by the calling
+ * thread, the fence is waited for instead (with a warning), which keeps
+ * the ordering.
  */
 extern void dma_resv_add_fence(struct dma_resv *obj, struct dma_fence *fence,
     enum dma_resv_usage usage);

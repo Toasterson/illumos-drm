@@ -1,6 +1,6 @@
 [package]
-name = "drm"
-description = "misc/drm: the DRM core of illumos-drm as one kernel module, with the C facade (include/drm) that every DRM driver links against"
+name = "drm-module"
+description = "misc/drm_core: the DRM core of illumos-drm as one kernel module, with the C facade (include/drm) that every DRM driver links against"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [lib]
+# The archive drm_module.a, linked as the module drm_core.
 crate-type = ["staticlib"]
 
 [dependencies]
@@ -22,10 +23,13 @@ drm-uapi.workspace = true
 drm-facade-sys.workspace = true
 
 [package.metadata.kmod]
-# Install class: /kernel/misc/amd64/drm (or /usr/kernel/misc/amd64).
+# Install class: /kernel/misc/amd64/drm_core (or /usr/kernel/misc/amd64).
 class = "misc"
+# Linked and installed as misc/drm_core (not misc/drm, which is the C core of
+# OpenIndiana's gfx-drm, installed beside it).
+module = "drm_core"
 depends = []
-# Linked with -B reduce -M drm.mapfile (generated from include/drm by
+# Linked with -B reduce -M drm_core.mapfile (generated from include/drm by
 # tools/facade/gen_facade.py): only _init, _fini, _info and the facade stay
 # global.
-exports = "drm.mapfile"
+exports = "drm_core.mapfile"

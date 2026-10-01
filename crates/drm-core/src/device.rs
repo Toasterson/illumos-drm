@@ -263,10 +263,25 @@ impl<D: Driver> Device<D> {
     /// and GEM state released.
     #[allow(clippy::result_large_err, reason = "the shape of ddi::Driver::detach, which hands the instance back")]
     pub fn detach(self, ctx: &Sleepable) -> Result<(), (Device<D>, DdiError)> {
+        if let Err(e) = self.detach_check(ctx) {
+            return Err((self, e));
+        }
+        self.detach_teardown(ctx);
+        Ok(())
+    }
+
+    /// The first half of [`Device::detach`], on a shared device: every
+    /// check that may refuse the detach (open files, framebuffers, GEM
+    /// state, fences and sync objects), with [`Driver::before_detach`] and
+    /// the release of leftovers before them. A refused device keeps
+    /// working. For a caller that must not move the device before it
+    /// knows the detach succeeds (`misc/drm_core`, whose device other
+    /// threads may be using).
+    pub fn detach_check(&self, ctx: &Sleepable) -> Result<(), DdiError> {
         let open = self.state.lock().open_files();
         if open != 0 {
             self.dev.warn(format_args!("detach refused: {open} files open"));
-            return Err((self, DdiError));
+            return Err(DdiError);
         }
         self.driver.before_detach(ctx);
         // Anonymous files are closed (they keep the device open), so this
@@ -279,18 +294,24 @@ impl<D: Driver> Device<D> {
         // timeline included.
         if let Some(Err(n)) = self.kms.as_ref().map(|k| k.detach_check(ctx)) {
             self.dev.warn(format_args!("detach refused: {n} framebuffers still referenced"));
-            return Err((self, DdiError));
+            return Err(DdiError);
         }
         if let Some(Err(s)) = self.gem.as_ref().map(|g| GemCore::quiesce(g, ctx)) {
             self.dev.warn(format_args!("detach refused: GEM state in use: {s:?}"));
-            return Err((self, DdiError));
+            return Err(DdiError);
         }
         if let Err(s) = SyncCore::quiesce(&self.sync, ctx) {
             self.dev.warn(format_args!("detach refused: fences or sync objects remain: {s:?}"));
-            return Err((self, DdiError));
+            return Err(DdiError);
         }
-        // The detach completes: the driver stops its sources, then the
-        // mode-setting state goes, then the GEM state.
+        Ok(())
+    }
+
+    /// The second half of [`Device::detach`], after
+    /// [`Device::detach_check`] succeeded: the driver stops its sources,
+    /// then the mode-setting state goes, then the GEM state. The device is
+    /// dropped afterwards.
+    pub fn detach_teardown(&self, ctx: &Sleepable) {
         self.driver.before_teardown(ctx);
         if let Some(k) = &self.kms {
             k.teardown(ctx);
@@ -298,7 +319,6 @@ impl<D: Driver> Device<D> {
         if self.gem.is_some() {
             registry::remove(self.index);
         }
-        Ok(())
     }
 
     /// The core's own `MODE_CREATE_DUMB`: [`Driver::dumb_layout`], the

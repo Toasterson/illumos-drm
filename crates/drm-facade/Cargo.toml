@@ -1,6 +1,6 @@
 [package]
 name = "drm-facade"
-description = "The safe Rust interface of the DRM facade: what a Rust DRM driver uses to register with misc/drm and to use its GEM objects, fences, sync objects and mode setting"
+description = "The safe Rust interface of the DRM facade: what a Rust DRM driver uses to register with misc/drm_core and to use its GEM objects, fences, sync objects and mode setting"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

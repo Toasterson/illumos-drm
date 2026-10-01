@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright 2026 The illumos-drm authors
 #
-# Builds drm_facade_ctf.o, the CTF shadow of misc/drm (drm_facade_ctf.c):
+# Builds drm_facade_ctf.o, the CTF shadow of misc/drm_core (drm_facade_ctf.c):
 # compiles the translation unit with DWARF and turns the DWARF into CTF
 # with the illumos-gate's ctfconvert (package developer/build/onbld). The
-# object is then linked into misc/drm next to the Rust archive:
+# object is then linked into misc/drm_core next to the Rust archive:
 #
-#   ld -ztype=kmod -N fs/specfs -B reduce -M modules/drm/drm.mapfile \
-#       -z allextract drm.a -z defaultextract drm_facade_ctf.o -o drm
+#   ld -ztype=kmod -N fs/specfs -B reduce -M modules/drm_core/drm_core.mapfile \
+#       -z allextract drm_module.a -z defaultextract drm_facade_ctf.o -o drm_core
 #
 # Its variables become local with the rest of the module; its .SUNW_ctf
 # section is the module's CTF, a standalone container (no parent: it

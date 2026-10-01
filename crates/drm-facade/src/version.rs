@@ -63,7 +63,7 @@ const MINE: [(usize, &str); N] = {
     a
 };
 
-/// Why a driver does not fit the loaded `misc/drm`.
+/// Why a driver does not fit the loaded `misc/drm_core`.
 #[derive(Debug, PartialEq, Eq)]
 enum Mismatch {
     Version { major: u32, minor: u32 },
@@ -87,7 +87,7 @@ fn compare(v: &sys::drm_facade_version) -> Result<(), Mismatch> {
 }
 
 /// Compares the facade this driver was compiled against with the loaded
-/// `misc/drm`: the same major version, a core minor version at least the
+/// `misc/drm_core`: the same major version, a core minor version at least the
 /// driver's, and the same size of every facade structure. Call it from
 /// `ddi::Driver::load`, so that a mismatched driver refuses to load
 /// (`EINVAL`, after a warning naming `driver` and the first difference)
@@ -102,13 +102,13 @@ pub fn check_facade(driver: &str) -> Result<(), Errno> {
     compare(&v).map_err(|m| {
         match m {
             Mismatch::Version { major, minor } => ddi::kwarn!(
-                "{driver}: built for DRM facade {}.{}, misc/drm provides {major}.{minor}",
+                "{driver}: built for DRM facade {}.{}, misc/drm_core provides {major}.{minor}",
                 sys::DRM_FACADE_MAJOR,
                 sys::DRM_FACADE_MINOR
             ),
-            Mismatch::Count(n) => ddi::kwarn!("{driver}: misc/drm knows {n} facade structures, the driver {N}"),
+            Mismatch::Count(n) => ddi::kwarn!("{driver}: misc/drm_core knows {n} facade structures, the driver {N}"),
             Mismatch::Size { name, core, mine } => {
-                ddi::kwarn!("{driver}: struct {name} is {core} bytes in misc/drm, {mine} in the driver")
+                ddi::kwarn!("{driver}: struct {name} is {core} bytes in misc/drm_core, {mine} in the driver")
             }
         }
         Errno::EINVAL

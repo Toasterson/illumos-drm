@@ -212,33 +212,38 @@ pub unsafe extern "C" fn drm_dev_unregister(dev: *mut f::drm_device) -> i32 {
     let ctx = unsafe { super::sleepable() };
     // SAFETY: the caller holds a reference to its device.
     let Some(core) = (unsafe { DevCore::of(dev) }) else { return neg(Errno::EINVAL) };
+    // The checks run on the published device, which stays where it is and
+    // keeps working if they refuse: nothing moves before the detach is
+    // certain.
+    let index = {
+        let Some(d) = core.device() else { return neg(Errno::EINVAL) };
+        if d.detach_check(&ctx).is_err() {
+            return neg(Errno::EBUSY);
+        }
+        d.index()
+    };
+    // Out of the device table (no entry point finds it any more), then out
+    // of the facade (waiting for every call that uses it), then torn down
+    // and freed.
+    crate::table::withdraw(index);
     let raw = core.withdraw();
     if raw.is_null() {
         return neg(Errno::EINVAL);
     }
-    // SAFETY: published by drm_dev_register from a box.
-    let d: Device<CDriver> = *unsafe { Box::from_raw(raw) };
-    crate::table::withdraw(d.index());
-    match d.detach(&ctx) {
-        Ok(()) => {
-            // SAFETY: the structure stays until drm_dev_put.
-            unsafe {
-                (*dev).registered = false;
-                (*dev).primary = ptr::null_mut();
-                (*dev).render = ptr::null_mut();
-                (*dev).vma_offset_manager = ptr::null_mut();
-            }
-            core.setup.lock().registered = false;
-            0
-        }
-        Err((back, _)) => {
-            let raw = Box::into_raw(Box::new(back));
-            core.publish(raw);
-            // SAFETY: as in drm_dev_register.
-            crate::table::publish(unsafe { &*raw });
-            neg(Errno::EBUSY)
-        }
+    // SAFETY: published by drm_dev_register from a box; withdrawn from both
+    // places and no guard holds it.
+    let d: Box<Device<CDriver>> = unsafe { Box::from_raw(raw) };
+    d.detach_teardown(&ctx);
+    drop(d);
+    // SAFETY: the structure stays until drm_dev_put.
+    unsafe {
+        (*dev).registered = false;
+        (*dev).primary = ptr::null_mut();
+        (*dev).render = ptr::null_mut();
+        (*dev).vma_offset_manager = ptr::null_mut();
     }
+    core.setup.lock().registered = false;
+    0
 }
 
 #[unsafe(no_mangle)]

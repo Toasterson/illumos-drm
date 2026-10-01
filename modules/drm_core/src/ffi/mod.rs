@@ -30,9 +30,18 @@ use ddi::Sleepable;
 use ddi::private::{Context, current_context};
 use drm_core::defer::Ctx;
 
-/// Runs `f` with the caller's context as the core's `Ctx`.
-pub(crate) fn with_ctx<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
-    match current_context() {
+/// Runs `f` with the caller's context as the core's `Ctx`: atomic on an
+/// interrupt thread, sleepable otherwise.
+///
+/// # Safety
+/// The caller is an interrupt handler or a thread that may block: not a
+/// `timeout(9F)` handler, `quiesce(9E)` or `chpoll(9E)`, not at raised
+/// priority and not holding a spin lock (`ddi::private::current_context`).
+/// The functions that use it say so in their headers and offer a variant
+/// for those contexts (`drm_illumos_gem_object_put_deferred`).
+pub(crate) unsafe fn with_ctx<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
+    // SAFETY: the caller's contract.
+    match unsafe { current_context() } {
         Context::Sleep(s) => f(Ctx::Sleep(&s)),
         Context::Atomic(a) => f(Ctx::Atomic(&a)),
     }

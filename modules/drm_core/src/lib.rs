@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! `misc/drm`: the DRM core of illumos-drm as one kernel module, and the C
+//! `misc/drm_core`: the DRM core of illumos-drm as one kernel module, and the C
 //! facade every DRM driver links against.
 //!
 //! Until milestone R5a each driver module linked its own copy of the core
@@ -22,7 +22,7 @@
 //! `#[repr(C)]` structures, so no driver instantiates a generic of the
 //! core, and the core's Rust types never cross the module boundary. The
 //! link reduces every symbol but `_init`, `_fini`, `_info` and the facade
-//! to local scope (`drm.mapfile`, generated from the headers).
+//! to local scope (`drm_core.mapfile`, generated from the headers).
 //!
 //! What the module itself owns: the device numbers (formerly
 //! `misc/drm_minor`), the device table, the fence domain of fences that
@@ -134,7 +134,10 @@ mod kernel {
         if crate::ctxt::init(&ctx).is_err() {
             return sys::errno::ENOMEM;
         }
-        let Ok(stub) = drm_core::fence::Fence::signaled_stub(&d, &ctx) else { return sys::errno::ENOMEM };
+        let Ok(stub) = drm_core::fence::Fence::signaled_stub(&d, &ctx) else {
+            crate::ctxt::fini();
+            return sys::errno::ENOMEM;
+        };
         // SAFETY: nothing else runs yet (see module_fences).
         unsafe {
             *FENCES.0.get() = Some(d);
@@ -188,6 +191,10 @@ mod kernel {
             let d = unsafe { (*FENCES.0.get()).take() };
             drop(d);
             crate::ctxt::fini();
+        } else if let Ok(s) = drm_core::fence::Fence::signaled_stub(module_fences(), &ctx) {
+            // The module stays: so does its stub fence.
+            // SAFETY: as above.
+            unsafe { *STUB.0.get() = Some(s) };
         }
         r
     }

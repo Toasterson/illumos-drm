@@ -81,10 +81,10 @@ impl Resv {
 
     /// [`Resv::add_fence`] for a lock taken with
     /// [`WwMutex::lock_raw`](crate::wwmutex::WwMutex::lock_raw) (the
-    /// facade's `dma_resv_add_fence`): `EINVAL` if the lock is not held at
-    /// all, since no guard proves who holds it.
+    /// facade's `dma_resv_add_fence`): `EINVAL` unless the calling thread
+    /// holds the lock that way.
     pub fn add_fence_raw(&self, fence: Fence, usage: Usage, ctx: &Sleepable) -> Result<(), Errno> {
-        if !self.lock.is_locked() {
+        if !self.lock.held_raw_by_current() {
             fence.put(Ctx::Sleep(ctx));
             return Err(Errno::EINVAL);
         }

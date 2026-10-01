@@ -37,34 +37,18 @@
 //! other allocations go through [`kvec::KVec`] and [`karc::KArc`], which
 //! choose `KM_SLEEP` or `KM_NOSLEEP` per call.
 //!
-//! The crate is a `no_std` library on top of the `ddi` crate and is linked
-//! statically into each driver module; there is no separate `misc/drm`
-//! module yet (see the README for why). The one piece every module shares
-//! is the table of device numbers, the small module `misc/drm_minor`
-//! (`drm-minor-sys`), so that the devices of all drivers are numbered
-//! `card0`, `card1`, ... without collisions ([`minor`]); every driver
-//! module is linked with `-N misc/drm_minor`. A driver implements [`Driver`],
-//! uses [`Device`] as the instance type of its `ddi::Driver`, and maps
-//! minor numbers with [`minor::instance_of_minor`]:
-//!
-//! ```ignore
-//! ddi::module! { driver: MyModule, ops: [char, devmap] }
-//!
-//! impl ddi::Driver for MyModule {
-//!     type Instance = drm::Device<MyDriver>;
-//!     const LINKINFO: &'static CStr = c"my DRM driver";
-//!     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
-//!         drm::Device::attach(node, MyDriver::new(), ctx)
-//!     }
-//!     fn detach(inst: Self::Instance, _dev: DevInfo, ctx: &Sleepable)
-//!         -> Result<(), (Self::Instance, DdiError)> {
-//!         inst.detach(ctx)
-//!     }
-//!     fn instance_of_minor(m: Minor) -> Option<Instance> {
-//!         drm::minor::instance_of_minor(m)
-//!     }
-//! }
-//! ```
+//! The crate is a `no_std` library on top of the `ddi` crate. Since R5a
+//! exactly one kernel module compiles it with its `kernel` feature (the
+//! stateful layer: devices, GEM, fences, sync objects, PRIME, the table of
+//! device numbers in [`minor`] and [`slots`]): `misc/drm_core`
+//! (`modules/drm_core`), which instantiates [`Device`] over its facade
+//! driver and exports the C facade of `include/drm`. Drivers do not use
+//! this crate's kernel layer: Rust drivers go through the `drm-facade`
+//! crate, C drivers through the headers, and both are linked with
+//! `-N misc/drm_core`. Without the `kernel` feature the crate offers the
+//! value helpers drivers may share (display modes, dumb-buffer layouts).
+//! The [`Driver`] trait is the interface between the core and
+//! `misc/drm_core`'s facade driver.
 //!
 //! The logic that decides things ([`state`], [`caps`], [`ioctl`],
 //! [`minor`], [`objects`], [`idmap`], [`offsets`], [`dumb`], [`dmaerr`], [`karc`],
@@ -115,6 +99,7 @@ pub mod offsets;
 #[cfg(not(test))]
 #[cfg(feature = "kernel")]
 pub mod prime;
+pub mod published;
 #[cfg(feature = "kernel")]
 pub mod resv;
 #[cfg(feature = "kernel")]

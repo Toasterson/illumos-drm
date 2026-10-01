@@ -24,14 +24,17 @@ use drm_core::defer::Ctx;
 use drm_core::fence::{AddError, Fence, FenceCallback, FenceCb};
 use drm_core::karc::KArc;
 use drm_core::ksync;
-use drm_core::kvec::KVec;
 use drm_facade_sys as f;
 
 use crate::devcore::neg;
 
-/// A spin lock for data that interrupt handlers touch and whose holder
-/// never blocks; unlike a kernel mutex it needs no destruction, so its
-/// owner may be freed in any context.
+/// A spin lock for data that interrupt handlers touch. The holder runs
+/// with interrupts blocked on its processor (`ddi_enter_critical(9F)`), so
+/// an interrupt handler on the same processor never spins on a lock its
+/// own processor holds, and the critical sections only move pointers (no
+/// call leaves this module, as the DDI requires inside such a region).
+/// Unlike a kernel mutex it needs no initialisation or destruction, so its
+/// owner may be made and freed in any context.
 struct Spin<T> {
     locked: AtomicBool,
     v: core::cell::UnsafeCell<T>,
@@ -39,20 +42,125 @@ struct Spin<T> {
 
 // SAFETY: the value is reached only with the lock held.
 unsafe impl<T: Send> Sync for Spin<T> {}
+// SAFETY: as above.
+unsafe impl<T: Send> Send for Spin<T> {}
 
 impl<T> Spin<T> {
     const fn new(v: T) -> Spin<T> {
         Spin { locked: AtomicBool::new(false), v: core::cell::UnsafeCell::new(v) }
     }
 
+    /// Runs `f` with the lock held; `f` must only touch memory.
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        // SAFETY: may be called in any context; paired below.
+        let spl = unsafe { sys::ddi_enter_critical() };
         while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             core::hint::spin_loop();
         }
         // SAFETY: the lock is held.
         let r = f(unsafe { &mut *self.v.get() });
         self.locked.store(false, Ordering::Release);
+        // SAFETY: the value ddi_enter_critical returned.
+        unsafe { sys::ddi_exit_critical(spl) };
         r
+    }
+}
+
+/// The callbacks added through one `struct dma_fence`, shared by its
+/// [`FenceCore`] and every callback record ([`CCb`]), so that a record can
+/// tell that the structure is gone without touching it.
+///
+/// The list is intrusive, through the driver's `struct dma_fence_cb`,
+/// which the core owns while the callback is added (as on Linux):
+/// `node.next` links the next callback, `node.prev` holds the record's
+/// handle ([`FenceCb`]). Nothing is allocated with the lock held.
+pub(crate) struct CbList {
+    st: Spin<CbState>,
+}
+
+struct CbState {
+    head: *mut f::dma_fence_cb,
+    /// The structure was released: no callback may run any more.
+    gone: bool,
+    /// The callback whose function runs now, and its thread (the thread
+    /// that signals the fence runs its callbacks one after the other).
+    running: *mut f::dma_fence_cb,
+    runner: u64,
+}
+
+// SAFETY: the pointers are reached only with the lock held and point at
+// callbacks the driver keeps while they are added.
+unsafe impl Send for CbState {}
+
+const _: () = assert!(core::mem::size_of::<FenceCb<CCb>>() == core::mem::size_of::<*mut f::list_head>());
+const _: () = assert!(core::mem::align_of::<FenceCb<CCb>>() <= core::mem::align_of::<*mut f::list_head>());
+
+/// The handle slot of a callback structure.
+fn slot(cb: *mut f::dma_fence_cb) -> *mut *mut f::list_head {
+    // SAFETY: only computes the field's address.
+    unsafe { ptr::addr_of_mut!((*cb).node.prev) }
+}
+
+/// Stores a record's handle in its callback structure. Lock held.
+///
+/// # Safety
+/// `cb` is a listed callback with an empty slot.
+unsafe fn put_handle(cb: *mut f::dma_fence_cb, h: FenceCb<CCb>) {
+    // SAFETY: the caller's contract; the slot is pointer-sized (above).
+    unsafe { ptr::write(slot(cb) as *mut FenceCb<CCb>, h) }
+}
+
+/// Takes the handle out of a callback structure, if it has one. Lock held.
+///
+/// # Safety
+/// `cb` is a listed callback.
+unsafe fn take_handle(cb: *mut f::dma_fence_cb) -> Option<FenceCb<CCb>> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        if (*slot(cb)).is_null() {
+            return None;
+        }
+        let h = ptr::read(slot(cb) as *const FenceCb<CCb>);
+        *slot(cb) = ptr::null_mut();
+        Some(h)
+    }
+}
+
+impl CbState {
+    /// Whether `cb` is on the list.
+    fn contains(&self, cb: *mut f::dma_fence_cb) -> bool {
+        let mut cur = self.head;
+        while !cur.is_null() {
+            if cur == cb {
+                return true;
+            }
+            // SAFETY: listed callbacks are live.
+            cur = unsafe { (*cur).node.next } as *mut f::dma_fence_cb;
+        }
+        false
+    }
+
+    /// Unlinks `cb`; `false` if it is not on the list.
+    fn unlink(&mut self, cb: *mut f::dma_fence_cb) -> bool {
+        let mut prev: *mut f::dma_fence_cb = ptr::null_mut();
+        let mut cur = self.head;
+        while !cur.is_null() {
+            // SAFETY: listed callbacks are live (the driver keeps them
+            // while they are added and the structure is not released).
+            let next = unsafe { (*cur).node.next } as *mut f::dma_fence_cb;
+            if cur == cb {
+                if prev.is_null() {
+                    self.head = next;
+                } else {
+                    // SAFETY: as above.
+                    unsafe { (*prev).node.next = next as *mut f::list_head };
+                }
+                return true;
+            }
+            prev = cur;
+            cur = next;
+        }
+        false
     }
 }
 
@@ -61,24 +169,46 @@ pub(crate) struct CCb {
     fence: *mut f::dma_fence,
     cb: *mut f::dma_fence_cb,
     func: unsafe extern "C" fn(*mut f::dma_fence, *mut f::dma_fence_cb),
+    list: KArc<CbList>,
 }
 
-// SAFETY: the pointers are the driver's, valid while the callback is
-// added (the facade removes every callback before the structure goes).
+// SAFETY: the pointers are the driver's, used only while the shared list
+// says the structure is live and the callback added.
 unsafe impl Send for CCb {}
 // SAFETY: as above.
 unsafe impl Sync for CCb {}
 
 impl FenceCallback for CCb {
     fn signaled(&self, _fence: &Fence, _ctx: Ctx<'_>) -> Option<Fence> {
-        // SAFETY: the structure and the callback are live: the facade
-        // removes the callback (waiting for a running one) before the
-        // structure is released, and the driver keeps its callback until it
-        // has run or is removed, as on Linux.
+        let me = ksync::thread_id();
+        // Under the lock: is the structure still there? Then the callback
+        // is ours to run: take it off the list (the driver may free it in
+        // its function) together with its handle.
+        let r = self.list.st.with(|st| {
+            if st.gone {
+                return None;
+            }
+            // SAFETY: the structure is live, so is a listed callback.
+            let h = if st.unlink(self.cb) { unsafe { take_handle(self.cb) } } else { None };
+            st.running = self.cb;
+            st.runner = me;
+            Some(h)
+        });
+        // The structure was released before the callback could run: it
+        // counts as removed, and nothing of it may be touched.
+        let h = r?;
+        // SAFETY: the structure and the callback are live: a release waits
+        // until `running` is clear (unless it happens in this very
+        // function, from the driver's own put), and the driver keeps the
+        // callback until it has run or is removed, as on Linux.
         unsafe {
             mark_signaled(self.fence);
             (self.func)(self.fence, self.cb);
         }
+        // The function may have dropped the structure's last reference;
+        // only the shared list is touched from here on.
+        self.list.st.with(|st| st.running = ptr::null_mut());
+        drop(h);
         None
     }
 }
@@ -86,15 +216,42 @@ impl FenceCallback for CCb {
 /// The core state of one `struct dma_fence`.
 pub(crate) struct FenceCore {
     pub(crate) fence: Fence,
-    cbs: Spin<KVec<FenceCb<CCb>>>,
+    list: KArc<CbList>,
 }
 
 impl Drop for FenceCore {
+    /// The structure's last reference went (in any context, possibly in
+    /// one of its own callbacks): no callback may run on it from now on.
     fn drop(&mut self) {
-        // No callback may run on the structure once it is gone.
-        let cbs = self.cbs.with(core::mem::take);
-        for h in cbs.iter() {
-            self.fence.remove_callback_spin(h);
+        let me = ksync::thread_id();
+        let head = self.list.st.with(|st| {
+            st.gone = true;
+            core::mem::replace(&mut st.head, ptr::null_mut())
+        });
+        // Callbacks still added: removed from the core fence without
+        // waiting (one queued behind a running callback finds `gone` and
+        // does nothing).
+        let mut cur = head;
+        while !cur.is_null() {
+            // SAFETY: the driver keeps added callbacks; the list was ours
+            // alone once taken.
+            let next = unsafe { (*cur).node.next } as *mut f::dma_fence_cb;
+            // SAFETY: as above.
+            if let Some(h) = unsafe { take_handle(cur) } {
+                self.fence.remove_callback_nowait(&h);
+            }
+            cur = next;
+        }
+        // A callback function running on another thread uses the
+        // structure: wait for it. One running on this thread is the caller
+        // (its function dropped the last reference): waiting would never
+        // end, and it does not touch the structure after its function.
+        loop {
+            let busy = self.list.st.with(|st| !st.running.is_null() && st.runner != me);
+            if !busy {
+                break;
+            }
+            core::hint::spin_loop();
         }
     }
 }
@@ -206,7 +363,11 @@ fn init_tail(fence: *mut f::dma_fence, fc: KArc<FenceCore>) {
 }
 
 fn new_core(fence: Fence) -> Option<KArc<FenceCore>> {
-    KArc::try_new(FenceCore { fence, cbs: Spin::new(KVec::new()) }).ok()
+    let list = KArc::try_new(CbList {
+        st: Spin::new(CbState { head: ptr::null_mut(), gone: false, running: ptr::null_mut(), runner: 0 }),
+    })
+    .ok()?;
+    KArc::try_new(FenceCore { fence, list }).ok()
 }
 
 /// Publishes the counters of the module's fence domain (kstat
@@ -214,7 +375,10 @@ fn new_core(fence: Fence) -> Option<KArc<FenceCore>> {
 /// lock); the domain's drain task publishes what interrupt-context calls
 /// changed.
 fn publish_module() {
-    if let ddi::private::Context::Sleep(_) = ddi::private::current_context() {
+    // The kstat's lock is a thread-level adaptive mutex: not on an
+    // interrupt thread (the facade's callers never hold spin locks or
+    // raise the priority level).
+    if !ddi::private::servicing_interrupt() {
         crate::module_fences().publish();
     }
 }
@@ -276,10 +440,9 @@ pub unsafe extern "C" fn dma_fence_init(
         (*fence).__core = [0; 4];
     }
     let domain = crate::module_fences();
-    let made = super::with_ctx(|c| match c {
-        Ctx::Sleep(s) => Fence::new(domain, context, seqno, s).ok(),
-        Ctx::Atomic(_) => Fence::try_new(domain, context, seqno).ok(),
-    });
+    // Without sleeping for memory, in any context (a timeout(9F) handler
+    // included, which the core cannot tell from a thread).
+    let made = Fence::try_new(domain, context, seqno).ok();
     match made.and_then(new_core) {
         Some(fc) => {
             init_tail(fence, fc);
@@ -305,7 +468,11 @@ pub extern "C" fn dma_fence_context_alloc(num: u32) -> u64 {
 pub unsafe extern "C" fn dma_fence_signal(fence: *mut f::dma_fence) {
     // SAFETY: the caller holds a reference.
     let Some(c) = (unsafe { core_of(fence) }) else { return };
-    super::with_ctx(|ctx| c.fence.signal(ctx));
+    // Atomic in every context: releases that signalling triggers are
+    // deferred, so it never blocks (timeout(9F) handlers included).
+    // SAFETY: nothing on this path blocks.
+    let a = unsafe { ddi::Atomic::assume() };
+    c.fence.signal(Ctx::Atomic(&a));
     // SAFETY: as above.
     unsafe { mark_signaled(fence) };
     publish_module();
@@ -454,23 +621,40 @@ pub unsafe extern "C" fn dma_fence_add_callback(
     let (Some(func), false) = (func, cb.is_null()) else { return neg(Errno::EINVAL) };
     // SAFETY: the caller holds a reference.
     let Some(c) = (unsafe { core_of(fence) }) else { return neg(Errno::ENOENT) };
-    // SAFETY: the caller's callback structure.
-    unsafe {
-        (*cb).func = Some(func);
-        (*cb).node.next = ptr::addr_of_mut!((*cb).node);
-        (*cb).node.prev = ptr::addr_of_mut!((*cb).node);
-    }
-    let Ok(h) = FenceCb::try_new(CCb { fence, cb, func }) else { return neg(Errno::ENOMEM) };
+    let Ok(h) = FenceCb::try_new(CCb { fence, cb, func, list: c.list.clone() }) else { return neg(Errno::ENOMEM) };
+    // Listed first, with an empty handle slot, so that the callback finds
+    // itself on the list however soon the fence signals.
+    c.list.st.with(|st| {
+        // SAFETY: the caller's callback structure, the core's from now on.
+        unsafe {
+            (*cb).func = Some(func);
+            *slot(cb) = ptr::null_mut();
+            (*cb).node.next = st.head as *mut f::list_head;
+        }
+        st.head = cb;
+    });
     match c.fence.add_callback(&h) {
-        Ok(()) => {}
-        Err(AddError::Signaled) => return neg(Errno::ENOENT),
-        Err(AddError::Busy) => return neg(Errno::EINVAL),
-    }
-    match c.cbs.with(|l| l.try_push(h)) {
-        Ok(()) => 0,
-        Err(h) => {
-            c.fence.remove_callback_spin(&h);
-            neg(Errno::ENOMEM)
+        Ok(()) => {
+            // Keep the handle with the callback unless it has run already.
+            let left = c.list.st.with(|st| {
+                if st.contains(cb) {
+                    // SAFETY: listed, with the empty slot set above.
+                    unsafe { put_handle(cb, h) };
+                    None
+                } else {
+                    Some(h)
+                }
+            });
+            drop(left);
+            0
+        }
+        Err(e) => {
+            c.list.st.with(|st| st.unlink(cb));
+            drop(h);
+            match e {
+                AddError::Signaled => neg(Errno::ENOENT),
+                AddError::Busy => neg(Errno::EINVAL),
+            }
         }
     }
 }
@@ -481,12 +665,24 @@ pub unsafe extern "C" fn dma_fence_remove_callback(fence: *mut f::dma_fence, cb:
     let ctx = unsafe { super::sleepable() };
     // SAFETY: the caller holds a reference.
     let Some(c) = (unsafe { core_of(fence) }) else { return false };
-    let h = c.cbs.with(|l| {
-        let i = l.iter().rposition(|h| ptr::eq(h.get().cb, cb))?;
-        l.swap_remove(i)
+    let found = c.list.st.with(|st| {
+        // SAFETY: a listed callback is live.
+        if st.unlink(cb) { Some(unsafe { take_handle(cb) }) } else { None }
     });
-    let Some(h) = h else { return false };
-    c.fence.remove_callback(&h, &ctx)
+    match found {
+        Some(Some(h)) => c.fence.remove_callback(&h, &ctx),
+        // Added by a call that has not returned yet: the driver's race.
+        Some(None) => false,
+        None => {
+            // It has run, or runs now: wait until its function returns
+            // (unless it is this thread's, which cannot wait for itself).
+            let me = ksync::thread_id();
+            while c.list.st.with(|st| st.running == cb && st.runner != me) {
+                ksync::yield_briefly(&ctx);
+            }
+            false
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

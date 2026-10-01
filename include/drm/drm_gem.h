@@ -171,8 +171,12 @@ extern void drm_gem_object_release(struct drm_gem_object *obj);
 extern void drm_gem_object_get(struct drm_gem_object *obj);
 
 /*
- * Drops a reference. May be called from any context; the last reference
- * of an interrupt context is released later by a task queue.
+ * Drops a reference, from a thread that may block or from an interrupt
+ * handler (whose last reference is released later by a task queue). The
+ * core tells the two apart by servicing_interrupt(), which cannot tell a
+ * timeout(9F) handler, quiesce(9E), chpoll(9E) or a thread holding a spin
+ * lock from a thread that may block: there, use
+ * drm_illumos_gem_object_put_deferred() (drm_illumos.h).
  */
 extern void drm_gem_object_put(struct drm_gem_object *obj);
 

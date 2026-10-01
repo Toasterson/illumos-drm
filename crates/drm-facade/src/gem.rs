@@ -152,8 +152,41 @@ pub trait GemObject: Send + Sync + Sized + 'static {
 /// reference through `funcs->free`.
 #[repr(C)]
 pub struct Gem<T: GemObject> {
-    base: sys::drm_gem_object,
+    /// Changed by the core through raw pointers while references exist.
+    base: core::cell::UnsafeCell<sys::drm_gem_object>,
+    /// The object's type, which [`is_type`] checks.
+    vt: &'static GemVt,
     data: T,
+}
+
+/// The start of every [`Gem`], whatever its type.
+#[repr(C)]
+struct GemHead {
+    base: core::cell::UnsafeCell<sys::drm_gem_object>,
+    vt: &'static GemVt,
+}
+
+/// What the facade knows of an object type at run time.
+struct GemVt {
+    /// Frees a `Gem<T>`.
+    drop: unsafe fn(*mut sys::drm_gem_object),
+    /// `TypeId::of::<T>`.
+    type_id: fn() -> core::any::TypeId,
+}
+
+trait HasVt: GemObject {
+    const VT: GemVt;
+}
+
+impl<T: GemObject> HasVt for T {
+    const VT: GemVt = GemVt { drop: drop_gem::<T>, type_id: core::any::TypeId::of::<T> };
+}
+
+/// # Safety
+/// `obj` is the structure of a boxed `Gem<T>` whose last reference went.
+unsafe fn drop_gem<T: GemObject>(obj: *mut sys::drm_gem_object) {
+    // SAFETY: the caller's contract.
+    drop(unsafe { Box::from_raw(obj as *mut Gem<T>) });
 }
 
 // SAFETY: the C structure is changed only by the facade; T is Send+Sync.
@@ -171,11 +204,12 @@ impl<T: GemObject> core::ops::Deref for Gem<T> {
 impl<T: GemObject> Gem<T> {
     /// The C object.
     pub fn raw(&self) -> *mut sys::drm_gem_object {
-        &self.base as *const sys::drm_gem_object as *mut sys::drm_gem_object
+        self.base.get()
     }
     /// The size in bytes.
     pub fn size(&self) -> usize {
-        self.base.size
+        // SAFETY: set at creation, never changed.
+        unsafe { (*self.raw()).size }
     }
     /// Backing `i`'s `ddi_umem` cookie, or NULL.
     pub fn umem(&self, i: u32) -> sys::ddi_umem_cookie_t {
@@ -212,10 +246,16 @@ unsafe extern "C" fn release_thunk<T: GemObject>(obj: *mut sys::drm_gem_object) 
     T::release(unsafe { &mut *(obj as *mut Gem<T>) })
 }
 
-unsafe extern "C" fn free_thunk<T: GemObject>(obj: *mut sys::drm_gem_object) {
+/// The `free` callback of every object type of the driver: one function,
+/// so that its address tells the driver's objects from others.
+unsafe extern "C" fn free_any(obj: *mut sys::drm_gem_object) {
     // SAFETY: the structure is the first field of a boxed Gem<T> made by
-    // GemRef::new; the core calls free once, in thread context.
-    drop(unsafe { Box::from_raw(obj as *mut Gem<T>) });
+    // GemRef::new, which starts with a GemHead; the core calls free once,
+    // in thread context.
+    unsafe {
+        let vt = (*(obj as *const GemHead)).vt;
+        (vt.drop)(obj)
+    }
 }
 
 unsafe extern "C" fn open_thunk<T: GemObject>(obj: *mut sys::drm_gem_object, file: *mut sys::drm_file) -> c_int {
@@ -271,7 +311,7 @@ trait Funcs: GemObject {
 
 impl<T: GemObject> Funcs for T {
     const FUNCS: sys::drm_gem_object_funcs = sys::drm_gem_object_funcs {
-        free: Some(free_thunk::<T>),
+        free: Some(free_any),
         open: Some(open_thunk::<T>),
         close: Some(close_thunk::<T>),
         illumos_release: Some(release_thunk::<T>),
@@ -282,7 +322,11 @@ impl<T: GemObject> Funcs for T {
     };
 }
 
-/// Whether `obj` is an object of type `T`: its free callback is `T`'s.
+/// Whether `obj` is an object of type `T`: one of this driver's objects
+/// (its free callback is this module's [`free_any`]) whose type tag is
+/// `T`'s `TypeId`. Function addresses are compared only for the one
+/// non-generic function; the type itself is told by its `TypeId`, since
+/// distinct generic instances may share an address.
 fn is_type<T: GemObject>(obj: *const sys::drm_gem_object) -> bool {
     // SAFETY: a live object the caller holds.
     let funcs = unsafe { (*obj).funcs };
@@ -291,8 +335,13 @@ fn is_type<T: GemObject>(obj: *const sys::drm_gem_object) -> bool {
     }
     // SAFETY: an object's funcs live as long as it.
     let free = unsafe { (*funcs).free };
-    let mine: unsafe extern "C" fn(*mut sys::drm_gem_object) = free_thunk::<T>;
-    free.map(|f| f as usize) == Some(mine as usize)
+    let any: unsafe extern "C" fn(*mut sys::drm_gem_object) = free_any;
+    if free.map(|f| f as usize) != Some(any as usize) {
+        return false;
+    }
+    // SAFETY: an object of this driver starts with a GemHead.
+    let vt = unsafe { (*(obj as *const GemHead)).vt };
+    (vt.type_id)() == core::any::TypeId::of::<T>()
 }
 
 /// A counted reference to an object of type `T`.
@@ -315,9 +364,13 @@ impl<T: GemObject> Clone for GemRef<T> {
 }
 
 impl<T: GemObject> Drop for GemRef<T> {
+    /// Drops the reference without assuming that the context may block
+    /// (a `timeout(9F)` handler cannot be told from a thread): a last
+    /// reference is released by a task queue. [`GemRef::put`] releases it
+    /// at once where blocking is proven.
     fn drop(&mut self) {
-        // SAFETY: this reference's count.
-        unsafe { sys::drm_gem_object_put(self.raw()) };
+        // SAFETY: this reference's count; any context.
+        unsafe { sys::drm_illumos_gem_object_put_deferred(self.raw()) };
     }
 }
 
@@ -338,7 +391,7 @@ impl<T: GemObject> GemRef<T> {
         // SAFETY: plain data; zero is valid.
         let mut base: sys::drm_gem_object = unsafe { core::mem::zeroed() };
         base.funcs = &<T as Funcs>::FUNCS;
-        let b = Box::into_raw(Box::new(Gem { base, data }));
+        let b = Box::into_raw(Box::new(Gem { base: core::cell::UnsafeCell::new(base), vt: &<T as HasVt>::VT, data }));
         let obj = b as *mut sys::drm_gem_object;
         // SAFETY: the new object and the driver's device.
         let r = unsafe {
@@ -401,7 +454,8 @@ impl<T: GemObject> GemRef<T> {
     pub fn mmap_offset(&self) -> Result<u64, Errno> {
         // SAFETY: a live object.
         check(unsafe { sys::drm_gem_create_mmap_offset(self.raw()) })?;
-        Ok(self.base.vma_node.vm_node.start * drm_core::offsets::PAGE_SIZE)
+        // SAFETY: set by the call above, under the core's rules.
+        Ok(unsafe { (*self.raw()).vma_node.vm_node.start } * drm_core::offsets::PAGE_SIZE)
     }
 
     /// Adds a backing of the object's size; returns its index.
@@ -465,6 +519,14 @@ impl<T: GemObject> GemRef<T> {
         unsafe { sys::drm_illumos_gem_object_put_deferred(p.as_ptr().cast()) };
     }
 
+    /// Drops the reference in a thread that may block, as the token
+    /// proves: a last reference releases the object here and now.
+    pub fn put(self, _ctx: &ddi::Sleepable) {
+        let p = self.into_raw();
+        // SAFETY: this reference's count, in a thread that may block.
+        unsafe { sys::drm_gem_object_put(p.as_ptr().cast()) };
+    }
+
     /// The reference as a raw pointer, for a driver that parks it (a
     /// timer); give it back with [`GemRef::from_raw`].
     pub fn into_raw(self) -> NonNull<Gem<T>> {
@@ -492,9 +554,11 @@ unsafe impl Send for GemAny {}
 unsafe impl Sync for GemAny {}
 
 impl Drop for GemAny {
+    /// As [`GemRef`]'s: a last reference is released by a task queue;
+    /// [`GemAny::put`] releases it at once where blocking is proven.
     fn drop(&mut self) {
-        // SAFETY: this reference's count.
-        unsafe { sys::drm_gem_object_put(self.p.as_ptr()) };
+        // SAFETY: this reference's count; any context.
+        unsafe { sys::drm_illumos_gem_object_put_deferred(self.p.as_ptr()) };
     }
 }
 
@@ -529,6 +593,14 @@ impl GemAny {
         let p = self.into_raw();
         // SAFETY: this reference's count.
         unsafe { sys::drm_illumos_gem_object_put_deferred(p.as_ptr()) };
+    }
+
+    /// Drops the reference in a thread that may block, as the token
+    /// proves: a last reference releases the object here and now.
+    pub fn put(self, _ctx: &ddi::Sleepable) {
+        let p = self.into_raw();
+        // SAFETY: this reference's count, in a thread that may block.
+        unsafe { sys::drm_gem_object_put(p.as_ptr()) };
     }
 
     /// The reference as a raw pointer, for a driver that parks it (a

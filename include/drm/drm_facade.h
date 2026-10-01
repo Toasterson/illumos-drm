@@ -3,9 +3,10 @@
  * Copyright 2026 The illumos-drm authors
  *
  * The illumos-drm facade: the C interface of the DRM core module
- * misc/drm. A driver includes this header, links with
+ * misc/drm_core. A driver includes this header, links with
  *
- *	ld -ztype=kmod -N misc/drm -z defs -M ddi.mapfile -M drm.mapfile ...
+ *	ld -ztype=kmod -N misc/drm_core -z defs -M ddi.mapfile \
+ *	    -M include/drm/drm_facade.mapfile ...
  *
  * and calls drm_facade_check() in _init(9E) before mod_install(9F).
  * MIT-licensed; see the individual headers for the Linux interfaces they
@@ -63,21 +64,21 @@ drm_facade_check(const char *driver)
 		return (EINVAL);
 	}
 	if (v.major != DRM_FACADE_MAJOR || v.minor < DRM_FACADE_MINOR) {
-		cmn_err(CE_WARN, "%s: built for DRM facade %u.%u, misc/drm "
+		cmn_err(CE_WARN, "%s: built for DRM facade %u.%u, misc/drm_core "
 		    "provides %u.%u", driver, DRM_FACADE_MAJOR,
 		    DRM_FACADE_MINOR, v.major, v.minor);
 		return (EINVAL);
 	}
 	if (v.nsizes < DRM_FACADE_NSIZES) {
-		cmn_err(CE_WARN, "%s: misc/drm knows %u facade structures, "
+		cmn_err(CE_WARN, "%s: misc/drm_core knows %u facade structures, "
 		    "the driver %u", driver, v.nsizes, DRM_FACADE_NSIZES);
 		return (EINVAL);
 	}
 	for (i = 0; i < DRM_FACADE_NSIZES; i++) {
 		if (v.sizes[i] != mine[i]) {
 			cmn_err(CE_WARN, "%s: struct %s is %llu bytes in "
-			    "misc/drm, %llu in the driver", driver, names[i],
-			    (unsigned long long)v.sizes[i],
+			    "misc/drm_core, %llu in the driver", driver,
+			    names[i], (unsigned long long)v.sizes[i],
 			    (unsigned long long)mine[i]);
 			return (EINVAL);
 		}

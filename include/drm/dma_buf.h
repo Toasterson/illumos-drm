@@ -83,11 +83,17 @@ extern struct dma_buf *dma_buf_get(int fd);
 /*
  * A new file descriptor of the calling process for the dma-buf (flags:
  * O_CLOEXEC, and DRM_RDWR for writable mappings), or a negative errno.
- * Only inside an ioctl handler.
+ * As on Linux, a descriptor takes over the caller's reference: on success
+ * the caller must not dma_buf_put() it; on failure the caller still owns
+ * it. Only inside an ioctl handler.
  */
 extern int dma_buf_fd(struct dma_buf *dmabuf, int flags);
 
 extern void get_dma_buf(struct dma_buf *dmabuf);
+/*
+ * Drops a reference; the contexts of drm_gem_object_put() (a thread that
+ * may block, or an interrupt handler).
+ */
 extern void dma_buf_put(struct dma_buf *dmabuf);
 
 #ifdef	__cplusplus

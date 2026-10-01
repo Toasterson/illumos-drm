@@ -30,12 +30,19 @@ unsafe fn resv<'a>(obj: *const f::dma_resv) -> Option<&'a Resv> {
     Some(unsafe { &*(p as *const Resv) })
 }
 
-fn usage(u: f::dma_resv_usage) -> Usage {
+/// The core's usage of a `dma_resv_usage`; `None` (after a warning) for a
+/// value Linux does not define, which the functions refuse.
+fn usage(u: f::dma_resv_usage) -> Option<Usage> {
     match u {
-        f::DMA_RESV_USAGE_KERNEL => Usage::Kernel,
-        f::DMA_RESV_USAGE_WRITE => Usage::Write,
-        f::DMA_RESV_USAGE_READ => Usage::Read,
-        _ => Usage::Bookkeep,
+        f::DMA_RESV_USAGE_KERNEL => Some(Usage::Kernel),
+        f::DMA_RESV_USAGE_WRITE => Some(Usage::Write),
+        f::DMA_RESV_USAGE_READ => Some(Usage::Read),
+        f::DMA_RESV_USAGE_BOOKKEEP => Some(Usage::Bookkeep),
+        _ => {
+            // SAFETY: a constant format with one unsigned argument.
+            unsafe { ddi::sys::cmn_err(ddi::sys::CE_WARN, c"drm_core: unknown dma_resv_usage %u".as_ptr(), u) };
+            None
+        }
     }
 }
 
@@ -71,10 +78,15 @@ pub unsafe extern "C" fn dma_resv_lock_interruptible(obj: *mut f::dma_resv, ctx:
 pub unsafe extern "C" fn dma_resv_unlock(obj: *mut f::dma_resv) {
     // SAFETY: the caller holds the object.
     let Some(r) = (unsafe { resv(obj) }) else { return };
-    if r.lock().is_locked() {
-        // SAFETY: the caller locked it with dma_resv_lock (the facade's
-        // only way to hold it from C).
-        unsafe { r.lock().unlock_raw() };
+    if r.lock().unlock_raw().is_err() {
+        // Only the thread that took it with dma_resv_lock releases it.
+        // SAFETY: a constant format without arguments.
+        unsafe {
+            ddi::sys::cmn_err(
+                ddi::sys::CE_WARN,
+                c"drm_core: dma_resv_unlock by a thread that does not hold the lock; ignored".as_ptr(),
+            )
+        };
     }
 }
 
@@ -96,7 +108,11 @@ pub unsafe extern "C" fn dma_resv_add_fence(obj: *mut f::dma_resv, fence: *mut f
     let ctx = unsafe { super::sleepable() };
     // SAFETY: the caller holds the object and the fence.
     let (Some(r), Some(fc)) = (unsafe { resv(obj) }, unsafe { super::fence::core_fence(fence) }) else { return };
-    if let Err(e) = r.add_fence_raw(fc.clone(), usage(u), &ctx) {
+    let added = match usage(u) {
+        Some(u) => r.add_fence_raw(fc.clone(), u, &ctx),
+        None => Err(Errno::EINVAL),
+    };
+    if let Err(e) = added {
         // Not locked or no room: keep the order by waiting, as the header
         // promises.
         // SAFETY: a constant format with one int argument.
@@ -124,15 +140,19 @@ pub unsafe extern "C" fn dma_resv_wait_timeout(
     // SAFETY: the caller holds the object.
     let Some(r) = (unsafe { resv(obj) }) else { return i64::from(neg(Errno::EINVAL)) };
     let t = i64::try_from(timeout).unwrap_or(i64::MAX);
+    let Some(u) = usage(u) else { return i64::from(neg(Errno::EINVAL)) };
     let d = super::fence::deadline(t);
-    super::fence::wait_result(r.wait(usage(u), intr, d, &ctx), t, d)
+    super::fence::wait_result(r.wait(u, intr, d, &ctx), t, d)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn dma_resv_test_signaled(obj: *mut f::dma_resv, u: f::dma_resv_usage) -> bool {
     // SAFETY: the caller holds the object.
-    match unsafe { resv(obj) } {
-        Some(r) => r.test_signaled(usage(u)),
-        None => true,
+    match (unsafe { resv(obj) }, usage(u)) {
+        (Some(r), Some(u)) => r.test_signaled(u),
+        // An unknown usage is refused: not signalled, so that nobody goes
+        // ahead on it (its wait fails with -EINVAL).
+        (Some(_), None) => false,
+        (None, _) => true,
     }
 }

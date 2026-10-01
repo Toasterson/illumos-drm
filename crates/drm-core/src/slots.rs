@@ -4,7 +4,7 @@
 
 //! The table of DRM device numbers of the system: one atomic word per
 //! number, holding its owner or 0. Until R5a this was the module
-//! `misc/drm_minor`; it is now part of the core module `misc/drm`
+//! `misc/drm_minor`; it is now part of the core module `misc/drm_core`
 //! (`device::NUMBERS`).
 
 use core::sync::atomic::{AtomicUsize, Ordering};

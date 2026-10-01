@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! What `misc/drm` keeps behind a `struct drm_device`: the driver's table,
+//! What `misc/drm_core` keeps behind a `struct drm_device`: the driver's table,
 //! the settings made before registration, the registered core device, and
 //! the `struct drm_file` of every open file.
 //!
@@ -19,7 +19,6 @@ use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_void};
 use core::ops::Deref;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 
 use ddi::sys;
 use ddi::{DevInfo, DmaAttr, Errno, IntrPriority, Sleepable};
@@ -28,6 +27,7 @@ use drm_core::ioctl::DriverIoctl;
 use drm_core::ksync::KMutex;
 use drm_core::kvec::KVec;
 use drm_core::minor::CloneId;
+use drm_core::published::{PubGuard, Published};
 use drm_core::state::Perm;
 use drm_core::{Device, DriverInfo, Features, ModeConfig};
 use drm_facade_sys as f;
@@ -64,10 +64,7 @@ pub(crate) struct DevCore {
     pub(crate) setup: KMutex<Setup>,
     /// The registered device, between `drm_dev_register` and a successful
     /// `drm_dev_unregister`.
-    device: AtomicPtr<Device<CDriver>>,
-    /// The facade calls using `device` now ([`DevGuard`]); unregistering
-    /// waits for them before it takes the device apart.
-    users: AtomicU32,
+    device: Published<Device<CDriver>>,
     /// The `drm_file` of every open file.
     pub(crate) files: KMutex<KVec<(CloneId, NonNull<f::drm_file>)>>,
     /// The minor descriptors `primary` and `render` point at.
@@ -161,7 +158,7 @@ impl DevCore {
                 sys::dev_err(
                     dip,
                     sys::CE_WARN,
-                    c"driver built for DRM facade %u.%u; misc/drm is %u.%u".as_ptr(),
+                    c"driver built for DRM facade %u.%u; misc/drm_core is %u.%u".as_ptr(),
                     table.illumos_facade_major,
                     table.illumos_facade_minor,
                     f::DRM_FACADE_MAJOR,
@@ -242,8 +239,7 @@ impl DevCore {
                 unique: [0; BUS_ID_MAX + 1],
                 unique_len: 0,
             }),
-            device: AtomicPtr::new(ptr::null_mut()),
-            users: AtomicU32::new(0),
+            device: Published::new(),
             files: KMutex::new(KVec::new()),
             // SAFETY: drm_minor is plain data; zero is a valid value.
             minors: UnsafeCell::new(unsafe { core::mem::zeroed() }),
@@ -333,30 +329,22 @@ impl DevCore {
     /// concurrent `drm_dev_unregister` waits until the guard is dropped.
     /// Any context.
     pub(crate) fn device(&self) -> Option<DevGuard<'_>> {
-        self.users.fetch_add(1, Ordering::AcqRel);
-        let p = self.device.load(Ordering::Acquire);
-        if p.is_null() {
-            self.users.fetch_sub(1, Ordering::AcqRel);
-            return None;
-        }
+        let g = self.device.enter()?;
         // SAFETY: published by register from a live box; withdraw clears
         // the pointer and waits for every guard before the box goes.
-        Some(DevGuard { core: self, d: unsafe { &*p } })
+        let d = unsafe { &*g.get() };
+        Some(DevGuard { _g: g, d })
     }
 
     pub(crate) fn publish(&self, d: *mut Device<CDriver>) {
-        self.device.store(d, Ordering::Release);
+        self.device.publish(d);
     }
 
     /// Withdraws the registered device and waits until no facade call uses
     /// it any more. Thread context.
     pub(crate) fn withdraw(&self) -> *mut Device<CDriver> {
-        let p = self.device.swap(ptr::null_mut(), Ordering::AcqRel);
-        while self.users.load(Ordering::Acquire) != 0 {
-            // SAFETY: delay(9F) in thread context (drm_dev_unregister).
-            unsafe { sys::delay(1) };
-        }
-        p
+        // SAFETY: delay(9F) in thread context (drm_dev_unregister).
+        self.device.withdraw(|| unsafe { sys::delay(1) })
     }
 
     /// The `drm_file` of open file `c`.
@@ -389,7 +377,7 @@ impl DevCore {
         if left != 0 {
             return;
         }
-        if !core.device.load(Ordering::Acquire).is_null() {
+        if core.device.is_published() {
             core.dip.warn(format_args!("last reference to a registered DRM device dropped; device leaked"));
             return;
         }
@@ -421,7 +409,7 @@ impl DevCore {
 
 /// A registered device in use by a facade call (see [`DevCore::device`]).
 pub(crate) struct DevGuard<'a> {
-    core: &'a DevCore,
+    _g: PubGuard<'a, Device<CDriver>>,
     d: &'a Device<CDriver>,
 }
 
@@ -429,11 +417,5 @@ impl Deref for DevGuard<'_> {
     type Target = Device<CDriver>;
     fn deref(&self) -> &Device<CDriver> {
         self.d
-    }
-}
-
-impl Drop for DevGuard<'_> {
-    fn drop(&mut self) {
-        self.core.users.fetch_sub(1, Ordering::AcqRel);
     }
 }
