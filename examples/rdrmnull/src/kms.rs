@@ -7,7 +7,7 @@
 //! at the mode's refresh rate, and a software "scanout" that a test-only
 //! ioctl can checksum.
 //!
-//! The EDID (`crates/drm/tests/edid/rdrmnull.bin`, synthesized by
+//! The EDID (`crates/drm-core/tests/edid/rdrmnull.bin`, synthesized by
 //! `gen_edid.py`) offers 1024x768 at 60 Hz as preferred mode, plus
 //! 1280x1024, 800x600 and 640x480 at 60 Hz; the core parses it into the
 //! mode list, so the null driver exercises the EDID path in the kernel.
@@ -24,23 +24,20 @@ use core::mem;
 use alloc::sync::Arc;
 
 use ddi::prelude::*;
-use drm::gem::GemRef;
-use drm::kms::formats::{ARGB8888, MOD_LINEAR, RGB565, XRGB8888};
-use drm::kms::modes::ModeLimits;
-use drm::kms::objects::FbRef;
-use drm::kms::soft::SoftVblank;
-use drm::kms::{
-    ConnectorDesc, ConnectorStatus, CrtcDesc, CrtcState, EncoderDesc, KmsDriver, Layout, PlaneDesc, PlaneState,
-    PlaneType, Probe, StateView, VblankHandle, check_plane_helper,
+use drm_facade::DevHandle;
+use drm_facade::kms::formats::{ARGB8888, MOD_LINEAR, RGB565, XRGB8888};
+use drm_facade::kms::modes::ModeLimits;
+use drm_facade::kms::soft::SoftVblank;
+use drm_facade::kms::{
+    ConnectorDesc, ConnectorStatus, CrtcDesc, CrtcState, EncoderDesc, Fb, KmsDriver, Layout, PlaneDesc, PlaneState,
+    PlaneType, Probe, check_plane_helper,
 };
 use drm_uapi as uapi;
 
-use crate::NullObject;
-
-type Fb = FbRef<GemRef<NullObject>>;
+use crate::NullBo;
 
 /// The EDID of the virtual display.
-static EDID: &[u8] = include_bytes!("../../../crates/drm/tests/edid/rdrmnull.bin");
+static EDID: &[u8] = include_bytes!("../../../crates/drm-core/tests/edid/rdrmnull.bin");
 
 /// The modes the virtual connector accepts, from the EDID or from userland
 /// (a `MODE_ID` blob or `SETCRTC`).
@@ -72,7 +69,7 @@ struct Scanout {
 
 /// The display side of `rdrmnull`.
 pub struct NullKms {
-    vblank: Mutex<Option<VblankHandle>>,
+    vblank: Mutex<Option<DevHandle>>,
     source: Mutex<Option<SoftVblank>>,
     scan: Arc<Mutex<Scanout>>,
 }
@@ -116,7 +113,7 @@ impl NullKms {
 
     /// Gives the display the device's vblank handle, once the device has
     /// attached.
-    pub fn set_vblank(&self, h: VblankHandle) {
+    pub fn set_vblank(&self, h: DevHandle) {
         *self.vblank.lock() = Some(h);
     }
 
@@ -151,7 +148,7 @@ impl NullKms {
     }
 
     fn start_vblank(&self, frame_ns: u64, ctx: &Sleepable) {
-        let Some(h) = self.vblank.lock().clone() else { return };
+        let Some(h) = *self.vblank.lock() else { return };
         let scan = self.scan.clone();
         let src = SoftVblank::start(
             frame_ns,
@@ -188,16 +185,19 @@ impl NullKms {
 /// FNV-1a over the visible rectangle of an image in system memory.
 fn checksum(img: &Image) -> Option<u64> {
     let fb = &img.fb;
-    let obj = fb.objs[0].as_ref()?;
-    let mem = match obj.object() {
-        NullObject::Plain(m) => m,
-        NullObject::Movable(_) => return None,
-    };
-    let cpp = u64::from(fb.info()?.cpp[0]);
+    // A dumb buffer; a movable object has no stable kernel view.
+    let obj = fb.object::<NullBo>(0)?;
+    let cpp = u64::from(fb.cpp0);
+    if cpp == 0 {
+        return None;
+    }
     let (x, y, w, h) = img.src;
     let (pitch, off) = (u64::from(fb.pitches[0]), u64::from(fb.offsets[0]));
-    let size = mem.size() as u64;
-    let base = mem.kernel_ptr().as_ptr();
+    let size = obj.size() as u64;
+    let base = obj.vaddr(0);
+    if base.is_null() {
+        return None;
+    }
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for row in u64::from(y)..u64::from(y) + u64::from(h) {
         let start = off + row * pitch + u64::from(x) * cpp;
@@ -218,7 +218,7 @@ fn checksum(img: &Image) -> Option<u64> {
     Some(hash)
 }
 
-impl KmsDriver<GemRef<NullObject>> for NullKms {
+impl KmsDriver for NullKms {
     fn layout(&self) -> Layout {
         let limits = LIMITS;
         Layout {
@@ -250,11 +250,11 @@ impl KmsDriver<GemRef<NullObject>> for NullKms {
         }
     }
 
-    fn probe(&self, _connector: usize, _ctx: &Sleepable) -> Probe {
+    fn probe(&self, _connector: usize) -> Probe {
         Probe { status: ConnectorStatus::Connected, edid: Some(EDID.to_vec()), ..Probe::default() }
     }
 
-    fn check_plane(&self, plane: usize, new: &PlaneState<GemRef<NullObject>>, crtc: Option<&CrtcState>) -> Result<()> {
+    fn check_plane(&self, plane: usize, new: &PlaneState, crtc: Option<&CrtcState>) -> Result<()> {
         if plane == 1 {
             // The cursor: at most 64 by 64, anywhere, unscaled.
             if new.fb.as_ref().is_some_and(|f| f.width > CURSOR_MAX || f.height > CURSOR_MAX) {
@@ -266,7 +266,7 @@ impl KmsDriver<GemRef<NullObject>> for NullKms {
         check_plane_helper(new, crtc, false, false)
     }
 
-    fn check_crtc(&self, _crtc: usize, new: &CrtcState, _view: &StateView<'_, GemRef<NullObject>>) -> Result<()> {
+    fn check_crtc(&self, _crtc: usize, new: &CrtcState) -> Result<()> {
         // A mode from userland must be one the display could show: within
         // the connector's limits, progressive, not double-scanned, and
         // without line repetition (vscan), which the scanout ignores.
@@ -276,7 +276,9 @@ impl KmsDriver<GemRef<NullObject>> for NullKms {
         }
     }
 
-    fn commit_crtc(&self, _crtc: usize, old: &CrtcState, new: &CrtcState, ctx: &Sleepable) {
+    fn commit_crtc(&self, _crtc: usize, old: &CrtcState, new: &CrtcState) {
+        // SAFETY: the facade commits in thread context.
+        let ctx = &unsafe { Sleepable::assume() };
         let same_mode = match (&old.mode, &new.mode) {
             (Some(a), Some(b)) => a.same_timings(b),
             _ => false,
@@ -300,13 +302,7 @@ impl KmsDriver<GemRef<NullObject>> for NullKms {
         }
     }
 
-    fn commit_plane(
-        &self,
-        plane: usize,
-        _old: &PlaneState<GemRef<NullObject>>,
-        new: &PlaneState<GemRef<NullObject>>,
-        _ctx: &Sleepable,
-    ) {
+    fn commit_plane(&self, plane: usize, _old: &PlaneState, new: &PlaneState) {
         if plane != 0 {
             // The cursor is not composed into the checksum.
             return;

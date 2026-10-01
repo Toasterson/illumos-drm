@@ -10,18 +10,13 @@ publish = false
 [lib]
 crate-type = ["staticlib"]
 
-[features]
-# Test aid, off by default: allows dma-mode="root-node", which panics the
-# system on purpose (see the crate documentation). Without it that mode is
-# refused at attach and the module cannot name another node at all.
-panic-drill = ["drm/panic-drill"]
-
 [dependencies]
-# global-alloc-sleep: the DRM core keeps its handle and name tables in
-# alloc::collections::BTreeMap, whose nodes come from the global allocator;
-# the core only inserts with the Sleepable token (see drm::idmap).
+# global-alloc-sleep: the driver's own boxes and vectors (KM_SLEEP, thread
+# context only).
 ddi = { workspace = true, features = ["panic-handler", "global-alloc-sleep"] }
-drm.workspace = true
+# The DRM core is the module misc/drm; the driver uses it through the
+# facade (drm-facade-sys brings -N misc/drm).
+drm-facade.workspace = true
 drm-uapi.workspace = true
 
 [package.metadata.kmod]

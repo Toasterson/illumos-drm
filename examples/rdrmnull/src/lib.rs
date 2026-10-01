@@ -15,8 +15,7 @@
 //!
 //! Since milestone R1 it has GEM objects and dumb buffers in system memory.
 //! As a pseudo device it does no DMA (the pseudo nexus refuses DMA
-//! handles), so its objects have no scatter/gather table
-//! ([`drm::Driver::DMA_ATTR`] is `None`).
+//! handles), so its objects have no scatter/gather table.
 //!
 //! The string property `dma-mode` in `rdrmnull.conf` is a test aid, the DMA
 //! drill; nothing but the kernel tests should set it:
@@ -31,17 +30,13 @@
 //!   DMA attributes (`dma_attr_maxxfer`) to that many bytes, so that the
 //!   bind of any larger object fails (`tools/test/rdrmnull-dma-self-tiny.conf` and
 //!   `drm_dma_errno_test.c` record the errno userland gets).
-//! * `"root-node"`: stay a pseudo node but allocate the DMA handles against
-//!   `ddi_root_node(9F)` and bind every object
-//!   (`tools/test/rdrmnull-dma-root-node.conf`). The DDI does not allow
-//!   this; it reproduces the kernel panic an R1 trial caused, so that a
-//!   crash dump can be taken. Use a disposable VM with a dump device.
-//!   illumos-ddi allocates DMA handles only from the driver's own node (an
-//!   `OwnNode`) and refuses the root node, so this mode goes around it with
-//!   raw `ddi-sys` calls (`drm::gem::GemDma::against`). It is only compiled
-//!   with the `panic-drill` cargo feature, which is off by default; a module
-//!   built without it refuses `root-node` at attach and cannot name another
-//!   node at all.
+//! * `"root-node"`: the drill that reproduced the 2026-09-28 root-node
+//!   panic. It needed the core to allocate DMA handles against a node the
+//!   driver does not own; since R5a the core is the module `misc/drm`,
+//!   whose facade takes DMA attributes only for the driver's own node
+//!   (`drm_dev_illumos_set_dma_attr`), so the drill is gone and the mode is
+//!   refused at attach. illumos-ddi makes the panic impossible by type
+//!   (`OwnNode`) anyway.
 //!
 //! It also has five driver-private ioctls that exist only for the kernel
 //! tests (`tools/test/drm_r1_test.c`, `drm_r3_test.c`) and are not an
@@ -89,8 +84,13 @@
 //! complete (`before_teardown`), so a refused detach leaves it working.
 //!
 //! It is the kernel module the core is tested with, and the template for a
-//! real driver: implement [`drm::Driver`], use [`drm::Device`] as the
-//! instance, and map minor numbers with [`drm::minor::instance_of_minor`].
+//! Rust driver on the facade (milestone R5a): implement
+//! [`drm_facade::Driver`], register a [`drm_facade::Device`] as the
+//! instance, point `cb_ops` at the core (`drm_facade::CB_OPS`) and map
+//! minor numbers with [`drm_facade::instance_of_minor`]. The core itself
+//! is the module `misc/drm`, which every DRM driver links against
+//! (`-N misc/drm`); the driver calls nothing of it but the facade's C
+//! functions, through `drm-facade`.
 #![no_std]
 
 extern crate alloc;
@@ -99,128 +99,123 @@ mod kms;
 
 use alloc::boxed::Box;
 
-use core::ffi::{CStr, c_int, c_void};
+use core::ffi::{CStr, c_int};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use ddi::DmaAttr;
 use ddi::prelude::*;
 use ddi::sys;
-use drm::defer::Ctx;
-use drm::fence::Fence;
-use drm::gem::{Fault, GemCore, GemDma, GemObject, GemRef, Mapping, SysMem, UmemCookie};
-use drm::ioctl::DriverIoctl;
-use drm::kvec::KVec;
-use drm::minor::CloneId;
-use drm::resv::Usage;
-use drm::state::Perm;
-use drm::uaccess::{Plain, UserArg};
-use drm::{Features, ModeConfig};
+use drm_facade::device::DumbCreated;
+use drm_facade::dumb::{self, DumbRequest};
+use drm_facade::gem::{Fault, GemAny, Mapping};
+use drm_facade::kvec::KVec;
+use drm_facade::sync::sync_file_export;
+use drm_facade::sys as fsys;
+use drm_facade::{Dev, Device, Fence, File, Gem, GemObject, GemRef, Ioctl, IoctlData, Plain, Settings, Syncobj, Usage};
 use drm_uapi::ioc;
 
 ddi::module! {
     driver: RDrmNull,
-    ops: [char, devmap],
+    cb_ops: drm_facade::CB_OPS.get(),
 }
 
-/// The kernel module.
+/// The `ddi::Driver` of the module.
 pub struct RDrmNull;
 
 // --- the test-only ioctls ---------------------------------------------------
 
-/// `RDRMNULL_IOCTL_CREATE_MOVABLE`: `size` in, `handle` out.
+/// The argument of `RDRMNULL_IOCTL_CREATE_MOVABLE`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CreateMovable {
-    /// The object size in bytes, rounded up to whole pages.
+    /// The size in bytes, rounded up to the page size.
     pub size: u64,
-    /// The new handle.
+    /// The new handle (out).
     pub handle: u32,
-    /// Must be zero.
+    /// Must be 0.
     pub pad: u32,
 }
 
-/// `RDRMNULL_IOCTL_MOVE`: `handle` and `flags` in, the rest out.
+/// The argument of `RDRMNULL_IOCTL_MOVE`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Move {
-    /// A handle of a movable object.
+    /// The object.
     pub handle: u32,
-    /// [`MOVE_FILL`] with a fill byte in the low eight bits, and/or
-    /// [`MOVE_UNLOAD_ONLY`].
+    /// `MOVE_FILL` (with the fill byte in the low eight bits),
+    /// `MOVE_UNLOAD_ONLY`.
     pub flags: u32,
-    /// The number of mapping pieces invalidated.
+    /// The mapping pieces handled (out).
     pub pieces: u32,
-    /// The backing now in use, 0 or 1.
+    /// The backing in use afterwards (out).
     pub backing: u32,
 }
 
-/// `RDRMNULL_IOCTL_PUT_LATER`: `handle` in.
+/// The argument of `RDRMNULL_IOCTL_PUT_LATER`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PutLater {
-    /// A handle whose object gets an extra reference, dropped from a timer.
+    /// The object.
     pub handle: u32,
-    /// Delay in milliseconds, 1 to 10000.
+    /// The delay, 1 to 10000 ms.
     pub delay_ms: u32,
 }
 
-/// `RDRMNULL_IOCTL_HOLD`: `handle` and `hold` in.
+/// The argument of `RDRMNULL_IOCTL_HOLD`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Hold {
-    /// With `hold` 1, the handle whose object the driver keeps a reference
-    /// to (`EBUSY` if it already keeps one); ignored with `hold` 0.
+    /// The object (for `hold` 1).
     pub handle: u32,
-    /// 1 to take the reference, 0 to drop it (`ENOENT` if there is none).
+    /// 1 to hold, 0 to release.
     pub hold: u32,
 }
 
-/// `RDRMNULL_IOCTL_FENCE`: see the crate documentation.
+/// The argument of `RDRMNULL_IOCTL_FENCE`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct NullFence {
-    /// Milliseconds until the fence signals, 0 to 10000.
+    /// When the fence signals, 0 to 10000 ms from now.
     pub delay_ms: u32,
-    /// `FENCE_*` flags.
+    /// `FENCE_*`.
     pub flags: u32,
-    /// With [`FENCE_SYNCOBJ`]: the sync object.
+    /// The sync object (with `FENCE_SYNCOBJ`).
     pub syncobj: u32,
-    /// With [`FENCE_BO_WRITE`] or [`FENCE_BO_READ`]: the buffer handle.
+    /// The buffer (with `FENCE_BO_WRITE` or `FENCE_BO_READ`).
     pub bo: u32,
-    /// With [`FENCE_SYNCOBJ`]: the timeline point, 0 to replace the fence.
+    /// The timeline point (with `FENCE_SYNCOBJ`; 0 replaces the fence).
     pub point: u64,
-    /// With [`FENCE_SYNC_FILE`]: the new sync file descriptor (out).
+    /// The sync file (out, with `FENCE_SYNC_FILE`).
     pub fd: i32,
-    /// 0, or a positive errno the fence signals with.
+    /// A positive errno to signal with, or 0.
     pub error: i32,
-    /// The fence's sequence number on the timeline (out).
+    /// The fence's number (out).
     pub seqno: u64,
 }
 
-/// `RDRMNULL_IOCTL_BO_WAIT`: waits for a buffer's reservation.
+/// The argument of `RDRMNULL_IOCTL_BO_WAIT`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BoWait {
-    /// The buffer handle.
+    /// The buffer.
     pub handle: u32,
-    /// [`BO_WAIT_WRITERS`]: only kernel and write fences (before reading);
-    /// otherwise all but bookkeeping fences (before writing).
+    /// `BO_WAIT_WRITERS`.
     pub flags: u32,
-    /// Relative timeout in nanoseconds; negative waits for ever, 0 polls.
+    /// The timeout; negative waits for ever.
     pub timeout_ns: i64,
 }
 
-/// Put the fence into the sync object `syncobj` at `point`.
+/// `FENCE`: put the fence into a sync object.
 pub const FENCE_SYNCOBJ: u32 = 1 << 0;
-/// Add the fence to the reservation of `bo` as a writer.
+/// `FENCE`: put it into a buffer's reservation as a writer.
 pub const FENCE_BO_WRITE: u32 = 1 << 1;
-/// Add the fence to the reservation of `bo` as a reader.
+/// `FENCE`: as a reader.
 pub const FENCE_BO_READ: u32 = 1 << 2;
-/// Return a sync file of the fence in `fd`.
+/// `FENCE`: hand out a sync file of it.
 pub const FENCE_SYNC_FILE: u32 = 1 << 3;
 const FENCE_FLAGS: u32 = FENCE_SYNCOBJ | FENCE_BO_WRITE | FENCE_BO_READ | FENCE_SYNC_FILE;
-/// Wait only for the writers of the buffer.
+/// `BO_WAIT`: wait for the writers only.
 pub const BO_WAIT_WRITERS: u32 = 1 << 0;
 
 // SAFETY: integer fields only, no padding.
@@ -228,7 +223,6 @@ unsafe impl Plain for NullFence {}
 // SAFETY: as above.
 unsafe impl Plain for BoWait {}
 const _: () = assert!(size_of::<NullFence>() == 40 && size_of::<BoWait>() == 16);
-
 // SAFETY: integer fields only, no padding.
 unsafe impl Plain for CreateMovable {}
 // SAFETY: as above.
@@ -238,12 +232,11 @@ unsafe impl Plain for PutLater {}
 // SAFETY: as above.
 unsafe impl Plain for Hold {}
 const _: () = assert!(size_of::<Hold>() == 8);
-
 const _: () = assert!(size_of::<CreateMovable>() == 16 && size_of::<Move>() == 16 && size_of::<PutLater>() == 8);
 
-/// Fill the new backing with the byte in bits 0 to 7 before switching.
+/// `MOVE`: fill the new backing with the low byte of the flags first.
 pub const MOVE_FILL: u32 = 1 << 8;
-/// Only invalidate the mappings; keep the backing.
+/// `MOVE`: only unload the mappings.
 pub const MOVE_UNLOAD_ONLY: u32 = 1 << 9;
 const MOVE_FLAGS: u32 = MOVE_FILL | MOVE_UNLOAD_ONLY | 0xff;
 
@@ -254,7 +247,7 @@ pub const RDRMNULL_IOCTL_MOVE: u32 = ioc::drm_iowr::<Move>(0x41);
 /// `DRM_IOW(DRM_COMMAND_BASE + 2, struct rdrmnull_put_later)`.
 pub const RDRMNULL_IOCTL_PUT_LATER: u32 = ioc::drm_iow::<PutLater>(0x42);
 /// `DRM_IOR(DRM_COMMAND_BASE + 3, struct rdrmnull_scanout)`: what the
-/// software scanout shows and its checksum (see the `kms` module).
+/// software scanout shows.
 pub const RDRMNULL_IOCTL_SCANOUT: u32 = ioc::drm_ior::<kms::ScanoutInfo>(0x43);
 /// `DRM_IOW(DRM_COMMAND_BASE + 4, struct rdrmnull_hold)`.
 pub const RDRMNULL_IOCTL_HOLD: u32 = ioc::drm_iow::<Hold>(0x44);
@@ -266,13 +259,6 @@ pub const RDRMNULL_IOCTL_BO_WAIT: u32 = ioc::drm_iow::<BoWait>(0x46);
 // SAFETY: integer fields only, no padding (asserted below).
 unsafe impl Plain for kms::ScanoutInfo {}
 const _: () = assert!(size_of::<kms::ScanoutInfo>() == 56);
-
-/// Render nodes too: the R2 test runs its sync object and PRIME steps on
-/// both kinds of node.
-const TEST_ONLY_RENDER: Perm = Perm { auth: false, master: false, root_only: false, render_allow: true };
-
-/// Primary node, no authentication: the tests run as root on `card0`.
-const TEST_ONLY: Perm = Perm { auth: false, master: false, root_only: false, render_allow: false };
 
 // --- objects ------------------------------------------------------------------
 
@@ -298,49 +284,36 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-/// A buffer object of `rdrmnull`.
-pub enum NullObject {
-    /// A dumb buffer: plain system memory.
-    Plain(SysMem),
-    /// A test object with two backings (see the crate documentation).
-    Movable(Movable),
-}
+/// A dumb buffer: system memory (backing 0 of the core).
+pub struct NullBo;
 
-/// Two backings of the same size and the index of the one in use.
+impl GemObject for NullBo {}
+
+/// A movable object: two backings (0 and 1), the stand-in for an object
+/// that a memory manager moves between system memory and VRAM.
 pub struct Movable {
     dev: DevInfo,
-    mem: [SysMem; 2],
-    /// Changed only with the object's mapping list locked.
     cur: AtomicUsize,
 }
 
 impl Movable {
-    fn backing(&self, i: usize) -> &SysMem {
-        let [a, b] = &self.mem;
-        if i & 1 == 0 { a } else { b }
-    }
-
-    fn current(&self) -> &SysMem {
-        self.backing(self.cur.load(Ordering::Acquire))
-    }
-
-    /// Points a mapping piece at the current backing.
-    fn remap(&self, m: &Mapping) -> Result<(), Errno> {
+    fn remap(gem: &Gem<Self>, m: &Mapping<'_>) -> Result<(), Errno> {
         let acc = sys::ddi_device_acc_attr_t {
             devacc_attr_version: sys::DDI_DEVICE_ATTR_V0,
             devacc_attr_endian_flags: sys::DDI_NEVERSWAP_ACC,
             devacc_attr_dataorder: sys::DDI_STRICTORDER_ACC,
             devacc_attr_access: 0,
         };
+        let cookie = gem.umem(gem.cur.load(Ordering::Acquire) as u32);
         // SAFETY: a live mapping piece of this object (the caller holds the
         // mapping list lock); the cookie belongs to the object, which the
         // mapping keeps alive; the range is the piece's own range within the
         // object; PROT_ALL as at setup; flags must be 0.
         let r = unsafe {
             devmap_umem_remap(
-                m.raw(),
-                self.dev.as_raw(),
-                self.current().umem_cookie().as_raw(),
+                m.cookie(),
+                gem.dev.as_raw(),
+                cookie,
                 m.object_offset() as sys::offset_t,
                 m.len(),
                 0xf,
@@ -352,80 +325,44 @@ impl Movable {
     }
 }
 
-impl From<SysMem> for NullObject {
-    fn from(m: SysMem) -> NullObject {
-        NullObject::Plain(m)
-    }
-}
+impl GemObject for Movable {
+    const MOVABLE: bool = true;
+    const CUSTOM_UMEM: bool = true;
 
-impl GemObject for NullObject {
-    fn movable(&self) -> bool {
-        matches!(self, NullObject::Movable(_))
+    fn umem(gem: &Gem<Self>) -> fsys::ddi_umem_cookie_t {
+        gem.umem(gem.cur.load(Ordering::Acquire) as u32)
     }
-    fn size(&self) -> usize {
-        match self {
-            NullObject::Plain(m) => m.size(),
-            NullObject::Movable(v) => v.mem[0].size(),
-        }
+
+    fn mapped(gem: &Gem<Self>, m: &Mapping<'_>) -> Result<(), Errno> {
+        // The piece was set up (or copied, on fork and split) from the
+        // backing current at the time; follow a move since then.
+        Movable::remap(gem, m)
     }
-    fn memory_bytes(&self) -> usize {
-        match self {
-            NullObject::Plain(m) => m.size(),
-            NullObject::Movable(v) => v.mem[0].size() + v.mem[1].size(),
-        }
-    }
-    fn dma_segments(&self) -> usize {
-        match self {
-            NullObject::Plain(m) => m.sg_len(),
-            NullObject::Movable(v) => v.mem[0].sg_len() + v.mem[1].sg_len(),
-        }
-    }
-    fn umem(&self) -> UmemCookie {
-        match self {
-            NullObject::Plain(m) => m.umem_cookie(),
-            NullObject::Movable(v) => v.current().umem_cookie(),
-        }
-    }
-    fn mapped(&self, m: &Mapping, _ctx: &Sleepable) -> Result<(), Errno> {
-        match self {
-            NullObject::Plain(_) => Ok(()),
-            // The piece was set up (or copied, on fork and split) from the
-            // backing current at the time; follow a move since then.
-            NullObject::Movable(v) => v.remap(m),
-        }
-    }
-    fn access(&self, _m: &Mapping, f: &Fault) -> c_int {
-        match self {
-            NullObject::Plain(_) => f.default_access(),
-            // The refault after a move: load the translation of the piece's
-            // current backing explicitly, as a movable-object layer would
-            // after waiting for the move to finish.
-            NullObject::Movable(_) => f.load(),
-        }
+
+    fn access(_gem: &Gem<Self>, _m: &Mapping<'_>, f: &Fault<'_>) -> c_int {
+        // The refault after a move: load the translation of the piece's
+        // current backing explicitly, as a movable-object layer would after
+        // waiting for the move to finish.
+        f.load()
     }
 }
 
 // --- the test timeline ------------------------------------------------------------
 
-/// A fence of the test timeline and when it is due.
 struct Due {
     fence: Fence,
     at: i64,
 }
 
-/// The state of the soft interrupt that signals the test timeline.
+/// The test timeline: fences due at a time, signalled from a soft
+/// interrupt.
 pub struct Timeline {
-    /// Fences waiting for their time; taken by the soft interrupt handler,
-    /// so the mutex has its priority.
     due: Mutex<KVec<Due>>,
-    /// Fences signalled from the soft interrupt so far.
     signaled: AtomicU64,
 }
 
 impl SoftInterruptHandler for Timeline {
-    /// Signals every fence that is due, one at a time, without allocating;
-    /// callbacks run here, in interrupt context.
-    fn handle(&self, ctx: &Atomic) -> Claimed {
+    fn handle(&self, _ctx: &Atomic) -> Claimed {
         let now = HrTime::now().as_nanos();
         let mut any = false;
         loop {
@@ -435,8 +372,9 @@ impl SoftInterruptHandler for Timeline {
                 i.and_then(|i| l.swap_remove(i))
             };
             let Some(d) = d else { break };
-            d.fence.signal(Ctx::Atomic(ctx));
-            d.fence.put(Ctx::Atomic(ctx));
+            // Interrupt context: the facade signals and drops fences here.
+            d.fence.signal();
+            drop(d.fence);
             self.signaled.fetch_add(1, Ordering::Relaxed);
             any = true;
         }
@@ -444,62 +382,45 @@ impl SoftInterruptHandler for Timeline {
     }
 }
 
-/// The soft interrupt of each device, by instance, for the timer
-/// callbacks: a timer outlives no device (before_detach cancels them), but
-/// the slot also lets a refused detach reconnect the timeline.
+/// The soft interrupt of each instance, for the fence timers.
 static SOFTS: [AtomicPtr<SoftInterrupt<Timeline>>; 64] = [const { AtomicPtr::new(ptr::null_mut()) }; 64];
 
-/// The timer of a test fence: a boxed closure (the module's global
-/// allocator, `KM_SLEEP` in the ioctl) naming its device's instance.
 type FenceTimer = Timeout<Box<dyn FnOnce(&Atomic) + Send>>;
 
-/// The timer callback (a callout): triggers the soft interrupt of device
-/// `index` only, whose handler finds the fences that are due.
 fn fence_timer(index: usize) {
     let Some(s) = SOFTS.get(index) else { return };
     let p = s.load(Ordering::Acquire);
     if !p.is_null() {
         // SAFETY: set in attach from the driver's boxed soft interrupt and
-        // cleared in before_detach after every timer is cancelled.
+        // cleared in before_teardown after every timer is cancelled.
         let _ = unsafe { &*p }.trigger();
     }
 }
 
-/// Logs how many pending test fences a detach signalled with `ECANCELED`.
 fn dev_note_cancelled(index: usize, n: u32) {
     ddi::knote!("rdrmnull{index}: detach cancelled {n} pending test fences (ECANCELED)");
 }
 
 // --- the driver -------------------------------------------------------------------
 
-/// The reference `RDRMNULL_IOCTL_PUT_LATER` hands to its timer.
-static LATER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+/// The reference of `PUT_LATER`, until its timer drops it.
+static LATER: AtomicPtr<fsys::drm_gem_object> = AtomicPtr::new(ptr::null_mut());
 
-/// The timer of `RDRMNULL_IOCTL_PUT_LATER`. A plain function pointer, so
-/// that the type can be named; the reference travels through [`LATER`].
 type LaterTimer = Timeout<fn(&Atomic)>;
 
-/// The timer callback: drops the parked reference in interrupt context.
-fn put_later(a: &Atomic) {
+fn put_later(_a: &Atomic) {
     if let Some(p) = NonNull::new(LATER.swap(ptr::null_mut(), Ordering::AcqRel)) {
-        // SAFETY: stored by the ioctl from GemRef::into_raw, taken once.
-        let r = unsafe { GemRef::<NullObject>::from_raw(p) };
-        r.put_atomic(a);
+        // SAFETY: stored by the ioctl from GemAny::into_raw, taken once; the
+        // facade drops references in interrupt context.
+        drop(unsafe { GemAny::from_raw(p) });
     }
 }
 
-/// The DMA drill (`dma-mode` in `rdrmnull.conf`; see the crate
-/// documentation).
+/// The DMA drill of `rdrmnull.conf`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DmaDrill {
-    /// `"none"`: no DMA.
     Off,
-    /// `"self"`: bind against the driver's own node.
     OwnNode,
-    /// `"root-node"`: bind against `ddi_root_node(9F)` (outside the DDI).
-    /// Only with the `panic-drill` feature.
-    #[cfg(feature = "panic-drill")]
-    RootNode,
 }
 
 impl DmaDrill {
@@ -515,18 +436,14 @@ impl DmaDrill {
         let drill = match mode.to_bytes() {
             b"none" => DmaDrill::Off,
             b"self" => DmaDrill::OwnNode,
-            #[cfg(feature = "panic-drill")]
-            b"root-node" => DmaDrill::RootNode,
-            #[cfg(not(feature = "panic-drill"))]
             b"root-node" => {
                 dev.warn(format_args!(
-                    "dma-mode \"root-node\" panics the system on purpose and needs rdrmnull built with the \
-                     panic-drill feature; this build refuses it"
+                    "dma-mode \"root-node\" is gone: the facade binds GEM memory only against the driver's own node"
                 ));
                 return Err(DdiError);
             }
             other => {
-                dev.warn(format_args!("unknown dma-mode {:?}: none, self or root-node", core::str::from_utf8(other)));
+                dev.warn(format_args!("unknown dma-mode {:?}: none or self", core::str::from_utf8(other)));
                 return Err(DdiError);
             }
         };
@@ -537,20 +454,10 @@ impl DmaDrill {
     }
 }
 
-/// The DMA attributes of the drill: any 64-bit address, page-aligned, and
-/// one cookie per page of the largest object (16 MiB).
 const DRILL_DMA_ATTR: DmaAttr =
-    DmaAttr::bits64().max_cookies((NullDriver::OBJECT_LIMIT as u64 / drm::offsets::PAGE_SIZE) as u32);
+    DmaAttr::bits64().max_cookies((NullDriver::OBJECT_LIMIT as u64 / drm_facade::offsets::PAGE_SIZE) as u32);
 
-/// The DMA attributes of the drill from `rdrmnull.conf`: [`DRILL_DMA_ATTR`],
-/// with the largest transfer lowered to `dma-max-transfer` bytes if that
-/// integer property is set (a positive number). The property only applies
-/// to `dma-mode="self"`, the mode that binds with these attributes against
-/// the driver's own node; in every other mode it is not read.
-fn drill_dma_attr(dev: &DevInfo, drill: DmaDrill, ctx: &Sleepable) -> Result<DmaAttr, DdiError> {
-    if drill != DmaDrill::OwnNode {
-        return Ok(DRILL_DMA_ATTR);
-    }
+fn drill_dma_attr(dev: &DevInfo, ctx: &Sleepable) -> Result<DmaAttr, DdiError> {
     match dev.props().int(c"dma-max-transfer", ctx) {
         Ok(None) => Ok(DRILL_DMA_ATTR),
         Ok(Some(n)) if n > 0 => {
@@ -568,386 +475,276 @@ fn drill_dma_attr(dev: &DevInfo, drill: DmaDrill, ctx: &Sleepable) -> Result<Dma
     }
 }
 
-/// The DRM driver: no hardware, only the test timer, the DMA drill and a
-/// virtual display.
+/// The driver's state of one device.
 pub struct NullDriver {
     kms: kms::NullKms,
     timer: Mutex<Option<LaterTimer>>,
-    /// The reference `RDRMNULL_IOCTL_HOLD` keeps; not dropped by
-    /// `before_detach`, so that the detach is refused while it exists.
-    held: Mutex<Option<GemRef<NullObject>>>,
-    /// The soft interrupt that signals the test timeline, boxed so that
-    /// the timers can point at it.
+    held: Mutex<Option<GemAny>>,
     soft: KBox<SoftInterrupt<Timeline>>,
-    /// The test timeline's fence context and next sequence number.
     context: AtomicU64,
     seqno: AtomicU64,
-    /// The timers of pending test fences.
     fence_timers: Mutex<KVec<FenceTimer>>,
     index: usize,
-    dma: DmaDrill,
-    /// The DMA attributes of the drill, from [`drill_dma_attr`].
-    dma_attr: DmaAttr,
 }
 
 impl NullDriver {
-    /// [`drm::Driver::MAX_OBJECT_SIZE`], named here for [`DRILL_DMA_ATTR`].
+    /// The largest object (16 MiB, a 2048 by 2048 dumb buffer of 32-bit
+    /// pixels).
     const OBJECT_LIMIT: usize = 16 << 20;
 }
 
-impl NullDriver {
-    fn create_movable(
-        &self,
-        dev: &drm::Device<NullDriver>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let mut a = UserArg::<CreateMovable>::read(arg)?;
-        let g = dev.gem().ok_or(Errno::ENXIO)?;
-        if a.get().pad != 0 {
-            return Err(Errno::EINVAL);
-        }
-        let size = usize::try_from(a.get().size).map_err(|_| Errno::EINVAL)?;
-        if size == 0 || size > <NullDriver as drm::Driver>::MAX_OBJECT_SIZE / 2 {
-            return Err(if size == 0 { Errno::EINVAL } else { Errno::ENOMEM });
-        }
-        let reservation = g.reserve(size.next_multiple_of(drm::offsets::PAGE_SIZE as usize) * 2, ctx)?;
-        let m0 = g.sys_mem(size, ctx)?;
-        let m1 = g.sys_mem(size, ctx)?;
-        let obj = NullObject::Movable(Movable { dev: g.dev_info(), mem: [m0, m1], cur: AtomicUsize::new(0) });
-        let r = GemCore::create_reserved(g, obj, reservation, ctx)?;
-        let handle = g.handle_create(file, r, ctx)?;
-        // SAFETY: a field assignment.
-        unsafe { a.get_mut() }.handle = handle;
-        a.write(arg)
-    }
-
-    fn move_object(
-        &self,
-        dev: &drm::Device<NullDriver>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let mut a = UserArg::<Move>::read(arg)?;
-        let g = dev.gem().ok_or(Errno::ENXIO)?;
-        let flags = a.get().flags;
-        if flags & !MOVE_FLAGS != 0 || (flags & MOVE_UNLOAD_ONLY != 0 && flags & MOVE_FILL != 0) {
-            return Err(Errno::EINVAL);
-        }
-        let r = g.lookup(file, a.get().handle)?;
-        let res = r.with_mappings(|obj, maps| {
-            let NullObject::Movable(v) = obj else { return Err(Errno::EINVAL) };
-            let mut next = v.cur.load(Ordering::Acquire) & 1;
-            if flags & MOVE_UNLOAD_ONLY == 0 {
-                next ^= 1;
-                if flags & MOVE_FILL != 0 {
-                    let m = v.backing(next);
-                    // SAFETY: the backing not in use: every mapping piece
-                    // points at the other one (the list is locked), so no
-                    // process can reach this memory.
-                    unsafe { ptr::write_bytes(m.kernel_ptr().as_ptr(), flags as u8, m.size()) };
-                }
-                v.cur.store(next, Ordering::Release);
-            }
-            let mut pieces = 0u32;
-            for m in maps {
-                // A piece that a partial munmap(2) split off may still be
-                // finished by the framework and must not be remapped yet
-                // (Mapping::is_settled); invalidating it is enough, because
-                // its next fault settles it on the current backing.
-                if flags & MOVE_UNLOAD_ONLY == 0 && m.is_settled() {
-                    v.remap(&m)?;
-                }
-                m.unload(ctx).map_err(|_| Errno::EIO)?;
-                pieces += 1;
-            }
-            Ok((pieces, next as u32))
-        });
-        r.put(ctx);
-        let (pieces, backing) = res?;
-        // SAFETY: only field assignments below.
-        let m = unsafe { a.get_mut() };
-        m.pieces = pieces;
-        m.backing = backing;
-        a.write(arg)
-    }
-
-    fn put_later(
-        &self,
-        dev: &drm::Device<NullDriver>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let a = UserArg::<PutLater>::read(arg)?;
-        let g = dev.gem().ok_or(Errno::ENXIO)?;
-        let ms = a.get().delay_ms;
-        if !(1..=10_000).contains(&ms) {
-            return Err(Errno::EINVAL);
-        }
-        let mut timer = self.timer.lock();
-        if !LATER.load(Ordering::Acquire).is_null() {
-            return Err(Errno::EBUSY);
-        }
-        let r = g.lookup(file, a.get().handle)?;
-        LATER.store(r.into_raw().as_ptr(), Ordering::Release);
-        let old = timer.replace(Timeout::new(Ticks::from_micros(u64::from(ms) * 1000), put_later as fn(&Atomic), ctx));
-        drop(timer);
-        // The previous timer has fired (LATER was empty); dropping it only
-        // frees it.
-        drop(old);
-        Ok(())
-    }
-
-    fn hold(
-        &self,
-        dev: &drm::Device<NullDriver>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let a = UserArg::<Hold>::read(arg)?;
-        let g = dev.gem().ok_or(Errno::ENXIO)?;
-        match a.get().hold {
-            1 => {
-                let mut held = self.held.lock();
-                if held.is_some() {
-                    return Err(Errno::EBUSY);
-                }
-                *held = Some(g.lookup(file, a.get().handle)?);
-                Ok(())
-            }
-            0 => {
-                let r = self.held.lock().take().ok_or(Errno::ENOENT)?;
-                r.put(ctx);
-                Ok(())
-            }
-            _ => Err(Errno::EINVAL),
-        }
-    }
+fn ctx() -> Sleepable {
+    // SAFETY: the facade calls the driver's ioctl handlers and hooks in
+    // thread context.
+    unsafe { Sleepable::assume() }
 }
 
-impl NullDriver {
-    fn fence(
-        &self,
-        dev: &drm::Device<NullDriver>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let mut a = UserArg::<NullFence>::read(arg)?;
-        let v = *a.get();
-        if v.flags & !FENCE_FLAGS != 0
-            || v.delay_ms > 10_000
-            || v.error < 0
-            || (v.flags & FENCE_BO_WRITE != 0 && v.flags & FENCE_BO_READ != 0)
+fn create_movable(dev: &Dev<NullDriver>, a: &mut IoctlData<'_>, file: &File) -> Result<(), Errno> {
+    let mut v: CreateMovable = a.read()?;
+    if v.pad != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let size = usize::try_from(v.size).map_err(|_| Errno::EINVAL)?;
+    if size == 0 || size > NullDriver::OBJECT_LIMIT / 2 {
+        return Err(if size == 0 { Errno::EINVAL } else { Errno::ENOMEM });
+    }
+    let size = size.next_multiple_of(drm_facade::offsets::PAGE_SIZE as usize);
+    let m = Movable { dev: dev.dev_info(), cur: AtomicUsize::new(0) };
+    let r = GemRef::new(dev, size, m, true)?;
+    r.add_backing()?;
+    v.handle = r.handle_create(file)?;
+    a.write(&v)
+}
+
+fn move_object(_dev: &Dev<NullDriver>, a: &mut IoctlData<'_>, file: &File) -> Result<(), Errno> {
+    let mut v: Move = a.read()?;
+    let flags = v.flags;
+    if flags & !MOVE_FLAGS != 0 || (flags & MOVE_UNLOAD_ONLY != 0 && flags & MOVE_FILL != 0) {
+        return Err(Errno::EINVAL);
+    }
+    // EINVAL for an object that is not movable.
+    let r =
+        GemRef::<Movable>::lookup(file, v.handle).map_err(|e| if e == Errno::ENOENT { e } else { Errno::EINVAL })?;
+    let mut next = r.cur.load(Ordering::Acquire) & 1;
+    if flags & MOVE_UNLOAD_ONLY == 0 {
+        next ^= 1;
+        if flags & MOVE_FILL != 0 {
+            let p = r.vaddr(next as u32);
+            // SAFETY: the backing not in use: every mapping piece points
+            // at the other one, and none is pointed at this one before the
+            // switch below.
+            unsafe { ptr::write_bytes(p, flags as u8, r.size()) };
+        }
+        // From here new pieces are set up on the new backing (umem), and
+        // the existing ones are moved below.
+        r.cur.store(next, Ordering::Release);
+    }
+    let mut res = Ok(0u32);
+    r.with_mappings(|m| {
+        let Ok(pieces) = res else { return };
+        // A piece that a partial munmap(2) split off may still be finished
+        // by the framework and must not be remapped yet; invalidating it is
+        // enough, because its next fault settles it on the current backing.
+        if flags & MOVE_UNLOAD_ONLY == 0
+            && m.is_settled()
+            && let Err(e) = Movable::remap(&r, m)
         {
-            return Err(Errno::EINVAL);
+            res = Err(e);
+            return;
         }
-        let err = if v.error != 0 { Some(Errno::new(v.error).ok_or(Errno::EINVAL)?) } else { None };
-        let sync = dev.sync();
-        let domain = sync.domain();
-        if self.context.load(Ordering::Acquire) == 0 {
-            let _ = self.context.compare_exchange(0, domain.alloc_contexts(1), Ordering::AcqRel, Ordering::Acquire);
-        }
-        // Everything that can fail on the caller's input is checked before
-        // the fence exists.
-        let so = if v.flags & FENCE_SYNCOBJ != 0 { Some(sync.syncobj(file, v.syncobj)?) } else { None };
-        let bo = if v.flags & (FENCE_BO_WRITE | FENCE_BO_READ) != 0 {
-            Some(dev.gem().ok_or(Errno::ENXIO)?.lookup(file, v.bo)?)
-        } else {
-            None
+        res = match m.unload() {
+            Ok(()) => Ok(pieces + 1),
+            Err(_) => Err(Errno::EIO),
         };
-        let seqno = self.seqno.fetch_add(1, Ordering::AcqRel) + 1;
-        let f = Fence::new(domain, self.context.load(Ordering::Acquire), seqno, ctx)?;
-        if let Some(e) = err {
-            f.set_error(e);
-        }
-        let r = self.fence_attach(dev, &f, so, bo, &v, &mut a, arg, ctx);
-        // Arm the fence whatever happened, so that it signals.
-        let at = HrTime::now().as_nanos().saturating_add(i64::from(v.delay_ms) * 1_000_000);
-        let pushed = self.soft.state().due.lock().push(Due { fence: f.clone(), at }, ctx);
-        if pushed.is_err() {
-            f.signal(Ctx::Sleep(ctx));
-        }
-        f.put(Ctx::Sleep(ctx));
-        // timeout(9F) counts from the current tick, so it can fire up to one
-        // tick before `delay_ms` has passed on the monotonic clock; one tick
-        // more makes sure the fence is due when the soft interrupt runs.
-        let tick_us = Ticks::from_micros(1).as_micros();
-        let after = Ticks::from_micros(u64::from(v.delay_ms) * 1000 + tick_us);
-        let index = self.index;
-        let f: Box<dyn FnOnce(&Atomic) + Send> = Box::new(move |_: &Atomic| fence_timer(index));
-        let t = Timeout::new(after, f, ctx);
-        let old = {
-            let mut ts = self.fence_timers.lock();
-            // Timers that have fired are only freed here.
-            let mut done = KVec::new();
-            while let Some(i) = ts.iter().position(Timeout::has_fired) {
-                if let Some(t) = ts.swap_remove(i) {
-                    let _ = done.push(t, ctx);
-                }
-            }
-            ts.push(t, ctx)?;
-            done
-        };
-        drop(old);
-        r?;
-        // SAFETY: a field assignment.
-        unsafe { a.get_mut() }.seqno = seqno;
-        a.write(arg)
-    }
+    });
+    v.pieces = res?;
+    v.backing = next as u32;
+    a.write(&v)
+}
 
-    #[allow(clippy::too_many_arguments, reason = "one step of the fence ioctl")]
-    fn fence_attach(
-        &self,
-        dev: &drm::Device<NullDriver>,
-        f: &Fence,
-        so: Option<drm::syncobj::Syncobj>,
-        bo: Option<GemRef<NullObject>>,
-        v: &NullFence,
-        a: &mut UserArg<NullFence>,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let mut r = Ok(());
-        if let Some(s) = so {
-            r = s.add_point(f.clone(), v.point, ctx);
-        }
-        if let Some(b) = bo {
-            if r.is_ok() {
-                let usage = if v.flags & FENCE_BO_WRITE != 0 { Usage::Write } else { Usage::Read };
-                let g = b.resv().lock().lock_plain(ctx);
-                r = b.resv().add_fence(&g, f.clone(), usage, ctx);
-            }
-            b.put(ctx);
-        }
-        if r.is_ok() && v.flags & FENCE_SYNC_FILE != 0 {
-            r = dev.sync().export_sync_file(
-                f.clone(),
-                b"rdrmnull",
-                arg,
-                |fd| {
-                    // SAFETY: a field assignment.
-                    unsafe { a.get_mut() }.fd = fd;
-                    a.write(arg)
-                },
-                ctx,
-            );
-        }
-        r
+fn put_later_ioctl(dev: &Dev<NullDriver>, a: &mut IoctlData<'_>, file: &File) -> Result<(), Errno> {
+    let v: PutLater = a.read()?;
+    let ms = v.delay_ms;
+    if !(1..=10_000).contains(&ms) {
+        return Err(Errno::EINVAL);
     }
+    let ctx = ctx();
+    let mut timer = dev.driver().timer.lock();
+    if !LATER.load(Ordering::Acquire).is_null() {
+        return Err(Errno::EBUSY);
+    }
+    let r = GemAny::lookup(file, v.handle)?;
+    LATER.store(r.into_raw().as_ptr(), Ordering::Release);
+    let old = timer.replace(Timeout::new(Ticks::from_micros(u64::from(ms) * 1000), put_later as fn(&Atomic), &ctx));
+    drop(timer);
+    // The previous timer has fired (LATER was empty); dropping it only
+    // frees it.
+    drop(old);
+    Ok(())
+}
 
-    fn bo_wait(
-        &self,
-        dev: &drm::Device<NullDriver>,
-        file: CloneId,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        let a = UserArg::<BoWait>::read(arg)?;
-        let v = *a.get();
-        if v.flags & !BO_WAIT_WRITERS != 0 {
-            return Err(Errno::EINVAL);
+fn hold(dev: &Dev<NullDriver>, a: &mut IoctlData<'_>, file: &File) -> Result<(), Errno> {
+    let v: Hold = a.read()?;
+    match v.hold {
+        1 => {
+            let mut held = dev.driver().held.lock();
+            if held.is_some() {
+                return Err(Errno::EBUSY);
+            }
+            *held = Some(GemAny::lookup(file, v.handle)?);
+            Ok(())
         }
-        let b = dev.gem().ok_or(Errno::ENXIO)?.lookup(file, v.handle)?;
-        let usage = if v.flags & BO_WAIT_WRITERS != 0 { Usage::Write } else { Usage::Read };
-        let deadline = (v.timeout_ns >= 0).then(|| HrTime::now().as_nanos().saturating_add(v.timeout_ns));
-        let r = b.resv().wait(usage, true, deadline, ctx);
-        b.put(ctx);
-        r
+        0 => {
+            let r = dev.driver().held.lock().take().ok_or(Errno::ENOENT)?;
+            drop(r);
+            Ok(())
+        }
+        _ => Err(Errno::EINVAL),
     }
 }
 
-impl drm::Driver for NullDriver {
+fn scanout(dev: &Dev<NullDriver>, a: &mut IoctlData<'_>, _file: &File) -> Result<(), Errno> {
+    a.write(&dev.driver().kms.scanout())
+}
+
+fn fence(dev: &Dev<NullDriver>, a: &mut IoctlData<'_>, file: &File) -> Result<(), Errno> {
+    let mut v: NullFence = a.read()?;
+    if v.flags & !FENCE_FLAGS != 0
+        || v.delay_ms > 10_000
+        || v.error < 0
+        || (v.flags & FENCE_BO_WRITE != 0 && v.flags & FENCE_BO_READ != 0)
+    {
+        return Err(Errno::EINVAL);
+    }
+    let err = if v.error != 0 { Some(Errno::new(v.error).ok_or(Errno::EINVAL)?) } else { None };
+    let d = dev.driver();
+    let ctx = ctx();
+    if d.context.load(Ordering::Acquire) == 0 {
+        let _ = d.context.compare_exchange(0, Fence::alloc_contexts(dev, 1), Ordering::AcqRel, Ordering::Acquire);
+    }
+    // Everything that can fail on the caller's input is checked before the
+    // fence exists.
+    let so = if v.flags & FENCE_SYNCOBJ != 0 { Some(Syncobj::find(file, v.syncobj)?) } else { None };
+    let bo = if v.flags & (FENCE_BO_WRITE | FENCE_BO_READ) != 0 { Some(GemAny::lookup(file, v.bo)?) } else { None };
+    let seqno = d.seqno.fetch_add(1, Ordering::AcqRel) + 1;
+    let f = Fence::new(dev, d.context.load(Ordering::Acquire), seqno)?;
+    if let Some(e) = err {
+        f.set_error(e);
+    }
+    let r = fence_attach(&f, so, bo, &mut v);
+    // Arm the fence whatever happened, so that it signals.
+    let at = HrTime::now().as_nanos().saturating_add(i64::from(v.delay_ms) * 1_000_000);
+    let pushed = d.soft.state().due.lock().push(Due { fence: f.clone(), at }, &ctx);
+    if pushed.is_err() {
+        f.signal();
+    }
+    drop(f);
+    // timeout(9F) counts from the current tick, so it can fire up to one
+    // tick before `delay_ms` has passed on the monotonic clock; one tick
+    // more makes sure the fence is due when the soft interrupt runs.
+    let tick_us = Ticks::from_micros(1).as_micros();
+    let after = Ticks::from_micros(u64::from(v.delay_ms) * 1000 + tick_us);
+    let index = d.index;
+    let cb: Box<dyn FnOnce(&Atomic) + Send> = Box::new(move |_: &Atomic| fence_timer(index));
+    let t = Timeout::new(after, cb, &ctx);
+    let old = {
+        let mut ts = d.fence_timers.lock();
+        // Timers that have fired are only freed here.
+        let mut done = KVec::new();
+        while let Some(i) = ts.iter().position(Timeout::has_fired) {
+            if let Some(t) = ts.swap_remove(i) {
+                let _ = done.push(t, &ctx);
+            }
+        }
+        ts.push(t, &ctx)?;
+        done
+    };
+    drop(old);
+    r?;
+    v.seqno = seqno;
+    a.write(&v)
+}
+
+/// One step of the fence ioctl: the sync object, the reservation, the sync
+/// file.
+fn fence_attach(f: &Fence, so: Option<Syncobj>, bo: Option<GemAny>, v: &mut NullFence) -> Result<(), Errno> {
+    let mut r = Ok(());
+    if let Some(s) = so {
+        s.add_point(f, v.point);
+    }
+    if let Some(b) = bo {
+        let usage = if v.flags & FENCE_BO_WRITE != 0 { Usage::Write } else { Usage::Read };
+        r = b.add_fence(f, usage);
+    }
+    if r.is_ok() && v.flags & FENCE_SYNC_FILE != 0 {
+        match sync_file_export(f, true) {
+            Ok(fd) => v.fd = fd,
+            Err(e) => r = Err(e),
+        }
+    }
+    r
+}
+
+fn bo_wait(_dev: &Dev<NullDriver>, a: &mut IoctlData<'_>, file: &File) -> Result<(), Errno> {
+    let v: BoWait = a.read()?;
+    if v.flags & !BO_WAIT_WRITERS != 0 {
+        return Err(Errno::EINVAL);
+    }
+    let b = GemAny::lookup(file, v.handle)?;
+    let usage = if v.flags & BO_WAIT_WRITERS != 0 { Usage::Write } else { Usage::Read };
+    b.wait(usage, true, v.timeout_ns)
+}
+
+const TEST_ONLY: u32 = 0;
+const TEST_ONLY_RENDER: u32 = fsys::DRM_RENDER_ALLOW;
+
+impl drm_facade::Driver for NullDriver {
     const NAME: &'static CStr = c"rdrmnull";
     const DATE: &'static CStr = c"20260928";
     const DESC: &'static CStr = c"Rust DRM null driver (illumos-drm R2)";
     const MAJOR: i32 = 1;
     const MINOR: i32 = 0;
     const PATCHLEVEL: i32 = 0;
-    const FEATURES: Features = Features::MODESET
-        .union(Features::ATOMIC)
-        .union(Features::RENDER)
-        .union(Features::GEM)
-        .union(Features::DUMB)
-        .union(Features::SYNCOBJ)
-        .union(Features::SYNCOBJ_TIMELINE);
-    const MODE_CONFIG: ModeConfig =
-        ModeConfig { preferred_depth: 24, prefer_shadow: true, fb_modifiers: true, ..ModeConfig::DEFAULT };
+    const FEATURES: u32 = fsys::DRIVER_MODESET
+        | fsys::DRIVER_ATOMIC
+        | fsys::DRIVER_RENDER
+        | fsys::DRIVER_GEM
+        | fsys::DRIVER_SYNCOBJ
+        | fsys::DRIVER_SYNCOBJ_TIMELINE;
+    const DUMB: bool = true;
+    const KMS: bool = true;
     // Small limits, so that the tests reach them without exhausting the
-    // test machine: 16 MiB per object (a 2048 by 2048 dumb buffer of 32-bit
-    // pixels), 64 MiB for the device.
-    const MAX_OBJECT_SIZE: usize = NullDriver::OBJECT_LIMIT;
-    const MAX_MEMORY: usize = 64 << 20;
-    const IOCTLS: &'static [DriverIoctl] = &[
-        DriverIoctl { cmd: RDRMNULL_IOCTL_CREATE_MOVABLE, perm: TEST_ONLY },
-        DriverIoctl { cmd: RDRMNULL_IOCTL_MOVE, perm: TEST_ONLY },
-        DriverIoctl { cmd: RDRMNULL_IOCTL_PUT_LATER, perm: TEST_ONLY },
-        DriverIoctl { cmd: RDRMNULL_IOCTL_SCANOUT, perm: TEST_ONLY },
-        DriverIoctl { cmd: RDRMNULL_IOCTL_HOLD, perm: TEST_ONLY },
-        DriverIoctl { cmd: RDRMNULL_IOCTL_FENCE, perm: TEST_ONLY_RENDER },
-        DriverIoctl { cmd: RDRMNULL_IOCTL_BO_WAIT, perm: TEST_ONLY_RENDER },
+    // test machine: 16 MiB per object, 64 MiB for the device.
+    const MAX_OBJECT_SIZE: u64 = NullDriver::OBJECT_LIMIT as u64;
+    const MAX_MEMORY: u64 = 64 << 20;
+    const IOCTLS: &'static [Ioctl<Self>] = &[
+        Ioctl { cmd: RDRMNULL_IOCTL_CREATE_MOVABLE, flags: TEST_ONLY, func: create_movable },
+        Ioctl { cmd: RDRMNULL_IOCTL_MOVE, flags: TEST_ONLY, func: move_object },
+        Ioctl { cmd: RDRMNULL_IOCTL_PUT_LATER, flags: TEST_ONLY, func: put_later_ioctl },
+        Ioctl { cmd: RDRMNULL_IOCTL_SCANOUT, flags: TEST_ONLY, func: scanout },
+        Ioctl { cmd: RDRMNULL_IOCTL_HOLD, flags: TEST_ONLY, func: hold },
+        Ioctl { cmd: RDRMNULL_IOCTL_FENCE, flags: TEST_ONLY_RENDER, func: fence },
+        Ioctl { cmd: RDRMNULL_IOCTL_BO_WAIT, flags: TEST_ONLY_RENDER, func: bo_wait },
     ];
-    type Object = NullObject;
 
-    fn ioctl(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        cmd: u32,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        match cmd {
-            RDRMNULL_IOCTL_CREATE_MOVABLE => self.create_movable(dev, file, arg, ctx),
-            RDRMNULL_IOCTL_MOVE => self.move_object(dev, file, arg, ctx),
-            RDRMNULL_IOCTL_PUT_LATER => self.put_later(dev, file, arg, ctx),
-            RDRMNULL_IOCTL_HOLD => self.hold(dev, file, arg, ctx),
-            RDRMNULL_IOCTL_SCANOUT => {
-                let mut a = UserArg::<kms::ScanoutInfo>::zeroed();
-                let info = self.kms.scanout();
-                // SAFETY: a whole-value assignment of a padding-free
-                // structure of integers: every byte is written.
-                *unsafe { a.get_mut() } = info;
-                a.write(arg)
-            }
-            RDRMNULL_IOCTL_FENCE => self.fence(dev, file, arg, ctx),
-            RDRMNULL_IOCTL_BO_WAIT => self.bo_wait(dev, file, arg, ctx),
-            _ => Err(Errno::ENOTTY),
-        }
+    fn dumb_create(&self, dev: &Dev<Self>, file: &File, req: &DumbRequest) -> Result<DumbCreated, Errno> {
+        let layout = dumb::standard_layout(req)?;
+        let size = usize::try_from(layout.size).map_err(|_| Errno::EINVAL)?;
+        let r = GemRef::new(dev, size, NullBo, true)?;
+        let handle = r.handle_create(file)?;
+        Ok(DumbCreated { handle, pitch: layout.pitch, size: r.size() as u64 })
     }
 
-    fn gem_dma(&self, _dev: &DevInfo) -> Option<GemDma> {
-        match self.dma {
-            DmaDrill::Off => None,
-            DmaDrill::OwnNode => Some(GemDma::new(self.dma_attr)),
-            // SAFETY: none; this is the drill. ddi_root_node(9F) returns the
-            // root node, which lives as long as the system; the DDI requires
-            // the driver's own node, and the DMA framework's reaction to
-            // another one is what the drill records.
-            #[cfg(feature = "panic-drill")]
-            DmaDrill::RootNode => {
-                Some(unsafe { GemDma::against(DRILL_DMA_ATTR, DevInfo::from_raw(sys::ddi_root_node())) })
-            }
-        }
-    }
-
-    fn kms(&self) -> Option<&dyn drm::kms::KmsDriver<GemRef<NullObject>>> {
+    fn kms(&self) -> Option<&dyn drm_facade::kms::KmsDriver> {
         Some(&self.kms)
     }
 
-    fn fence_priority(&self) -> Option<IntrPriority> {
-        Some(self.soft.priority())
-    }
-
-    fn before_detach(&self, ctx: &Sleepable) {
+    fn before_detach(&self, _dev: &Dev<Self>) {
         // Only references and work the driver holds for itself go here; the
         // display and the test timeline keep running, because the detach
         // may still be refused. The reference of RDRMNULL_IOCTL_HOLD stays,
         // so that it is.
+        //
         // Cancel the fence timers and signal the fences that are left: every
         // fence must signal, and pending ones would keep the fence domain
         // busy.
@@ -957,8 +754,8 @@ impl drm::Driver for NullDriver {
         loop {
             let d = self.soft.state().due.lock().swap_remove(0);
             let Some(d) = d else { break };
-            d.fence.signal_with_error(Errno::ECANCELED, Ctx::Sleep(ctx));
-            d.fence.put(Ctx::Sleep(ctx));
+            d.fence.signal_with_error(Errno::ECANCELED);
+            drop(d.fence);
             cancelled += 1;
         }
         if cancelled != 0 {
@@ -969,12 +766,12 @@ impl drm::Driver for NullDriver {
         let t = self.timer.lock().take();
         drop(t);
         if let Some(p) = NonNull::new(LATER.swap(ptr::null_mut(), Ordering::AcqRel)) {
-            // SAFETY: stored from GemRef::into_raw, taken once.
-            unsafe { GemRef::<NullObject>::from_raw(p) }.put(ctx);
+            // SAFETY: stored from GemAny::into_raw, taken once.
+            drop(unsafe { GemAny::from_raw(p) });
         }
     }
 
-    fn before_teardown(&self, _ctx: &Sleepable) {
+    fn before_teardown(&self, _dev: &Dev<Self>) {
         self.kms.shutdown();
         // The detach completes: no timer may reach the soft interrupt any
         // more, which goes with the driver.
@@ -985,12 +782,12 @@ impl drm::Driver for NullDriver {
 }
 
 impl Driver for RDrmNull {
-    type Instance = drm::Device<NullDriver>;
-    const LINKINFO: &'static CStr = c"Rust DRM null driver r2";
+    type Instance = Device<NullDriver>;
+    const LINKINFO: &'static CStr = c"Rust DRM null driver r5a";
 
     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
         let dma = DmaDrill::from_conf(&node, ctx)?;
-        let dma_attr = drill_dma_attr(&node, dma, ctx)?;
+        let dma_attr = if dma == DmaDrill::OwnNode { Some(drill_dma_attr(&node, ctx)?) } else { None };
         let kms = kms::NullKms::new(ctx).map_err(|_| DdiError)?;
         let index = usize::try_from(node.instance().0).map_err(|_| DdiError)?;
         let slot = SOFTS.get(index).ok_or(DdiError)?;
@@ -1006,6 +803,7 @@ impl Driver for RDrmNull {
         })?;
         let soft = KBox::new(soft, ctx);
         let p = &*soft as *const SoftInterrupt<Timeline> as *mut SoftInterrupt<Timeline>;
+        let pri = soft.priority();
         let driver = NullDriver {
             kms,
             timer: Mutex::new(None),
@@ -1015,28 +813,36 @@ impl Driver for RDrmNull {
             seqno: AtomicU64::new(0),
             fence_timers: Mutex::new(KVec::new()),
             index,
-            dma,
-            dma_attr,
         };
         slot.store(p, Ordering::Release);
-        let dev = match drm::Device::attach(node, driver, ctx) {
+        let settings = Settings {
+            dma: dma_attr,
+            fence_priority: Some(pri),
+            mode_config: Some(fsys::drm_illumos_mode_config {
+                cursor_width: 0,
+                cursor_height: 0,
+                preferred_depth: 24,
+                prefer_shadow: true,
+                fb_modifiers: true,
+            }),
+            unique: None,
+        };
+        let dev = match Device::register(&node, driver, &settings, ctx) {
             Ok(dev) => dev,
             Err(e) => {
                 slot.store(ptr::null_mut(), Ordering::Release);
                 return Err(e);
             }
         };
-        if let Some(k) = dev.kms() {
-            dev.driver().kms.set_vblank(k.vblank_handle());
-        }
+        dev.driver().kms.set_vblank(dev.handle());
         Ok(dev)
     }
 
     fn detach(inst: Self::Instance, _dev: DevInfo, ctx: &Sleepable) -> Result<(), (Self::Instance, DdiError)> {
-        inst.detach(ctx)
+        inst.unregister(ctx)
     }
 
     fn instance_of_minor(minor: Minor) -> Option<Instance> {
-        drm::minor::instance_of_minor(minor)
+        drm_facade::instance_of_minor(minor)
     }
 }

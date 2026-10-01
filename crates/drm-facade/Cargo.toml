@@ -1,0 +1,19 @@
+[package]
+name = "drm-facade"
+description = "The safe Rust interface of the DRM facade: what a Rust DRM driver uses to register with misc/drm and to use its GEM objects, fences, sync objects and mode setting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ddi.workspace = true
+drm-facade-sys.workspace = true
+drm-uapi.workspace = true
+# Only the value helpers of the core (display modes and formats, EDID,
+# dumb-buffer layouts, KArc/KVec, the software vblank): no core state.
+drm-core = { workspace = true, default-features = false }
+
+[package.metadata.kmod]
+depends = []
