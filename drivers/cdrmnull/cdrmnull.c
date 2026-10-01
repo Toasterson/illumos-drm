@@ -1375,10 +1375,10 @@ fail:
 }
 
 /*
- * The unregistration test: while detach unregisters the device, periodic
- * handlers on other threads, one at thread level and one at soft
- * interrupt level, keep calling a facade function that uses the
- * registered device (drm_illumos_fence_context_alloc(), any context).
+ * The unregistration test: while detach unregisters the device, a task
+ * queue thread and a periodic soft interrupt handler keep calling a
+ * facade function that uses the registered device
+ * (drm_illumos_fence_context_alloc(), any context).
  * They must neither fail nor touch a freed device: misc/drm_core takes
  * the device out of its tables and waits for every such call before it
  * frees it.
@@ -1393,27 +1393,31 @@ cdrmnull_race_batch(struct cdrmnull *cn)
 	atomic_add_64(&cn->race_calls, 256);
 }
 
-/* Thread level: a batch per period. */
+/*
+ * Thread level, on a task queue thread: until the detach is through, so
+ * that the calls overlap the unregistration (bounded to a few million).
+ */
 static void
 cdrmnull_unregister_race(void *arg)
 {
 	struct cdrmnull *cn = arg;
-	int i;
 
-	for (i = 0; i < 16 && !cn->race_stop; i++)
+	while (!cn->race_stop && cn->race_calls < 8ULL * 1024 * 1024)
 		cdrmnull_race_batch(cn);
 }
 
 /*
- * Soft interrupt level: until the detach is through, so that the calls
- * overlap the unregistration (bounded to a few million calls).
+ * Soft interrupt level: a few batches per period (a soft interrupt that
+ * looped would keep its processor's threads, the detach included, off
+ * the processor).
  */
 static void
 cdrmnull_unregister_race_intr(void *arg)
 {
 	struct cdrmnull *cn = arg;
+	int i;
 
-	while (!cn->race_stop && cn->race_calls < 4ULL * 1024 * 1024)
+	for (i = 0; i < 4 && !cn->race_stop; i++)
 		cdrmnull_race_batch(cn);
 }
 
@@ -1422,7 +1426,8 @@ cdrmnull_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 {
 	struct cdrmnull **slot;
 	struct cdrmnull *cn;
-	ddi_periodic_t p0, p1;
+	ddi_taskq_t *tq;
+	ddi_periodic_t p1;
 	uint64_t before, during;
 	int instance, r, i;
 
@@ -1438,9 +1443,13 @@ cdrmnull_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	 */
 	cn->race_calls = 0;
 	cn->race_stop = B_FALSE;
-	p0 = ddi_periodic_add(cdrmnull_unregister_race, cn, 10000000,
-	    DDI_IPL_0);
-	p1 = ddi_periodic_add(cdrmnull_unregister_race_intr, cn, 10000000,
+	tq = ddi_taskq_create(dip, "cdrmnull_race", 1, TASKQ_DEFAULTPRI, 0);
+	if (tq != NULL && ddi_taskq_dispatch(tq, cdrmnull_unregister_race, cn,
+	    DDI_SLEEP) != DDI_SUCCESS) {
+		ddi_taskq_destroy(tq);
+		tq = NULL;
+	}
+	p1 = ddi_periodic_add(cdrmnull_unregister_race_intr, cn, 1000000,
 	    DDI_IPL_1);
 	/* Until both run (or a second passes), then unregister. */
 	for (i = 0; i < 100 && cn->race_calls < 4096; i++)
@@ -1449,7 +1458,9 @@ cdrmnull_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	r = drm_dev_unregister(&cn->drm);
 	during = cn->race_calls - before;
 	cn->race_stop = B_TRUE;
-	ddi_periodic_delete(p0);
+	/* Waits for the task to return. */
+	if (tq != NULL)
+		ddi_taskq_destroy(tq);
 	ddi_periodic_delete(p1);
 	dev_err(dip, CE_NOTE, "!unregister (%d) raced %llu facade calls "
 	    "(%llu while it ran)", r, (unsigned long long)cn->race_calls,

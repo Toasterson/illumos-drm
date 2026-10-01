@@ -1088,7 +1088,9 @@ that context from thread context; `dma_fence_init()`,
 any context. `dma_buf_fd()` takes over the caller's reference, as on
 Linux. PRIME import between devices of
 different drivers is supported and returns the exporter's object (one
-handle per object per file), which R2 refused with `ENOTSUP`.
+handle per object per file), which R2 refused with `ENOTSUP`; a C
+driver's import of another device's buffer exports that buffer again,
+as on Linux.
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
