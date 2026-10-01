@@ -12,8 +12,10 @@
 # symbol-scope mapfile as kernel/misc/amd64/drm, and this repository's
 # LICENSE:
 #
+#   modules/drm/ctf/build-ctf.sh    # drm_facade_ctf.o: the facade's CTF
 #   ld -ztype=kmod -N fs/specfs -B reduce -M modules/drm/drm.mapfile \
-#       -z allextract drm.a -o <proto>/kernel/misc/amd64/drm
+#       -z allextract drm.a -z defaultextract drm_facade_ctf.o \
+#       -o <proto>/kernel/misc/amd64/drm
 #   pkgsend publish -s <repo> -d <proto> -d . packaging/drm.p5m
 #
 # OpenIndiana's driver/graphics/drm (gfx-drm) delivers a different module

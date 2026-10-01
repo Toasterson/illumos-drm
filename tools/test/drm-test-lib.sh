@@ -34,7 +34,12 @@ drm_core_install() {
 	step digest -a sha256 drm.a
 	# The module is linked as misc-drm (drm/ holds the uAPI headers) and
 	# installed as drm.
-	step ld -ztype=kmod -N fs/specfs -B reduce -M drm.mapfile -z allextract drm.a -o misc-drm || return 1
+	# drm_facade_ctf.o (modules/drm/ctf/build-ctf.sh, built where the
+	# gate's ctfconvert is) gives the module the facade's CTF.
+	ctf=
+	[ -f drm_facade_ctf.o ] && ctf="-z defaultextract drm_facade_ctf.o"
+	# shellcheck disable=SC2086 # $ctf is empty or two words
+	step ld -ztype=kmod -N fs/specfs -B reduce -M drm.mapfile -z allextract drm.a $ctf -o misc-drm || return 1
 	step digest -a sha256 misc-drm
 	echo
 	echo "\$ nm misc-drm: the global symbols it defines, against drm.mapfile"
