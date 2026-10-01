@@ -206,6 +206,7 @@ struct cdrmnull {
 	kmutex_t timers_lock;
 	/* The calls of the unregistration test (cdrmnull_unregister_race). */
 	volatile uint64_t race_calls;
+	volatile boolean_t race_stop;
 	list_t tl_timers;
 };
 
@@ -1383,14 +1384,37 @@ fail:
  * frees it.
  */
 static void
+cdrmnull_race_batch(struct cdrmnull *cn)
+{
+	int i;
+
+	for (i = 0; i < 256; i++)
+		(void) drm_illumos_fence_context_alloc(&cn->drm, 1);
+	atomic_add_64(&cn->race_calls, 256);
+}
+
+/* Thread level: a batch per period. */
+static void
 cdrmnull_unregister_race(void *arg)
 {
 	struct cdrmnull *cn = arg;
 	int i;
 
-	for (i = 0; i < 4096; i++)
-		(void) drm_illumos_fence_context_alloc(&cn->drm, 1);
-	atomic_add_64(&cn->race_calls, 4096);
+	for (i = 0; i < 16 && !cn->race_stop; i++)
+		cdrmnull_race_batch(cn);
+}
+
+/*
+ * Soft interrupt level: until the detach is through, so that the calls
+ * overlap the unregistration (bounded to a few million calls).
+ */
+static void
+cdrmnull_unregister_race_intr(void *arg)
+{
+	struct cdrmnull *cn = arg;
+
+	while (!cn->race_stop && cn->race_calls < 4ULL * 1024 * 1024)
+		cdrmnull_race_batch(cn);
 }
 
 static int
@@ -1399,7 +1423,8 @@ cdrmnull_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	struct cdrmnull **slot;
 	struct cdrmnull *cn;
 	ddi_periodic_t p0, p1;
-	int instance, r;
+	uint64_t before, during;
+	int instance, r, i;
 
 	if (cmd != DDI_DETACH)
 		return (DDI_FAILURE);
@@ -1412,18 +1437,23 @@ cdrmnull_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	 * objects remain; the device is then still registered and working.
 	 */
 	cn->race_calls = 0;
-	p0 = ddi_periodic_add(cdrmnull_unregister_race, cn, 1000000,
+	cn->race_stop = B_FALSE;
+	p0 = ddi_periodic_add(cdrmnull_unregister_race, cn, 10000000,
 	    DDI_IPL_0);
-	p1 = ddi_periodic_add(cdrmnull_unregister_race, cn, 1000000,
+	p1 = ddi_periodic_add(cdrmnull_unregister_race_intr, cn, 10000000,
 	    DDI_IPL_1);
-	/* Let both run a few times before and during the unregistration. */
-	delay(drv_usectohz(5000));
+	/* Until both run (or a second passes), then unregister. */
+	for (i = 0; i < 100 && cn->race_calls < 4096; i++)
+		delay(drv_usectohz(10000));
+	before = cn->race_calls;
 	r = drm_dev_unregister(&cn->drm);
-	delay(drv_usectohz(5000));
+	during = cn->race_calls - before;
+	cn->race_stop = B_TRUE;
 	ddi_periodic_delete(p0);
 	ddi_periodic_delete(p1);
-	dev_err(dip, CE_NOTE, "!unregister (%d) raced %llu facade calls", r,
-	    (unsigned long long)cn->race_calls);
+	dev_err(dip, CE_NOTE, "!unregister (%d) raced %llu facade calls "
+	    "(%llu while it ran)", r, (unsigned long long)cn->race_calls,
+	    (unsigned long long)during);
 	if (r != 0) {
 		dev_err(dip, CE_NOTE, "!detach refused (%d)", r);
 		return (DDI_FAILURE);

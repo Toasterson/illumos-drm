@@ -159,7 +159,7 @@ impl FObj {
         }
     }
 
-    fn exporter(&self) -> Option<&GemRef<FObj>> {
+    pub(crate) fn exporter(&self) -> Option<&GemRef<FObj>> {
         let p = self.imported.load(Ordering::Acquire);
         // SAFETY: set once from a box that lives until drop.
         if p.is_null() { None } else { Some(unsafe { &*p }) }

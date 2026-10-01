@@ -307,7 +307,7 @@ echo
 echo "=== B: cdrmnull, rdrmnull and virtio_gpu together"
 # cdrmnull's detach races drm_dev_unregister against facade calls from a
 # thread-level and a soft-interrupt periodic handler and logs the count.
-race_re='cdrmnull[0-9]*: unregister (0) raced [0-9]* facade calls'
+race_re='cdrmnull[0-9]*: unregister (0) raced [0-9]* facade calls ([0-9]* while it ran)'
 races0=$(grep -c "$race_re" /var/adm/messages)
 step cp cdrmnull /usr/kernel/drv/amd64/cdrmnull || exit 1
 step cp cdrmnull.conf /usr/kernel/drv/cdrmnull.conf || exit 1
@@ -370,10 +370,10 @@ remove_dri_links pci1af4,1100@
 wait_log "$race_re" $((races0 + 3))
 races=$(($(grep -c "$race_re" /var/adm/messages) - races0))
 grep "$race_re" /var/adm/messages | tail -$races
-if [ $races -ge 4 ] && ! grep "$race_re" /var/adm/messages | tail -$races | grep -q ' raced 0 facade'; then
+if [ $races -ge 4 ] && ! grep "$race_re" /var/adm/messages | tail -$races | grep -q '(0 while it ran)'; then
 	pass "cdrmnull unregistered $races times while facade calls raced it"
 else
-	bad "cdrmnull unregistered $races times while facade calls raced it (expected 4, each with calls)"
+	bad "cdrmnull unregistered $races times while facade calls raced it (expected 4, each with calls during the unregistration)"
 fi
 
 echo

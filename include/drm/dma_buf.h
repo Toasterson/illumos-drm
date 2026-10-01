@@ -59,7 +59,10 @@ struct dma_buf_attachment {
 /*
  * The dma-buf of an object, with a new reference: its export, as Linux's
  * drm_gem_prime_export(). `flags` are the PRIME flags (DRM_CLOEXEC,
- * DRM_RDWR). Returns the dma-buf or ERR_PTR(-errno).
+ * DRM_RDWR). An object made by drm_gem_prime_import() of another device's
+ * dma-buf exports that buffer again (priv is the original exporter's
+ * object), as Linux re-exports an import's dma-buf. Returns the dma-buf or
+ * ERR_PTR(-errno). Thread context.
  */
 extern struct dma_buf *drm_gem_prime_export(struct drm_gem_object *obj,
     int flags);

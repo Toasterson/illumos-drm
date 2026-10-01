@@ -76,11 +76,12 @@ drm_core_remove() {
 # name's length before it: the pattern is built from the names.
 CORE_STATEFUL="gem fence fence_dev resv slots syncobj syncobj_ioctl prime ioctl device state anon_fd minor objects idmap dmaerr caps sync_file uaccess wwmutex driver"
 core_symbols() {
-	re=
-	for m in $CORE_STATEFUL; do
-		re="$re${re:+|}${#m}$m"
+	# Its own variable names: callers loop over $m.
+	_cs_re=
+	for _cs_m in $CORE_STATEFUL; do
+		_cs_re="$_cs_re${_cs_re:+|}${#_cs_m}$_cs_m"
 	done
-	nm "$1" | awk -F'|' -v re="8drm_core($re)" \
+	nm "$1" | awk -F'|' -v re="8drm_core($_cs_re)" \
 	    '$5 ~ /GLOB/ && $7 !~ /UNDEF/ && $8 ~ re {gsub(/ /, "", $8); print $8}'
 }
 

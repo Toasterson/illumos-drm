@@ -74,6 +74,18 @@ unsafe fn handle<'a>(buf: *const f::dma_buf) -> Option<&'a DmaBuf> {
 pub unsafe extern "C" fn drm_gem_prime_export(obj: *mut f::drm_gem_object, _flags: i32) -> *mut f::dma_buf {
     // SAFETY: the caller holds the object.
     let Some(r) = (unsafe { gem_ref(obj) }) else { return err_ptr(Errno::EINVAL) };
+    // An import exports the buffer it imported, as Linux re-exports an
+    // imported object's dma-buf: importing that again anywhere finds the
+    // original object (and its existing handle).
+    let r = match r.object().exporter() {
+        Some(e) => {
+            let e = e.clone();
+            // SAFETY: drm_gem_prime_export is documented for thread context.
+            r.put_in(drm_core::defer::Ctx::Sleep(&unsafe { super::sleepable() }));
+            e
+        }
+        None => r,
+    };
     DmaBuf::make(r)
 }
 
