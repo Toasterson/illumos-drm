@@ -138,6 +138,7 @@ facade_layout(void)
 	OFF("drm_gem_object_funcs", struct drm_gem_object_funcs, free);
 	OFF("drm_gem_object_funcs", struct drm_gem_object_funcs, open);
 	OFF("drm_gem_object_funcs", struct drm_gem_object_funcs, close);
+	OFF("drm_gem_object_funcs", struct drm_gem_object_funcs, illumos_release);
 	OFF("drm_gem_object_funcs", struct drm_gem_object_funcs, illumos_umem);
 	OFF("drm_gem_object_funcs", struct drm_gem_object_funcs, illumos_mapped);
 	OFF("drm_gem_object_funcs", struct drm_gem_object_funcs, illumos_access);
