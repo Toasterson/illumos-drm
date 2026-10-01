@@ -772,6 +772,12 @@ pub trait GemObject: Send + Sync + Sized + 'static {
     fn release(&mut self, ctx: &Sleepable) {
         let _ = ctx;
     }
+    /// For an object a driver made from another device's dma-buf
+    /// ([`crate::Driver::prime_import`]): the exporting object, so that a
+    /// file importing the same buffer again gets its handle again.
+    fn imported_from(&self) -> Option<&GemRef<Self>> {
+        None
+    }
 }
 
 impl GemObject for SysMem {
@@ -1429,7 +1435,7 @@ impl<O: GemObject> GemCore<O> {
     // --- objects and handles ---
 
     /// Charges `bytes` of object memory to the device's budget
-    /// ([`Driver::MAX_MEMORY`](crate::Driver::MAX_MEMORY)) before they are
+    /// ([`DriverInfo::max_memory`](crate::DriverInfo::max_memory)) before they are
     /// allocated, so that concurrent requests cannot allocate past it even
     /// for a moment. `ENOMEM` if the budget does not have them. The charge
     /// goes back when the reservation is dropped, unless
@@ -1442,6 +1448,17 @@ impl<O: GemObject> GemCore<O> {
             return Err(Errno::ENOMEM);
         }
         Ok(Reservation { core: self, bytes })
+    }
+
+    /// Turns `reservation` into the charge of memory a driver added to an
+    /// existing object (another backing, R5a's `drm_illumos_gem_add_backing`),
+    /// with `segments` more scatter/gather entries; the object's
+    /// [`GemObject::memory_bytes`] and [`GemObject::dma_segments`] include
+    /// them from now on, and its destructor returns them.
+    pub fn charge_reserved(&self, reservation: Reservation<'_, O>, segments: usize) {
+        core::mem::forget(reservation);
+        self.stats.segments.fetch_add(segments as u64, Ordering::Relaxed);
+        self.publish();
     }
 
     /// Makes `obj` a GEM object of this device and returns the first
@@ -1520,6 +1537,15 @@ impl<O: GemObject> GemCore<O> {
                 Err(e)
             }
         }
+    }
+
+    /// Finds a handle of file `clone` whose object satisfies `pred`, without
+    /// taking a reference. The file's handle table is locked during the
+    /// search, so `pred` must not call into the GEM state.
+    pub fn handle_find(&self, clone: CloneId, pred: impl Fn(&GemRef<O>) -> bool) -> Option<u32> {
+        let fg = self.file(clone).ok()?;
+        let handles = fg.handles.lock();
+        handles.iter().find(|(_, r)| pred(r)).map(|(n, _)| n)
     }
 
     /// Looks up a handle of file `clone` (`ENOENT` if there is none).

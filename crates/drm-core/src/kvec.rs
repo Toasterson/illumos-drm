@@ -100,6 +100,21 @@ impl<T> KVec<T> {
         }
     }
 
+    /// Makes room for `additional` more elements (`KM_SLEEP`), so that as
+    /// many [`KVec::try_push`] calls cannot fail. `ENOMEM` on overflow.
+    pub fn reserve(&mut self, additional: usize, _ctx: &Sleepable) -> Result<(), Errno> {
+        let want = self.len.checked_add(additional).ok_or(Errno::ENOMEM)?;
+        while self.cap < want {
+            let saved = self.len;
+            // grow_for_one doubles once the vector is full.
+            self.len = self.cap;
+            let r = self.grow_for_one(Flag::Sleep);
+            self.len = saved;
+            r?;
+        }
+        Ok(())
+    }
+
     fn write_last(&mut self, value: T) {
         // SAFETY: grow_for_one guaranteed cap > len.
         unsafe { ptr::write(self.ptr.as_ptr().add(self.len), value) };
@@ -171,6 +186,19 @@ impl<T> Drop for KVec<T> {
 mod tests {
     extern crate std;
     use super::*;
+
+    #[test]
+    fn reserve_then_try_push_never_fails() {
+        // SAFETY: host test threads may block.
+        let ctx = unsafe { Sleepable::assume() };
+        let mut v: KVec<u64> = KVec::new();
+        v.reserve(9, &ctx).unwrap();
+        for i in 0..9 {
+            assert!(v.try_push(i).is_ok());
+        }
+        assert_eq!(v.len(), 9);
+        assert_eq!(v.iter().sum::<u64>(), 36);
+    }
     use std::rc::Rc;
 
     fn ctx() -> Sleepable {

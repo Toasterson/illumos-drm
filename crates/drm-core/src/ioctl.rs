@@ -40,9 +40,12 @@
 //! 256 bytes or more arrives with its size modulo 256, which is then what
 //! is copied, as the C macros encoded it.
 //!
-//! Driver-private commands keep the exact match on the complete value
-//! ([`lookup_driver`]); a driver that accepts several sizes of a structure
-//! lists each (as `virtio_gpu` does for `EXECBUFFER`).
+//! Driver-private commands match an entry with the complete value first
+//! ([`lookup_driver`]), so that a driver that accepts several layouts of a
+//! structure can list each (as `virtio_gpu` does for `EXECBUFFER`), and
+//! otherwise, since R5a and as Linux does, the first entry with the same
+//! number and direction, whose argument the driver copies with the size
+//! rule above (the facade's `drm_ioctl_desc` handlers do).
 
 use drm_uapi as uapi;
 use drm_uapi::ioc;
@@ -223,9 +226,14 @@ impl DriverIoctl {
     }
 }
 
-/// Finds a driver-private ioctl by its complete command value.
-pub fn lookup_driver(table: &'static [DriverIoctl], cmd: u32) -> Option<&'static DriverIoctl> {
-    table.iter().find(|e| e.cmd == cmd && e.in_driver_range())
+/// Finds a driver-private ioctl: the entry with the complete command value
+/// if there is one (a table may list one number with several structure
+/// sizes, the layouts of older userland), otherwise the first entry with
+/// the same group, number and direction, whose argument the driver then
+/// copies with Linux's size rule ([`SizePlan`]).
+pub fn lookup_driver(table: &[DriverIoctl], cmd: u32) -> Option<&DriverIoctl> {
+    let mut entries = table.iter().filter(|e| e.in_driver_range());
+    entries.clone().find(|e| e.cmd == cmd).or_else(|| entries.find(|e| same_command(e.cmd, cmd)))
 }
 
 /// Reports whether a command has the group and number of one of the
@@ -581,11 +589,25 @@ mod tests {
         ];
         assert_eq!(lookup_driver(T, ioc::drm_iowr::<[u8; 8]>(0x40)).map(|e| e.perm), Some(RENDER));
         assert!(lookup_driver(T, ioc::drm_iowr::<[u8; 16]>(0x9f)).is_some());
-        assert!(lookup_driver(T, ioc::drm_iowr::<[u8; 12]>(0x40)).is_none(), "full value match");
+        // Another size of a listed command: Linux's size rule applies.
+        assert_eq!(lookup_driver(T, ioc::drm_iowr::<[u8; 12]>(0x40)).map(|e| e.cmd), Some(T[0].cmd));
+        // Another direction is another command.
+        assert!(lookup_driver(T, ioc::drm_ior::<[u8; 8]>(0x40)).is_none());
         assert!(lookup_driver(T, ioc::drm_iowr::<[u8; 8]>(0x0c)).is_none());
         assert!(lookup_driver(T, ioc::drm_iowr::<[u8; 8]>(0xa0)).is_none());
         assert!(is_driver_nr(T, ioc::drm_iowr::<[u8; 4]>(0x40)));
         assert!(!is_driver_nr(T, ioc::drm_iowr::<[u8; 8]>(0x0c)));
         assert!(!is_driver_nr(T, ioc::drm_iowr::<[u8; 8]>(0x41)));
+    }
+
+    #[test]
+    fn driver_exact_value_first() {
+        const T: &[DriverIoctl] = &[
+            DriverIoctl { cmd: ioc::drm_iowr::<[u8; 32]>(0x42), perm: NONE },
+            DriverIoctl { cmd: ioc::drm_iowr::<[u8; 40]>(0x42), perm: RENDER },
+        ];
+        assert_eq!(lookup_driver(T, ioc::drm_iowr::<[u8; 40]>(0x42)).map(|e| e.perm), Some(RENDER));
+        assert_eq!(lookup_driver(T, ioc::drm_iowr::<[u8; 32]>(0x42)).map(|e| e.perm), Some(NONE));
+        assert_eq!(lookup_driver(T, ioc::drm_iowr::<[u8; 64]>(0x42)).map(|e| e.perm), Some(NONE));
     }
 }

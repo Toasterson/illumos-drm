@@ -103,6 +103,7 @@ pub mod offsets;
 #[cfg(not(test))]
 pub mod prime;
 pub mod resv;
+pub mod slots;
 pub mod state;
 pub mod sync_file;
 pub mod syncobj;
@@ -113,7 +114,7 @@ pub mod uaccess;
 pub mod wwmutex;
 
 #[cfg(not(test))]
-pub use device::Device;
-pub use driver::{BusId, Driver, Features, ModeConfig};
+pub use device::{Device, numbers_taken};
+pub use driver::{BusId, Driver, DriverInfo, DumbCreated, Features, ModeConfig};
 #[cfg(not(test))]
 pub use gem::{GemDma, GemObject, GemRef, SysMem};

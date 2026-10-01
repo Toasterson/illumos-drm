@@ -2,22 +2,14 @@
 resolver = "3"
 members = [
     "crates/drm-uapi",
-    "crates/drm-minor-sys",
     "crates/drm-facade-sys",
-    "crates/drm",
-    "modules/drm-minor",
-    "examples/rdrmnull",
-    "drivers/virtio-gpu",
+    "crates/drm-core",
     "xtask",
 ]
 default-members = [
     "crates/drm-uapi",
-    "crates/drm-minor-sys",
     "crates/drm-facade-sys",
-    "crates/drm",
-    "modules/drm-minor",
-    "examples/rdrmnull",
-    "drivers/virtio-gpu",
+    "crates/drm-core",
 ]
 
 [workspace.package]
@@ -29,18 +21,19 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 drm-uapi = { path = "crates/drm-uapi" }
-drm = { path = "crates/drm" }
-drm-minor-sys = { path = "crates/drm-minor-sys" }
+drm-core = { path = "crates/drm-core" }
 drm-facade-sys = { path = "crates/drm-facade-sys" }
-# illumos-ddi at the head of its r4-virtio branch: its r2-private-fd
-# branch (clone opens, the devmap(9E) entry point, OwnNode, chpoll(9E),
-# the private tier for dma-bufs, sync objects and sync files, PollBox)
-# plus the private crate for the virtio framework and its safe wrapper
-# ddi::private::virtio (feature unstable-gate-cda5b9a49f-virtio), which the
-# virtio-gpu driver needs. Move the pin to the merge commit on
-# illumos-ddi main once those branches are merged.
-ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "be7845567053f61a635f9d47176676e6f0cd05ff" }
-ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "be7845567053f61a635f9d47176676e6f0cd05ff", default-features = false }
+# illumos-ddi at the head of its r5a-char-table branch (pull request
+# stacked on g1-gate-pin, which is stacked on r4-virtio): clone opens, the
+# devmap(9E) entry point, OwnNode, chpoll(9E), the private tier for
+# dma-bufs, sync objects and sync files, PollBox, the virtio framework
+# (feature unstable-gate-cda5b9a49f-virtio) as pinned and checked at
+# illumos 7e802e88a3, and for R5a the CharTable glue with which misc/drm
+# serves the character devices other driver modules attach, the cb_ops:
+# form of module!, and FileRef::char_dev. Move the pin to the merge commit
+# on illumos-ddi main once those branches are merged.
+ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "448e8242190034ef0c9e5328c9c1042f463ffa60" }
+ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "448e8242190034ef0c9e5328c9c1042f463ffa60", default-features = false }
 serde_json = "1"
 
 # Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug

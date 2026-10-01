@@ -11,14 +11,13 @@
 //! (`DRM_MINOR_NBITS`).
 //!
 //! `N`, the device number, is not the driver's instance number: every
-//! device of every driver built on the core takes the lowest free number
-//! from the one table of the kernel module `misc/drm_minor`
-//! (`drm-minor-sys`) when it attaches and gives it back when it detaches,
-//! so that `rdrmnull` and `virtio_gpu`, which link separate copies of this
-//! crate, never both name a device `card0`. Each driver module records
-//! which of its instances holds which number ([`bind`]), so that
-//! [`instance_of_minor`] can map a minor number back to the instance for
-//! `getinfo(9E)` and the entry points.
+//! device of every driver takes the lowest free number from the one table
+//! of the system ([`crate::slots`], in the core module `misc/drm`) when it
+//! registers and gives it back when it unregisters, so that no two devices
+//! are ever both named `card0`. The core records which driver instance
+//! holds which number ([`bind`]), so that [`instance_of_minor`] can map a
+//! minor number back to the instance for the driver's `getinfo(9E)`
+//! (`drm_minor_instance` of the facade).
 //!
 //! Every open is a clone open: the driver gives the new file its own minor
 //! number, with a clone id from 1 to 511 in bits 9 to 17 above the node
@@ -44,7 +43,7 @@ pub const MAX_FILES: u32 = (1 << CLONE_BITS) - 1;
 /// The first node minor of render nodes.
 pub const RENDER_BASE: u32 = 128;
 /// The number of DRM devices on the system, of all drivers together
-/// (device numbers 0 to 63, `misc/drm_minor`).
+/// (device numbers 0 to 63).
 pub const MAX_DEVICES: u32 = 64;
 
 /// The kind of a minor node.

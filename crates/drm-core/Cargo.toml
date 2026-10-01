@@ -1,5 +1,5 @@
 [package]
-name = "drm"
+name = "drm-core"
 description = "The DRM core for illumos: device registration, card and render nodes, per-file state, core ioctls, GEM objects, dumb buffers and kernel mode setting"
 version.workspace = true
 edition.workspace = true
@@ -22,11 +22,9 @@ panic-drill = []
 # docs/anon-fd.md).
 ddi = { workspace = true, features = ["unstable-gate-cda5b9a49f"] }
 drm-uapi.workspace = true
-# The device numbers shared by every driver module (misc/drm_minor); this
-# dependency gives each driver its -N misc/drm_minor.
-drm-minor-sys.workspace = true
 
 [package.metadata.kmod]
-# The core is a library linked into each driver module; its own symbols
-# need nothing beyond genunix and unix (drm-minor-sys brings misc/drm_minor).
+# The core is the library of the kernel module misc/drm (modules/drm), the
+# only crate that links it; its own symbols need nothing beyond genunix,
+# unix and (from the private tier) fs/specfs.
 depends = []

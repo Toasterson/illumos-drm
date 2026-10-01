@@ -76,6 +76,27 @@ impl Resv {
             fence.put(Ctx::Sleep(ctx));
             return Err(Errno::EINVAL);
         }
+        self.add_locked(fence, usage, ctx)
+    }
+
+    /// [`Resv::add_fence`] for a lock taken with
+    /// [`WwMutex::lock_raw`](crate::wwmutex::WwMutex::lock_raw) (the
+    /// facade's `dma_resv_add_fence`): `EINVAL` if the lock is not held at
+    /// all, since no guard proves who holds it.
+    pub fn add_fence_raw(&self, fence: Fence, usage: Usage, ctx: &Sleepable) -> Result<(), Errno> {
+        if !self.lock.is_locked() {
+            fence.put(Ctx::Sleep(ctx));
+            return Err(Errno::EINVAL);
+        }
+        self.add_locked(fence, usage, ctx)
+    }
+
+    /// Makes room for `n` more fences (`dma_resv_reserve_fences`).
+    pub fn reserve(&self, n: usize, ctx: &Sleepable) -> Result<(), Errno> {
+        self.fences.lock().reserve(n, ctx)
+    }
+
+    fn add_locked(&self, fence: Fence, usage: Usage, ctx: &Sleepable) -> Result<(), Errno> {
         let mut l = self.fences.lock();
         let slot = l.iter().position(|(old, u)| {
             old.is_signaled() || (old.context() == fence.context() && !old.is_later(&fence) && *u >= usage)

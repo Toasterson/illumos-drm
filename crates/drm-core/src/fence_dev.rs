@@ -93,14 +93,14 @@ impl<O: GemObject> SyncCore<O> {
     }
 
     /// Looks up descriptor `fd` of the calling process: the object if it
-    /// is an anonymous file of any device of this driver (they share this
-    /// code, so a sync object or sync file of one device can be imported
-    /// into another), `EINVAL` for any other file, `EBADF` for a closed
-    /// descriptor. With `local_only` (dma-bufs, whose import across
-    /// devices needs an attach the core does not have), another device's
-    /// file is `ENOTSUP`; so is any file of a device whose fences are
-    /// signalled at another interrupt priority ([`crate::Driver::fence_priority`]),
-    /// because the locks waiting on them are created with this device's.
+    /// is an anonymous file of any DRM device (since R5a every device of
+    /// every driver is served by the one core module, so a dma-buf, sync
+    /// object or sync file of one device can be imported into another),
+    /// `EINVAL` for any other file, `EBADF` for a closed descriptor. A sync
+    /// object or sync file of a device whose fences are signalled at
+    /// another interrupt priority ([`crate::Driver::fence_priority`]) is
+    /// `ENOTSUP`, because the locks waiting on them are created with this
+    /// device's; with `local_only`, any other device's file is `ENOTSUP`.
     pub(crate) fn lookup(
         &self,
         fd: i32,
@@ -109,27 +109,46 @@ impl<O: GemObject> SyncCore<O> {
         ctx: &Sleepable,
     ) -> Result<AnonObj<O>, Errno> {
         let f = FileRef::get(fd, arg)?;
-        let m = f.own_minor(&self.dev).ok_or(Errno::EINVAL)?;
-        let (index, id) = crate::anon_fd::decode(m.0).ok_or(Errno::EINVAL)?;
-        let obj = if index == self.index {
-            self.anon.get(id)
-        } else {
-            // SAFETY: the held file is an open file of device `index`, which
-            // therefore cannot detach (and unregister) during this call.
-            let other = unsafe { registry::get::<O>(index) }.ok_or(Errno::EINVAL)?;
-            // The other device's fences are signalled at its priority, and
-            // the locks this device creates for waiting on them (waiters,
-            // chain points, arrays) use this device's: both must agree.
-            if other.domain.priority() != self.domain.priority() {
-                return Err(ENOTSUP);
-            }
-            other.anon.get(id)
+        // The file's device number carries the major of the driver that
+        // attached its device and the device's number; check the major
+        // against this device's driver first, then against every other
+        // registered device's.
+        let decode = |dev: &DevInfo| f.own_minor(dev).and_then(|m| crate::anon_fd::decode(m.0));
+        let found = match decode(&self.dev) {
+            Some((index, id)) if index == self.index => Some((None, id)),
+            _ => (0..crate::minor::MAX_DEVICES).filter(|i| *i != self.index).find_map(|i| {
+                // SAFETY: the held file, if it is one of device i's, keeps
+                // the device from detaching during this call; a device that
+                // is not the file's is only asked for its node, which stays
+                // valid while it is registered (the registry entry goes
+                // before the device does).
+                let other = unsafe { registry::get::<O>(i) }?;
+                match decode(&other.dev) {
+                    Some((index, id)) if index == i => Some((Some(other), id)),
+                    _ => None,
+                }
+            }),
+        };
+        let Some((other, id)) = found else {
+            drop(f);
+            return Err(Errno::EINVAL);
+        };
+        let obj = match other {
+            None => self.anon.get(id),
+            Some(o) => o.anon.get(id),
         };
         drop(f);
         let obj = obj.ok_or(Errno::EINVAL)?;
-        if index != self.index && local_only {
-            obj.put(ctx);
-            return Err(ENOTSUP);
+        if let Some(o) = other {
+            // The other device's fences are signalled at its priority, and
+            // the locks this device creates for waiting on them (waiters,
+            // chain points, arrays) use this device's: both must agree. A
+            // dma-buf carries no fences of its own.
+            let fenced = !matches!(obj, AnonObj::DmaBuf(_));
+            if local_only || (fenced && o.domain.priority() != self.domain.priority()) {
+                obj.put(ctx);
+                return Err(ENOTSUP);
+            }
         }
         Ok(obj)
     }

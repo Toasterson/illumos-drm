@@ -2,8 +2,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The table of device numbers: one atomic word per number, holding its
-//! owner or 0.
+//! The table of DRM device numbers of the system: one atomic word per
+//! number, holding its owner or 0. Until R5a this was the module
+//! `misc/drm_minor`; it is now part of the core module `misc/drm`
+//! (`device::NUMBERS`).
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -63,10 +65,12 @@ impl Slots {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use std::collections::BTreeSet;
     use std::sync::{Arc, Barrier};
     use std::thread;
+    use std::vec::Vec;
 
     #[test]
     fn lowest_free_and_reuse() {

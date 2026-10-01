@@ -7,7 +7,7 @@
 use core::ffi::CStr;
 use core::fmt;
 
-use ddi::{DevInfo, DmaAttr, Errno};
+use ddi::{DevInfo, Errno};
 
 use crate::dumb::{self, DumbLayout, DumbRequest};
 use crate::ioctl::DriverIoctl;
@@ -148,68 +148,87 @@ pub const DEFAULT_MAX_OBJECT_SIZE: usize = 256 << 20;
 /// able to exhaust.
 pub const DEFAULT_MAX_MEMORY: usize = 1 << 30;
 
-/// What a DRM device driver supplies: its identity for
-/// `DRM_IOCTL_VERSION`, its feature flags, the mode-setting properties that
-/// `DRM_IOCTL_GET_CAP` reports, its buffer-object type and dumb-buffer
-/// rules, and its private ioctls.
-///
-/// A driver module implements this on its per-device state, creates a
-/// [`crate::Device`] from it in `attach(9E)` and uses the device as the
-/// instance of its `ddi::Driver`; see the `rdrmnull` example.
-pub trait Driver: Send + Sync + Sized + 'static {
+/// The identity and limits of a driver: what `DRM_IOCTL_VERSION` and
+/// `DRM_IOCTL_GET_CAP` report, its feature flags and its memory limits.
+/// Read when a device attaches and by those ioctls; fixed for the device's
+/// life.
+#[derive(Clone, Copy, Debug)]
+pub struct DriverInfo {
     /// The driver name, reported by `DRM_IOCTL_VERSION` and matched by
     /// libdrm's `drmOpen(name, NULL)`.
-    const NAME: &'static CStr;
+    pub name: &'static CStr,
     /// The driver date, `YYYYMMDD` by convention.
-    const DATE: &'static CStr;
+    pub date: &'static CStr,
     /// A one-line description.
-    const DESC: &'static CStr;
+    pub desc: &'static CStr,
     /// The driver interface major version.
-    const MAJOR: i32;
+    pub major: i32,
     /// The driver interface minor version.
-    const MINOR: i32;
+    pub minor: i32,
     /// The driver patch level.
-    const PATCHLEVEL: i32;
+    pub patchlevel: i32,
     /// The driver's feature flags.
-    const FEATURES: Features;
+    pub features: Features,
     /// The mode-setting properties reported by `GET_CAP`.
-    const MODE_CONFIG: ModeConfig = ModeConfig::DEFAULT;
-    /// The DMA attributes GEM object memory is bound with, against the
-    /// device's own node (the `ddi::OwnNode` that
-    /// [`Device::attach`](crate::Device::attach) received), which gives
-    /// every object a scatter/gather table
-    /// ([`SysMem::sg_iter`](crate::gem::SysMem::sg_iter)). `None` for a
-    /// device that does no DMA; pseudo devices cannot have DMA handles.
-    /// [`Driver::gem_dma`] can choose at attach time instead.
-    const DMA_ATTR: Option<DmaAttr> = None;
+    pub mode_config: ModeConfig,
     /// The largest GEM object a client may create; larger requests fail
     /// with `ENOMEM`.
-    const MAX_OBJECT_SIZE: usize = DEFAULT_MAX_OBJECT_SIZE;
+    pub max_object_size: usize,
     /// The most memory all GEM objects of the device may hold together
     /// ([`GemObject::memory_bytes`](crate::gem::GemObject::memory_bytes));
     /// an object that would pass it is refused with `ENOMEM`.
-    const MAX_MEMORY: usize = DEFAULT_MAX_MEMORY;
-    /// The driver's private ioctls, numbered from `DRM_COMMAND_BASE`
-    /// (0x40) to below `DRM_COMMAND_END` (0xa0) and matched on the whole
-    /// command value; [`Driver::ioctl`] handles them.
-    const IOCTLS: &'static [DriverIoctl] = &[];
+    pub max_memory: usize,
+}
 
-    /// The driver's buffer objects. [`crate::gem::SysMem`] for a driver
-    /// whose objects are plain system memory. Dumb buffers are system
-    /// memory converted with `From`.
+/// What `MODE_CREATE_DUMB` returns: the new handle, the pitch and the
+/// object's size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DumbCreated {
+    /// The handle in the calling file.
+    pub handle: u32,
+    /// Bytes per row.
+    pub pitch: u32,
+    /// The object's size in bytes.
+    pub size: u64,
+}
+
+/// What a DRM device driver supplies: its identity and limits
+/// ([`DriverInfo`]), its buffer-object type and dumb-buffer rules, its
+/// private ioctls and the hooks the core calls.
+///
+/// Since milestone R5a the core is the kernel module `misc/drm`, and the
+/// only implementation is the module's facade driver, which forwards every
+/// hook to a driver's C table (`struct drm_driver` of `include/drm`): the
+/// core is monomorphised once, inside the module. A driver module, in C or
+/// in Rust, talks to the module through the facade's C functions only.
+pub trait Driver: Send + Sync + Sized + 'static {
+    /// The driver's identity and limits.
+    fn info(&self) -> &DriverInfo;
+
+    /// The driver's private ioctls, numbered from `DRM_COMMAND_BASE`
+    /// (0x40) to below `DRM_COMMAND_END` (0xa0). A command matches the
+    /// entry with its whole value first, otherwise the first entry with
+    /// its number and direction ([`crate::ioctl::lookup_driver`]);
+    /// [`Driver::ioctl`] handles them.
+    fn ioctls(&self) -> &[DriverIoctl] {
+        &[]
+    }
+
+    /// The driver's buffer objects.
     #[cfg(not(test))]
-    type Object: crate::gem::GemObject + From<crate::gem::SysMem>;
+    type Object: crate::gem::GemObject;
 
     /// Says how GEM object memory of the device `dev` is bound for DMA,
-    /// once, when the device attaches. The default is
-    /// [`DMA_ATTR`](Driver::DMA_ATTR) against the device's own node; a
-    /// driver whose
-    /// attributes depend on the hardware or on its `.conf` file returns them
-    /// here.
+    /// once, when the device attaches: against the device's own node (the
+    /// `ddi::OwnNode` that [`Device::attach`](crate::Device::attach)
+    /// received), which gives every object a scatter/gather table
+    /// ([`SysMem::sg_iter`](crate::gem::SysMem::sg_iter)). `None`, the
+    /// default, for a device that does no DMA; pseudo devices cannot have
+    /// DMA handles.
     #[cfg(not(test))]
     fn gem_dma(&self, dev: &DevInfo) -> Option<crate::gem::GemDma> {
         let _ = dev;
-        Self::DMA_ATTR.map(crate::gem::GemDma::new)
+        None
     }
 
     /// Writes the bus ID of the device. The default, for pseudo devices, is
@@ -220,19 +239,17 @@ pub trait Driver: Send + Sync + Sized + 'static {
         fmt::Write::write_fmt(out, format_args!("pseudo:{}@{}", name, dev.instance().0))
     }
 
-    /// Checks a dumb-buffer request and chooses its pitch and size. The
-    /// default accepts 8, 16, 24 and 32 bits per pixel and pads rows to 64
-    /// bytes ([`dumb::standard_layout`]); a driver with other scanout
-    /// constraints replaces it, typically with [`dumb::layout`].
+    /// Checks a dumb-buffer request and chooses its pitch and size, for
+    /// [`Device::dumb_create_default`](crate::Device::dumb_create_default).
+    /// The default accepts 8, 16, 24 and 32 bits per pixel and pads rows to
+    /// 64 bytes ([`dumb::standard_layout`]).
     fn dumb_layout(&self, req: &DumbRequest) -> Result<DumbLayout, Errno> {
         dumb::standard_layout(req)
     }
 
-    /// Makes the object of a new dumb buffer from its memory, after
-    /// [`Driver::dumb_layout`] accepted `req` with `layout`. The default
-    /// converts the memory with `From`; a driver whose objects need more
-    /// (virtio-gpu creates a host resource for each) does that here. An
-    /// error fails `MODE_CREATE_DUMB` and frees the memory.
+    /// Makes the object of a new dumb buffer from its memory, for
+    /// [`Device::dumb_create_default`](crate::Device::dumb_create_default).
+    /// The default refuses (`ENOSYS`).
     #[cfg(not(test))]
     fn dumb_object(
         &self,
@@ -242,18 +259,36 @@ pub trait Driver: Send + Sync + Sized + 'static {
         layout: &DumbLayout,
         ctx: &ddi::Sleepable,
     ) -> Result<Self::Object, Errno> {
-        let _ = (dev, req, layout, ctx);
-        Ok(Self::Object::from(mem))
+        let _ = (dev, mem, req, layout, ctx);
+        Err(ENOSYS)
     }
 
-    /// Handles one of [`Driver::IOCTLS`], after the core has checked its
-    /// permission flags. `file` is the calling file; `arg` is the ioctl
-    /// argument, copied with [`crate::uaccess`].
+    /// `MODE_CREATE_DUMB`, after the core has checked the caller's
+    /// permission and that the driver has [`Features::DUMB`]. The default is
+    /// [`Device::dumb_create_default`](crate::Device::dumb_create_default):
+    /// [`Driver::dumb_layout`], the size limits, memory, and
+    /// [`Driver::dumb_object`].
+    #[cfg(not(test))]
+    fn dumb_create(
+        &self,
+        dev: &crate::Device<Self>,
+        file: crate::minor::CloneId,
+        req: &DumbRequest,
+        ctx: &ddi::Sleepable,
+    ) -> Result<DumbCreated, Errno> {
+        dev.dumb_create_default(file, req, ctx)
+    }
+
+    /// Handles one of [`Driver::ioctls`], after the core has checked its
+    /// permission flags. `entry` is the matched table entry, `cmd` the
+    /// caller's command value, `file` the calling file and `arg` the ioctl
+    /// argument.
     #[cfg(not(test))]
     fn ioctl(
         &self,
         _dev: &crate::Device<Self>,
         _file: crate::minor::CloneId,
+        _entry: &DriverIoctl,
         _cmd: u32,
         _arg: &ddi::IoctlArg<'_>,
         _ctx: &ddi::Sleepable,
@@ -272,6 +307,7 @@ pub trait Driver: Send + Sync + Sized + 'static {
     fn kms(&self) -> Option<&dyn crate::kms::KmsDriver<crate::gem::GemRef<Self::Object>>> {
         None
     }
+
     /// The highest interrupt priority at which the driver signals fences
     /// (a soft interrupt's, say), with which the core creates every lock
     /// that signalling takes (see [`crate::fence`]). `None`, the default,
@@ -282,6 +318,19 @@ pub trait Driver: Send + Sync + Sized + 'static {
         None
     }
 
+    /// Called in `open(9E)` once the core has registered file `file`
+    /// (Linux's `drm_driver.open`); an error fails the open, and the core
+    /// then forgets the file without calling [`Driver::file_close`].
+    #[cfg(not(test))]
+    fn file_open(
+        &self,
+        _dev: &crate::Device<Self>,
+        _file: crate::minor::CloneId,
+        _ctx: &ddi::Sleepable,
+    ) -> Result<(), Errno> {
+        Ok(())
+    }
+
     /// Called in `close(9E)` of file `file` after the core released the
     /// file's mode-setting state, GEM handles and sync objects, before its
     /// clone id is freed (Linux's `postclose`): a driver drops its
@@ -289,6 +338,19 @@ pub trait Driver: Send + Sync + Sized + 'static {
     /// context).
     #[cfg(not(test))]
     fn file_close(&self, _dev: &crate::Device<Self>, _file: crate::minor::CloneId, _ctx: &ddi::Sleepable) {}
+
+    /// Makes an object of this device for `exporter`, an object of another
+    /// device that a client imports with `PRIME_FD_TO_HANDLE` (Linux's
+    /// `gem_prime_import`). The default refuses with `ENOTSUP`.
+    #[cfg(not(test))]
+    fn prime_import(
+        &self,
+        _dev: &crate::Device<Self>,
+        _exporter: &crate::gem::GemRef<Self::Object>,
+        _ctx: &ddi::Sleepable,
+    ) -> Result<crate::gem::GemRef<Self::Object>, Errno> {
+        Err(Errno::ENOTSUP)
+    }
 
     /// Called in `detach(9E)` once no file is open, before the core checks
     /// whether the detach can proceed: the driver drops the references it
@@ -307,6 +369,13 @@ pub trait Driver: Send + Sync + Sized + 'static {
     #[cfg(not(test))]
     fn before_teardown(&self, _ctx: &ddi::Sleepable) {}
 }
+
+/// `ENOSYS`, which `ddi::Errno` has no named constant for.
+pub const ENOSYS: Errno = match Errno::new(ddi::sys::errno::ENOSYS) {
+    Some(e) => e,
+    // Unreachable: ENOSYS is 89.
+    None => Errno::EINVAL,
+};
 
 #[cfg(test)]
 mod tests {

@@ -209,6 +209,26 @@ impl<T> WwMutex<T> {
         Ok(WwGuard { m: self, ctx: Some(tx), _thread: PhantomData })
     }
 
+    /// Acquires the mutex without a transaction and without a guard, for a
+    /// caller whose unlock comes in a separate call (the facade's
+    /// `dma_resv_lock`). `EINTR` if `intr` and a signal arrives while
+    /// waiting.
+    pub fn lock_raw(&self, intr: bool, ctx: &Sleepable) -> Result<(), Errno> {
+        self.acquire(None, false, intr, ctx)
+    }
+
+    /// Releases a mutex taken with [`WwMutex::lock_raw`].
+    ///
+    /// # Safety
+    /// The caller took the mutex with `lock_raw` and holds it: no guard
+    /// refers to it.
+    pub unsafe fn unlock_raw(&self) {
+        let mut g = self.owner.lock();
+        *g = Owner::Free;
+        drop(g);
+        self.cv.notify_all();
+    }
+
     /// Reports whether the mutex is held by anyone.
     pub fn is_locked(&self) -> bool {
         *self.owner.lock() != Owner::Free

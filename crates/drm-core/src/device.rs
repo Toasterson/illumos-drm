@@ -46,7 +46,7 @@ use drm_uapi as uapi;
 
 use crate::anon_fd;
 use crate::caps;
-use crate::driver::{BUS_ID_MAX, BusId, Driver, Features};
+use crate::driver::{BUS_ID_MAX, BusId, Driver, DumbCreated, ENOSYS, Features};
 use crate::dumb::DumbRequest;
 use crate::fence_dev::SyncCore;
 use crate::gem::{GemCore, registry};
@@ -86,8 +86,18 @@ pub struct Device<D: Driver> {
     _number: Number,
 }
 
-/// A device number from `misc/drm_minor`, recorded as this module's
-/// instance's (`minor::bind`); dropping it forgets the instance and gives
+/// The table of DRM device numbers of the system (until R5a the module
+/// `misc/drm_minor`): every device of every driver gets the lowest free
+/// number `N` and the nodes `card<N>` and `renderD<128+N>`.
+static NUMBERS: crate::slots::Slots = crate::slots::Slots::new();
+
+/// The number of device numbers taken, for the module's `_fini`.
+pub fn numbers_taken() -> u32 {
+    NUMBERS.taken()
+}
+
+/// A device number from [`NUMBERS`], recorded as the device's driver
+/// instance (`minor::bind`); dropping it forgets the instance and gives
 /// the number back.
 struct Number {
     index: u32,
@@ -100,26 +110,16 @@ impl Number {
     /// Takes the lowest free device number of the system for `dev`.
     fn claim(dev: &DevInfo) -> Result<Number, DdiError> {
         let owner = dev.as_raw() as usize;
-        // SAFETY: drm_minor_alloc treats the pointer as an opaque token and
-        // may be called from any context; the -N misc/drm_minor dependency
-        // keeps the module loaded while this one is.
-        let id = unsafe { drm_minor_sys::drm_minor_alloc(owner as *const core::ffi::c_void) };
-        let Some(index) = u32::try_from(id).ok().filter(|i| *i < MAX_DEVICES) else {
-            if id >= 0 {
-                // A number this core cannot use; give it back.
-                // SAFETY: as above; id was just allocated for owner.
-                unsafe { drm_minor_sys::drm_minor_free(id, owner as *const core::ffi::c_void) };
-            }
+        let Some(index) = NUMBERS.alloc(owner).filter(|i| *i < MAX_DEVICES) else {
             dev.warn(format_args!("all {MAX_DEVICES} DRM device numbers are in use"));
             return Err(DdiError);
         };
         let n = Number { index, inst: dev.instance(), owner };
         if !minor::bind(index, n.inst) {
-            // Unreachable while misc/drm_minor hands each number to one
-            // device; refuse rather than share a number.
-            dev.warn(format_args!("device number {index} is already recorded in this driver"));
-            // SAFETY: as above.
-            unsafe { drm_minor_sys::drm_minor_free(id, owner as *const core::ffi::c_void) };
+            // Unreachable while the table hands each number to one device;
+            // refuse rather than share a number.
+            dev.warn(format_args!("device number {index} is already recorded"));
+            NUMBERS.free(index, owner);
             return Err(DdiError);
         }
         Ok(n)
@@ -129,11 +129,7 @@ impl Number {
 impl Drop for Number {
     fn drop(&mut self) {
         minor::unbind(self.index, self.inst);
-        // SAFETY: the number was allocated for this owner in claim. A
-        // refusal is logged by drm_minor and changes nothing.
-        unsafe {
-            drm_minor_sys::drm_minor_free(self.index as core::ffi::c_int, self.owner as *const core::ffi::c_void)
-        };
+        NUMBERS.free(self.index, self.owner);
     }
 }
 
@@ -141,7 +137,7 @@ impl<D: Driver> Device<D> {
     /// Registers a device for the driver instance `node`, the capability for
     /// the driver's own node that `ddi::Driver::attach` received; the GEM
     /// state keeps it to allocate DMA handles. Takes the lowest free device
-    /// number `N` of the system from `misc/drm_minor`, shared by every
+    /// number `N` of the system ([`NUMBERS`]), shared by every
     /// driver built on the core, and creates the primary node `card<N>`
     /// and, if the driver has [`Features::RENDER`], the render node
     /// `renderD<128+N>`. The number stays the device's until it detaches.
@@ -150,6 +146,7 @@ impl<D: Driver> Device<D> {
     /// links (see `packaging/devlink.tab`).
     pub fn attach(node: OwnNode, driver: D, ctx: &Sleepable) -> Result<Device<D>, DdiError> {
         let dev = node.dev();
+        let info = *driver.info();
         // Taken first and dropped last: every early return below gives it
         // back after the nodes are gone.
         let number = Number::claim(&dev)?;
@@ -159,7 +156,7 @@ impl<D: Driver> Device<D> {
             dev.warn(format_args!("bus ID does not fit in {BUS_ID_MAX} bytes"));
             return Err(DdiError);
         }
-        if D::FEATURES.contains(Features::DUMB) && !D::FEATURES.contains(Features::GEM) {
+        if info.features.contains(Features::DUMB) && !info.features.contains(Features::GEM) {
             dev.warn(format_args!("dumb buffers need GEM"));
             return Err(DdiError);
         }
@@ -173,9 +170,9 @@ impl<D: Driver> Device<D> {
         // takes `&OwnNode` for them) before the GEM state takes the node.
         // Opens wait until attach has returned, and dropping them on a
         // later failure removes them again.
-        let (card, render) = Self::nodes(&node, index)?;
-        let gem = if D::FEATURES.contains(Features::GEM) {
-            match GemCore::new(node, driver.gem_dma(&dev), D::MAX_MEMORY, ctx) {
+        let (card, render) = Self::nodes(&node, index, info.features)?;
+        let gem = if info.features.contains(Features::GEM) {
+            match GemCore::new(node, driver.gem_dma(&dev), info.max_memory, ctx) {
                 Ok(g) => Some(g),
                 Err(e) => {
                     dev.warn(format_args!("cannot set up GEM: {e:?}"));
@@ -185,7 +182,7 @@ impl<D: Driver> Device<D> {
         } else {
             None
         };
-        if D::FEATURES.contains(Features::SYNCOBJ_TIMELINE) && !D::FEATURES.contains(Features::SYNCOBJ) {
+        if info.features.contains(Features::SYNCOBJ_TIMELINE) && !info.features.contains(Features::SYNCOBJ) {
             dev.warn(format_args!("timeline sync objects need SYNCOBJ"));
             return Err(DdiError);
         }
@@ -197,9 +194,9 @@ impl<D: Driver> Device<D> {
             }
         };
         let kms = match driver.kms() {
-            Some(k) if gem.is_some() && D::FEATURES.contains(Features::MODESET) => {
-                let modifiers = D::MODE_CONFIG.fb_modifiers;
-                match Kms::new(dev, k, D::FEATURES.contains(Features::ATOMIC), modifiers, ctx) {
+            Some(k) if gem.is_some() && info.features.contains(Features::MODESET) => {
+                let modifiers = info.mode_config.fb_modifiers;
+                match Kms::new(dev, k, info.features.contains(Features::ATOMIC), modifiers, ctx) {
                     Ok(k) => Some(k),
                     Err(e) => {
                         dev.warn(format_args!("cannot set up mode setting: {e:?}"));
@@ -244,13 +241,10 @@ impl<D: Driver> Device<D> {
         })
     }
 
-    fn nodes(node: &OwnNode, index: u32) -> Result<(MinorNode, Option<MinorNode>), DdiError> {
+    fn nodes(node: &OwnNode, index: u32, features: Features) -> Result<(MinorNode, Option<MinorNode>), DdiError> {
         let card = Self::node(node, NodeKind::Primary, index)?;
-        let render = if D::FEATURES.contains(Features::RENDER) {
-            Some(Self::node(node, NodeKind::Render, index)?)
-        } else {
-            None
-        };
+        let render =
+            if features.contains(Features::RENDER) { Some(Self::node(node, NodeKind::Render, index)?) } else { None };
         Ok((card, render))
     }
 
@@ -307,6 +301,27 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
+    /// The core's own `MODE_CREATE_DUMB`: [`Driver::dumb_layout`], the
+    /// size limits, the device's memory budget, system memory,
+    /// [`Driver::dumb_object`], the object and its handle in `file`.
+    pub fn dumb_create_default(&self, file: CloneId, req: &DumbRequest, ctx: &Sleepable) -> Result<DumbCreated, Errno> {
+        let g = self.gem_or(ENOSYS)?;
+        let layout = self.driver.dumb_layout(req)?;
+        let size = usize::try_from(layout.size).map_err(|_| Errno::EINVAL)?;
+        if size > self.driver.info().max_object_size {
+            return Err(Errno::ENOMEM);
+        }
+        // Charged before the locked allocation, so that concurrent
+        // requests cannot allocate past the device's budget.
+        let reservation = g.reserve(size, ctx)?;
+        let mem = g.sys_mem(size, ctx)?;
+        let obj = self.driver.dumb_object(self, mem, req, &layout, ctx)?;
+        let obj = GemCore::create_reserved(g, obj, reservation, ctx)?;
+        let size = obj.size() as u64;
+        let handle = g.handle_create(file, obj, ctx)?;
+        Ok(DumbCreated { handle, pitch: layout.pitch, size })
+    }
+
     /// Returns the synchronisation state: the fence domain drivers create
     /// their fences in, and the sync object and anonymous-file tables.
     pub fn sync(&self) -> &KArc<SyncCore<D::Object>> {
@@ -344,12 +359,13 @@ impl<D: Driver> Device<D> {
         self.state.lock().permit(c, perm, privileged)?;
         // SAFETY: only field assignments below.
         let a = unsafe { v.get_mut() };
-        a.version_major = D::MAJOR;
-        a.version_minor = D::MINOR;
-        a.version_patchlevel = D::PATCHLEVEL;
-        copy_field(arg, &mut a.name_len, a.name as usize, D::NAME.to_bytes())?;
-        copy_field(arg, &mut a.date_len, a.date as usize, D::DATE.to_bytes())?;
-        copy_field(arg, &mut a.desc_len, a.desc as usize, D::DESC.to_bytes())?;
+        let info = self.driver.info();
+        a.version_major = info.major;
+        a.version_minor = info.minor;
+        a.version_patchlevel = info.patchlevel;
+        copy_field(arg, &mut a.name_len, a.name as usize, info.name.to_bytes())?;
+        copy_field(arg, &mut a.date_len, a.date as usize, info.date.to_bytes())?;
+        copy_field(arg, &mut a.desc_len, a.desc as usize, info.desc.to_bytes())?;
         v.write(arg)
     }
 
@@ -493,6 +509,17 @@ impl<D: Driver> CharDevice for Device<D> {
         if let Some(k) = &self.kms {
             k.file_open(clone, ctx);
         }
+        if let Err(e) = self.driver.file_open(self, clone, ctx) {
+            if let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) {
+                k.file_close(clone, drv, ctx);
+            }
+            if let Some(g) = &self.gem {
+                g.file_close(clone, ctx);
+            }
+            self.sync.file_close(clone, ctx);
+            self.state.lock().close(clone);
+            return Err(e);
+        }
         Ok(Some(Minor(m)))
     }
 
@@ -573,7 +600,8 @@ impl<D: Driver> CharDevice for Device<D> {
             return Ok(0);
         }
         if arg.model() == DataModel::Ilp32 {
-            let known = ioctl::is_core_nr(cmd) || ioctl::is_driver_nr(D::IOCTLS, cmd) || kmsioctl::is_kms_nr(cmd);
+            let known =
+                ioctl::is_core_nr(cmd) || ioctl::is_driver_nr(self.driver.ioctls(), cmd) || kmsioctl::is_kms_nr(cmd);
             return Err(if known { Errno::ENOTSUP } else { Errno::ENOTTY });
         }
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
@@ -593,9 +621,9 @@ impl<D: Driver> CharDevice for Device<D> {
             self.kms_ioctl(entry, c, privileged, &a, ctx)?;
             return Ok(0);
         }
-        let entry = ioctl::lookup_driver(D::IOCTLS, cmd).ok_or(Errno::ENOTTY)?;
+        let entry = *ioctl::lookup_driver(self.driver.ioctls(), cmd).ok_or(Errno::ENOTTY)?;
         self.state.lock().permit(c, entry.perm, privileged)?;
-        self.driver.ioctl(self, c, cmd, &arg, ctx)?;
+        self.driver.ioctl(self, c, &entry, cmd, &arg, ctx)?;
         Ok(0)
     }
 
@@ -638,7 +666,7 @@ impl<D: Driver> Device<D> {
     /// [`Features::DUMB`], as Linux answers for a driver without
     /// `dumb_create`.
     fn dumb_gem(&self) -> Result<&KArc<GemCore<D::Object>>, Errno> {
-        if !D::FEATURES.contains(Features::DUMB) {
+        if !self.driver.info().features.contains(Features::DUMB) {
             return Err(ENOSYS);
         }
         self.gem_or(ENOSYS)
@@ -711,7 +739,7 @@ impl<D: Driver> Device<D> {
                 let r = {
                     let mut s = self.state.lock();
                     s.permit(c, perm, privileged)?;
-                    s.set_version(c, sv, D::MAJOR, D::MINOR)
+                    s.set_version(c, sv, self.driver.info().major, self.driver.info().minor)
                 };
                 // The versions go back to the caller whether or not the
                 // request was acceptable; libdrm reads them in both cases.
@@ -719,15 +747,16 @@ impl<D: Driver> Device<D> {
                 let a = unsafe { v.get_mut() };
                 a.drm_di_major = IF_MAJOR;
                 a.drm_di_minor = IF_MINOR;
-                a.drm_dd_major = D::MAJOR;
-                a.drm_dd_minor = D::MINOR;
+                a.drm_dd_major = self.driver.info().major;
+                a.drm_dd_minor = self.driver.info().minor;
                 v.write(arg)?;
                 r?;
             }
             Op::GetCap => {
                 let mut g = UserArg::<uapi::drm_get_cap>::read(arg)?;
                 self.state.lock().permit(c, perm, privileged)?;
-                let value = caps::get_cap(D::FEATURES, &D::MODE_CONFIG, g.get().capability)?;
+                let value =
+                    caps::get_cap(self.driver.info().features, &self.driver.info().mode_config, g.get().capability)?;
                 // SAFETY: a field assignment.
                 unsafe { g.get_mut() }.value = value;
                 g.write(arg)?;
@@ -737,7 +766,7 @@ impl<D: Driver> Device<D> {
                 let mut s = self.state.lock();
                 s.permit(c, perm, privileged)?;
                 let f = s.file_mut(c).ok_or(Errno::ENXIO)?;
-                f.caps.set(D::FEATURES, a.get().capability, a.get().value)?;
+                f.caps.set(self.driver.info().features, a.get().capability, a.get().value)?;
             }
             Op::SetMaster => {
                 let mut s = self.state.lock();
@@ -785,29 +814,17 @@ impl<D: Driver> Device<D> {
                 // cannot refuse garbage there because old userland leaves it.
                 let mut a = UserArg::<uapi::drm_mode_create_dumb>::read(arg)?;
                 self.state.lock().permit(c, perm, privileged)?;
-                let g = self.dumb_gem()?;
+                self.dumb_gem()?;
                 let req = {
                     let v = a.get();
                     DumbRequest { width: v.width, height: v.height, bpp: v.bpp, flags: v.flags }
                 };
-                let layout = self.driver.dumb_layout(&req)?;
-                let size = usize::try_from(layout.size).map_err(|_| Errno::EINVAL)?;
-                if size > D::MAX_OBJECT_SIZE {
-                    return Err(Errno::ENOMEM);
-                }
-                // Charged before the locked allocation, so that concurrent
-                // requests cannot allocate past the device's budget.
-                let reservation = g.reserve(size, ctx)?;
-                let mem = g.sys_mem(size, ctx)?;
-                let obj = self.driver.dumb_object(self, mem, &req, &layout, ctx)?;
-                let obj = GemCore::create_reserved(g, obj, reservation, ctx)?;
-                let size = obj.size() as u64;
-                let handle = g.handle_create(c, obj, ctx)?;
+                let made = self.driver.dumb_create(self, c, &req, ctx)?;
                 // SAFETY: only field assignments below.
                 let m = unsafe { a.get_mut() };
-                m.handle = handle;
-                m.pitch = layout.pitch;
-                m.size = size;
+                m.handle = made.handle;
+                m.pitch = made.pitch;
+                m.size = made.size;
                 a.write(arg)?;
             }
             Op::MapDumb => {
@@ -831,7 +848,7 @@ impl<D: Driver> Device<D> {
             // R2: PRIME and sync objects (crate::prime, crate::syncobj_ioctl).
             op @ (Op::PrimeHandleToFd | Op::PrimeFdToHandle) => {
                 self.state.lock().permit(c, perm, privileged)?;
-                self.sync.prime_ioctl(op, c, D::FEATURES, self.gem.as_ref(), arg, ctx)?;
+                self.sync.prime_ioctl(op, c, self.driver.info().features, self, arg, ctx)?;
             }
             op @ (Op::SyncobjCreate
             | Op::SyncobjDestroy
@@ -845,17 +862,9 @@ impl<D: Driver> Device<D> {
             | Op::SyncobjTransfer
             | Op::SyncobjTimelineSignal) => {
                 self.state.lock().permit(c, perm, privileged)?;
-                self.sync.syncobj_ioctl(op, c, D::FEATURES, arg, ctx)?;
+                self.sync.syncobj_ioctl(op, c, self.driver.info().features, arg, ctx)?;
             }
         }
         Ok(())
     }
 }
-
-/// `ENOSYS`, which Linux returns for dumb-buffer ioctls of a driver without
-/// them. `ddi::Errno` has no named constant for it.
-const ENOSYS: Errno = match Errno::new(sys::errno::ENOSYS) {
-    Some(e) => e,
-    // Unreachable: ENOSYS is 89. EINVAL keeps the constant total.
-    None => Errno::EINVAL,
-};

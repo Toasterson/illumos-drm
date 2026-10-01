@@ -33,13 +33,15 @@ use ddi::prelude::*;
 use ddi::private::fd::FdFlags;
 use drm_uapi as uapi;
 
+use crate::Device;
 use crate::anon_fd::AnonObj;
-use crate::driver::Features;
+use crate::driver::{Driver, Features};
 use crate::fence_dev::SyncCore;
 use crate::gem::{GemCore, GemObject};
 use crate::ioctl::Op;
 use crate::karc::KArc;
 use crate::minor::CloneId;
+use crate::objects::ObjRef;
 use crate::uaccess::{ArgIo, CoreArg, Plain, UserArg};
 
 // SAFETY: integer fields only; see the bindings in drm-uapi.
@@ -58,23 +60,23 @@ const ENOSYS: Errno = match Errno::new(ddi::sys::errno::ENOSYS) {
 
 impl<O: GemObject> SyncCore<O> {
     /// Serves `PRIME_HANDLE_TO_FD` and `PRIME_FD_TO_HANDLE` for file `c`.
-    pub(crate) fn prime_ioctl(
+    pub(crate) fn prime_ioctl<D: Driver<Object = O>>(
         &self,
         op: Op,
         c: CloneId,
         features: Features,
-        gem: Option<&KArc<GemCore<O>>>,
+        dev: &Device<D>,
         arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
-        let gem = match gem {
+        let gem = match dev.gem() {
             Some(g) if features.contains(Features::GEM) => g,
             _ => return Err(ENOSYS),
         };
         self.housekeeping(ctx);
         let r = match op {
             Op::PrimeHandleToFd => self.handle_to_fd(c, gem, arg, ctx),
-            Op::PrimeFdToHandle => self.fd_to_handle(c, gem, arg, ctx),
+            Op::PrimeFdToHandle => self.fd_to_handle(c, dev, gem, arg, ctx),
             _ => Err(Errno::ENOTTY),
         };
         self.publish();
@@ -110,9 +112,10 @@ impl<O: GemObject> SyncCore<O> {
         )
     }
 
-    fn fd_to_handle(
+    fn fd_to_handle<D: Driver<Object = O>>(
         &self,
         c: CloneId,
+        dev: &Device<D>,
         gem: &KArc<GemCore<O>>,
         arg: &CoreArg<'_>,
         ctx: &Sleepable,
@@ -121,12 +124,33 @@ impl<O: GemObject> SyncCore<O> {
         if a.get().flags != 0 {
             return Err(Errno::EINVAL);
         }
-        let obj = match self.lookup(a.get().fd, arg.io(), true, ctx)? {
+        let obj = match self.lookup(a.get().fd, arg.io(), false, ctx)? {
             AnonObj::DmaBuf(g) => g,
             o => {
                 o.put(ctx);
                 return Err(Errno::EINVAL);
             }
+        };
+        let obj = if KArc::ptr_eq(obj.core(), gem) {
+            obj
+        } else {
+            // Another device's buffer (R5a: every device is served by the
+            // one core module). As Linux's drm_gem_prime_fd_to_handle, a
+            // file that imported it before gets its handle again;
+            // otherwise the driver makes an object of this device for it
+            // (gem_prime_import). Two threads of one file importing the same
+            // buffer at once may each make one; Linux serialises that with
+            // the file's PRIME lock.
+            let mine = gem.handle_find(c, |r| r.object().imported_from().is_some_and(|e| e.same(&obj)));
+            if let Some(h) = mine {
+                obj.put(ctx);
+                // SAFETY: a field assignment.
+                unsafe { a.get_mut() }.handle = h;
+                return a.write(arg);
+            }
+            let imported = dev.driver().prime_import(dev, &obj, ctx);
+            obj.put(ctx);
+            imported?
         };
         let handle = gem.handle_find_or_create(c, obj, ctx)?;
         // SAFETY: a field assignment.
