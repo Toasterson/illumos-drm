@@ -161,25 +161,29 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
     let packages = meta["packages"].as_array().ok_or("no packages")?;
     let by_id: BTreeMap<&str, &serde_json::Value> =
         packages.iter().map(|p| (p["id"].as_str().unwrap_or_default(), p)).collect();
-    let root = packages.iter().find(|p| p["name"] == pkg).ok_or(format!("package {pkg} not found"))?;
-    // Walk the resolved graph from the package, so that only crates it
-    // actually links contribute -N flags and mapfiles.
-    let nodes: BTreeMap<&str, Vec<&str>> = meta["resolve"]["nodes"]
-        .as_array()
-        .ok_or("no resolve graph")?
-        .iter()
-        .map(|n| {
-            let deps = n["dependencies"].as_array().into_iter().flatten().filter_map(|d| d.as_str()).collect();
-            (n["id"].as_str().unwrap_or_default(), deps)
-        })
-        .collect();
-    let mut seen = BTreeSet::new();
-    let mut stack = vec![root["id"].as_str().unwrap_or_default()];
-    while let Some(id) = stack.pop() {
-        if seen.insert(id) {
-            stack.extend(nodes.get(id).into_iter().flatten().copied());
-        }
+    packages.iter().find(|p| p["name"] == pkg).ok_or(format!("package {pkg} not found"))?;
+    // The crates the package links, with the features a build of this
+    // package alone resolves (cargo tree -p), so that only crates it
+    // actually links contribute -N flags and mapfiles. cargo metadata's
+    // graph unifies the features of the whole workspace: with it misc/drm
+    // would inherit virtio_gpu's -N misc/virtio.
+    let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["tree", "-p", pkg, "-e", "normal", "--prefix", "none", "-f", "{p}"])
+        .current_dir(workspace_root())
+        .output()
+        .map_err(|e| format!("cargo tree: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("cargo tree -p {pkg}: {}", String::from_utf8_lossy(&out.stderr)));
     }
+    let linked: BTreeSet<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect();
+    let seen: Vec<&str> = by_id
+        .iter()
+        .filter(|(_, p)| linked.contains(p["name"].as_str().unwrap_or_default()))
+        .map(|(id, _)| *id)
+        .collect();
     let mut d = KmodDeps {
         needed: BTreeSet::new(),
         mapfiles: BTreeSet::new(),
@@ -188,6 +192,8 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
         conf: None,
         exports: None,
     };
+    // Local mapfiles with the modules their crate depends on.
+    let mut local: Vec<(Vec<&str>, PathBuf)> = Vec::new();
     for id in seen {
         let Some(p) = by_id.get(id) else { continue };
         let kmod = &p["metadata"]["kmod"];
@@ -200,8 +206,9 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
         for m in kmod["mapfiles"].as_array().into_iter().flatten() {
             d.mapfiles.insert(m.as_str().unwrap_or_default().to_string());
         }
+        let depends: Vec<&str> = kmod["depends"].as_array().into_iter().flatten().filter_map(|n| n.as_str()).collect();
         for m in kmod["local-mapfiles"].as_array().into_iter().flatten() {
-            d.local_mapfiles.insert(workspace_root().join(m.as_str().unwrap_or_default()));
+            local.push((depends.clone(), workspace_root().join(m.as_str().unwrap_or_default())));
         }
         if p["name"] == pkg {
             if let Some(c) = kmod["class"].as_str() {
@@ -218,8 +225,14 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
     }
     // A module does not depend on itself (misc/drm uses drm-facade-sys,
     // which names misc/drm, for the facade's types).
+    // Nor does it take the mapfile of its own exports as undefined symbols.
     let own = format!("{}/{}", d.class, pkg);
     d.needed.remove(&own);
+    for (depends, m) in local {
+        if !depends.contains(&own.as_str()) {
+            d.local_mapfiles.insert(m);
+        }
+    }
     Ok(d)
 }
 
