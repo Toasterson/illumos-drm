@@ -7,8 +7,8 @@
 # (include/drm, the single source of truth):
 #
 #   crates/drm-facade-sys/src/bindings.rs  structures, constants and the
-#                                           functions misc/drm exports (bindgen)
-#   modules/drm/drm.mapfile                 the symbols misc/drm exports
+#                                           functions misc/drm_core exports (bindgen)
+#   modules/drm_core/drm_core.mapfile                 the symbols misc/drm_core exports
 #   tools/facade/facade_layout.c            C half of the layout check
 #   xtask/src/facade_table.rs               Rust half of the layout check
 #                                           (gen_facade.py for the last three)

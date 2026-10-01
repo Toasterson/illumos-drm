@@ -13,12 +13,12 @@
 //   feature of rdrmnull.
 // * `link` reads an `exports` mapfile from the package's
 //   `[package.metadata.kmod]` table and links with `-B reduce -M <file>`,
-//   so that a module other modules depend on (misc/drm) exports only
+//   so that a module other modules depend on (misc/drm_core) exports only
 //   the symbols the mapfile names; `deps` prints it.
 // * `local-mapfiles` in a `[package.metadata.kmod]` table name mapfiles of
 //   this workspace (relative to its root), used like the gate's mapfiles
 //   with `-z defs`; `deps` drops a package's own module from its `-N`
-//   list (misc/drm uses drm-facade-sys for its types).
+//   list (misc/drm_core uses drm-facade-sys for its types).
 // * `facade-dump` and `facade-check` are new (the DRM facade layouts), as
 //   is `symbols`, the symbol-scope check of a linked module.
 //
@@ -110,6 +110,9 @@ struct KmodDeps {
     /// Mapfiles of this workspace (`local-mapfiles`), for `-z defs`.
     local_mapfiles: BTreeSet<PathBuf>,
     class: String,
+    /// The module's name: `[package.metadata.kmod] module`, else the
+    /// package name.
+    module: String,
     conf: Option<PathBuf>,
     /// The package's own symbol-scope mapfile (`exports`), if it has one.
     exports: Option<PathBuf>,
@@ -165,7 +168,7 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
     // The crates the package links, with the features a build of this
     // package alone resolves (cargo tree -p), so that only crates it
     // actually links contribute -N flags and mapfiles. cargo metadata's
-    // graph unifies the features of the whole workspace: with it misc/drm
+    // graph unifies the features of the whole workspace: with it misc/drm_core
     // would inherit virtio_gpu's -N misc/virtio.
     let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["tree", "-p", pkg, "-e", "normal", "--prefix", "none", "-f", "{p}"])
@@ -189,6 +192,7 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
         mapfiles: BTreeSet::new(),
         local_mapfiles: BTreeSet::new(),
         class: "drv".into(),
+        module: pkg.to_string(),
         conf: None,
         exports: None,
     };
@@ -214,6 +218,9 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
             if let Some(c) = kmod["class"].as_str() {
                 d.class = c.to_string();
             }
+            if let Some(m) = kmod["module"].as_str() {
+                d.module = m.to_string();
+            }
             let dir = Path::new(p["manifest_path"].as_str().unwrap_or_default()).parent().ok_or("manifest")?;
             if let Some(c) = kmod["conf"].as_str() {
                 d.conf = Some(dir.join(c));
@@ -223,10 +230,10 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
             }
         }
     }
-    // A module does not depend on itself (misc/drm uses drm-facade-sys,
-    // which names misc/drm, for the facade's types).
+    // A module does not depend on itself (misc/drm_core uses drm-facade-sys,
+    // which names misc/drm_core, for the facade's types).
     // Nor does it take the mapfile of its own exports as undefined symbols.
-    let own = format!("{}/{}", d.class, pkg);
+    let own = format!("{}/{}", d.class, d.module);
     d.needed.remove(&own);
     for (depends, m) in local {
         if !depends.contains(&own.as_str()) {
@@ -256,7 +263,11 @@ fn build(pkg: &str, release: bool, features: Option<&String>) -> Result<(), Stri
     if !st.success() {
         return Err("cargo build failed".into());
     }
-    println!("archive: target/x86_64-illumos-kmod/{}/{pkg}.a", if release { "release" } else { "debug" });
+    println!(
+        "archive: target/x86_64-illumos-kmod/{}/{}.a",
+        if release { "release" } else { "debug" },
+        pkg.replace('-', "_")
+    );
     Ok(())
 }
 
@@ -266,8 +277,9 @@ fn link(pkg: &str) -> Result<(), String> {
     }
     let root = workspace_root();
     let d = deps(pkg)?;
-    let archive = root.join(format!("target/x86_64-illumos-kmod/release/{pkg}.a"));
-    let out = root.join(format!("target/x86_64-illumos-kmod/release/{pkg}"));
+    let archive = root.join(format!("target/x86_64-illumos-kmod/release/{}.a", pkg.replace('-', "_")));
+    let out = root.join(format!("target/x86_64-illumos-kmod/release/{}", d.module));
+    let module = &d.module;
     let mut cmd = Command::new("ld");
     cmd.arg("-ztype=kmod");
     for n in &d.needed {
@@ -295,12 +307,15 @@ fn link(pkg: &str) -> Result<(), String> {
     println!("kernel module: {}", out.display());
     if let Some(c) = d.conf {
         println!(
-            "install the conf file {} as /usr/kernel/drv/{pkg}.conf and the module as /usr/kernel/{}/amd64/{pkg}",
+            "install the conf file {} as /usr/kernel/drv/{module}.conf and the module as /usr/kernel/{}/amd64/{module}",
             c.display(),
             d.class
         );
     } else {
-        println!("install the module as /usr/kernel/{}/amd64/{pkg} (or /kernel/{}/amd64/{pkg})", d.class, d.class);
+        println!(
+            "install the module as /usr/kernel/{}/amd64/{module} (or /kernel/{}/amd64/{module})",
+            d.class, d.class
+        );
     }
     Ok(())
 }

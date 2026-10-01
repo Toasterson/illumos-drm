@@ -16,12 +16,12 @@
 #   drm_r4_test.c     tools/test/drm_r4_test.c
 #   drm/              the headers of tools/uapi/generate.sh
 #   drm-test-lib.sh   tools/test/drm-test-lib.sh
-#   drm.a             from `cargo xtask build drm`, and drm.mapfile
-#                     (modules/drm/drm.mapfile), unless
-#                     misc/drm is installed already
+#   drm_module.a      from `cargo xtask build drm-module`, and drm_core.mapfile
+#                     (modules/drm_core/drm_core.mapfile), unless
+#                     misc/drm_core is installed already
 #
 # virtio_gpu's nodes are card<N> and renderD<128+N> for the device number
-# N it gets from misc/drm, which it shares with every other DRM
+# N it gets from misc/drm_core, which it shares with every other DRM
 # driver of the core; the script finds them through /dev/dri and passes
 # them to drm_r4_test in DRM_CARD and DRM_RENDER.
 #
@@ -186,8 +186,8 @@ drm_core_install || exit 1
 step digest -a sha256 virtio_gpu.a
 # -N misc/virtio: the virtio framework (illumos-kernel-private-virtio-sys);
 # -N fs/specfs: makespecvp, for dma-bufs, sync objects and sync files;
-# -N misc/drm: the DRM core, which every driver links against.
-step ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm -z allextract virtio_gpu.a -o virtio_gpu || exit 1
+# -N misc/drm_core: the DRM core, which every driver links against.
+step ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_core -z allextract virtio_gpu.a -o virtio_gpu || exit 1
 step digest -a sha256 virtio_gpu
 step elfdump -d virtio_gpu
 echo

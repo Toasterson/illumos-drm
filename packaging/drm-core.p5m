@@ -3,34 +3,37 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# IPS manifest of misc/drm (modules/drm), the DRM core of illumos-drm as a
+# IPS manifest of misc/drm_core (modules/drm_core), the DRM core of illumos-drm as a
 # kernel module, with the C facade every DRM driver links against
 # (include/drm): devices, files, GEM objects, PRIME, fences, sync objects
 # and the table of DRM device numbers (formerly misc/drm_minor). Every
-# driver module is linked with -N misc/drm, and its package depends on
+# driver module is linked with -N misc/drm_core, and its package depends on
 # this one. Publish from a directory holding the module linked with its
-# symbol-scope mapfile as kernel/misc/amd64/drm, and this repository's
+# symbol-scope mapfile as kernel/misc/amd64/drm_core, and this repository's
 # LICENSE:
 #
-#   modules/drm/ctf/build-ctf.sh    # drm_facade_ctf.o: the facade's CTF
-#   ld -ztype=kmod -N fs/specfs -B reduce -M modules/drm/drm.mapfile \
-#       -z allextract drm.a -z defaultextract drm_facade_ctf.o \
-#       -o <proto>/kernel/misc/amd64/drm
-#   pkgsend publish -s <repo> -d <proto> -d . packaging/drm.p5m
+#   modules/drm_core/ctf/build-ctf.sh    # drm_facade_ctf.o: the facade's CTF
+#   ld -ztype=kmod -N fs/specfs -B reduce -M modules/drm_core/drm_core.mapfile \
+#       -z allextract drm_module.a -z defaultextract drm_facade_ctf.o \
+#       -o <proto>/kernel/misc/amd64/drm_core
+#   pkgsend publish -s <repo> -d <proto> -d . packaging/drm-core.p5m
 #
-# OpenIndiana's driver/graphics/drm (gfx-drm) delivers a different module
-# at the same path, the C core of its legacy drivers (i915, radeon), whose
-# interface is not this one. The two cannot be installed together: this
-# package excludes that one, and a system that needs gfx-drm's drivers
-# cannot use illumos-drm's until they are ported (R5).
+# The module is misc/drm_core, not misc/drm: OpenIndiana's
+# driver/graphics/drm (gfx-drm) delivers /kernel/misc/amd64/drm, the C
+# core of its legacy drivers (i915, radeon), and libdrm requires that
+# package. Both install and may be loaded at once: no module depends on
+# both, and the two export different symbol sets to different dependents
+# (their facade-style names overlap, e.g. drm_dev_register, so fbt probe
+# names such as fbt::drm_dev_register:entry match both modules; qualify
+# them with the module, fbt:drm_core:drm_dev_register:entry).
 #
 # The module has no device nodes and no driver action; the kernel loads it
 # with the first driver that needs it and refuses to unload it while a
 # driver depends on it or a DRM device is registered.
 #
-set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/illumos-drm@0.0.1,5.11-2026.0.0.0
-set name=pkg.summary value="DRM core and facade of illumos-drm (misc/drm)"
-set name=pkg.description value="misc/drm, the DRM core of illumos-drm as a kernel module: card and render nodes, per-file state, GEM objects, PRIME, fences, sync objects and mode setting for every DRM driver, which uses it through its C interface, the DRM facade, whether written in C or in Rust."
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drm-core@0.0.1,5.11-2026.0.0.0
+set name=pkg.summary value="DRM core and facade of illumos-drm (misc/drm_core)"
+set name=pkg.description value="misc/drm_core, the DRM core of illumos-drm as a kernel module: card and render nodes, per-file state, GEM objects, PRIME, fences, sync objects and mode setting for every DRM driver, which uses it through its C interface, the DRM facade, whether written in C or in Rust."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
 set name=info.source-url value=https://code.aopc.cloud/illumos/illumos-drm
 set name=variant.arch value=i386
@@ -38,6 +41,5 @@ set name=org.opensolaris.consolidation value=userland
 dir  path=kernel owner=root group=sys mode=0755
 dir  path=kernel/misc owner=root group=sys mode=0755
 dir  path=kernel/misc/amd64 owner=root group=sys mode=0755
-file path=kernel/misc/amd64/drm owner=root group=sys mode=0755 reboot-needed=true
-depend fmri=pkg:/driver/graphics/drm type=exclude
+file path=kernel/misc/amd64/drm_core owner=root group=sys mode=0755 reboot-needed=true
 license LICENSE license=MPL-2.0

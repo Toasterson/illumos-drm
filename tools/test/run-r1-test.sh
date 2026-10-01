@@ -22,12 +22,12 @@
 #                    package system/test/libdrm)
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #   drm-test-lib.sh  tools/test/drm-test-lib.sh
-#   drm.a            from `cargo xtask build drm`, and drm.mapfile
-#                    (modules/drm/drm.mapfile), unless misc/drm
+#   drm_module.a     from `cargo xtask build drm-module`, and drm_core.mapfile
+#                    (modules/drm_core/drm_core.mapfile), unless misc/drm_core
 #                    is installed already
 #
 # rdrmnull's nodes are card<N> and renderD<128+N> for the device number N
-# it gets from misc/drm, which other DRM drivers attached at the same
+# it gets from misc/drm_core, which other DRM drivers attached at the same
 # time (virtio_gpu) share; the script finds them through /dev/dri and hands
 # them to the tests in DRM_CARD, DRM_RENDER and DRM_CARD1.
 #
@@ -176,9 +176,9 @@ state before
 drm_core_install || exit 1
 if [ "$DRV" = rdrmnull ]; then
 	step digest -a sha256 rdrmnull.a
-	# -N misc/drm: the DRM core, which every driver links against (it
+	# -N misc/drm_core: the DRM core, which every driver links against (it
 	# depends on fs/specfs itself, for makespecvp).
-	step ld -ztype=kmod -N misc/drm -z allextract rdrmnull.a -o rdrmnull || exit 1
+	step ld -ztype=kmod -N misc/drm_core -z allextract rdrmnull.a -o rdrmnull || exit 1
 fi
 step digest -a sha256 "$DRV"
 step elfdump -d "$DRV"

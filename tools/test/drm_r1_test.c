@@ -45,7 +45,7 @@
 
 /*
  * The nodes under test. Device numbers are shared by every DRM driver
- * (misc/drm), so rdrmnull's devices are card<N> and renderD<128+N>
+ * (misc/drm_core), so rdrmnull's devices are card<N> and renderD<128+N>
  * for whatever N they were given; the run scripts pass them in DRM_CARD
  * and DRM_RENDER, and the driver instance (for the kstats) in
  * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.

@@ -20,12 +20,12 @@
 #   drm_r3_test.c    tools/test/drm_r3_test.c
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #   drm-test-lib.sh  tools/test/drm-test-lib.sh
-#   drm.a            from `cargo xtask build drm`, and drm.mapfile
-#                    (modules/drm/drm.mapfile), unless misc/drm
+#   drm_module.a     from `cargo xtask build drm-module`, and drm_core.mapfile
+#                    (modules/drm_core/drm_core.mapfile), unless misc/drm_core
 #                    is installed already
 #
 # rdrmnull's nodes are card<N> and renderD<128+N> for the device number N
-# it gets from misc/drm (see run-r1-test.sh); modetest opens it by
+# it gets from misc/drm_core (see run-r1-test.sh); modetest opens it by
 # its bus ID, pseudo:rdrmnull@0.
 #
 # modetest is taken from $MODETEST, default /opt/drm-tests/amd64/modetest
@@ -224,8 +224,8 @@ step digest -a sha256 rdrmnull.a
 # -N fs/specfs: makespecvp, for the file descriptors of dma-bufs, sync
 # objects and sync files (illumos-kernel-private-sys), lives in the specfs
 # module, which krtld does not search unless the module depends on it.
-# -N misc/drm: the DRM core, which every driver links against.
-step ld -ztype=kmod -N misc/drm -z allextract rdrmnull.a -o rdrmnull || exit 1
+# -N misc/drm_core: the DRM core, which every driver links against.
+step ld -ztype=kmod -N misc/drm_core -z allextract rdrmnull.a -o rdrmnull || exit 1
 step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo

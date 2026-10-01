@@ -61,7 +61,7 @@
 
 /*
  * The nodes under test. Device numbers are shared by every DRM driver
- * (misc/drm), so rdrmnull's devices are card<N> and renderD<128+N>
+ * (misc/drm_core), so rdrmnull's devices are card<N> and renderD<128+N>
  * for whatever N they were given; the run scripts pass them in DRM_CARD
  * and DRM_RENDER (DRM_CARD1 for the second device), and the driver instance (for the kstats) in
  * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.
@@ -256,7 +256,7 @@ kstat_values(const char *name, const char *const *keys, uint64_t *out, int n)
 	}
 	/*
 	 * A C driver's fences (dma_fence_init on its own structures, as
-	 * cdrmnull's) belong to no device: misc/drm counts them in its own
+	 * cdrmnull's) belong to no device: misc/drm_core counts them in its own
 	 * domain, drm:0:sync, which always holds one fence of its own (the
 	 * signalled stub). Their fences, callbacks and signals are added.
 	 */

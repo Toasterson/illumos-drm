@@ -6,7 +6,7 @@
 
 /*
  * The cross-driver test of illumos-drm R5a: since the DRM core is one
- * kernel module (misc/drm), a buffer, sync object or sync file of one
+ * kernel module (misc/drm_core), a buffer, sync object or sync file of one
  * driver's device can be used by another driver's. Run as root while
  * cdrmnull (the C driver on the facade) and rdrmnull (the Rust driver on
  * the facade) are attached, and optionally virtio_gpu:
@@ -167,9 +167,15 @@ share(struct dev *a, struct dev *b)
 	(void) memset(&ph, 0, sizeof (ph));
 	ph.handle = ha;
 	ph.flags = DRM_CLOEXEC | DRM_RDWR;
+	ph.fd = -1;
 	(void) snprintf(what, sizeof (what), "%s: export it (PRIME_HANDLE_TO_FD)", a->name);
 	check(xioctl(a->fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ph) == 0 && ph.fd >= 0, what);
 	dfd = ph.fd;
+	if (dfd < 0) {
+		(void) munmap((void *)pa, size);
+		gem_close(a->fd, ha);
+		return;
+	}
 
 	(void) memset(&ph, 0, sizeof (ph));
 	ph.fd = dfd;
@@ -235,7 +241,13 @@ selftest(struct dev *c, struct dev *o)
 	(void) memset(&ph, 0, sizeof (ph));
 	ph.handle = ho;
 	ph.flags = DRM_CLOEXEC | DRM_RDWR;
-	check(xioctl(o->fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ph) == 0, "export it");
+	ph.fd = -1;
+	check(xioctl(o->fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ph) == 0 && ph.fd >= 0, "export it");
+	if (ph.fd < 0) {
+		(void) munmap((void *)po, size);
+		gem_close(o->fd, ho);
+		return;
+	}
 	(void) memset(&st, 0, sizeof (st));
 	st.fd = ph.fd;
 	st.flags = CDRMNULL_PRIME_IMPORT;
@@ -264,8 +276,9 @@ selftest(struct dev *c, struct dev *o)
 			(void) munmap((void *)pd, size);
 		(void) memset(&ph, 0, sizeof (ph));
 		ph.fd = st.fd;
-		(void) snprintf(what, sizeof (what), "%s imports cdrmnull's re-export", o->name);
-		check(xioctl(o->fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ph) == 0 && ph.handle != 0, what);
+		(void) snprintf(what, sizeof (what),
+		    "%s imports cdrmnull's re-export as its own object (handle %u)", o->name, ho);
+		check(xioctl(o->fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ph) == 0 && ph.handle == ho, what);
 		if (ph.handle != 0 && ph.handle != ho)
 			gem_close(o->fd, ph.handle);
 		(void) close(st.fd);
@@ -301,6 +314,28 @@ fences(struct dev *a, struct dev *b)
 	check(r == 0, what);
 	(void) drmSyncobjDestroy(b->fd, so);
 	(void) close(nf.fd);
+}
+
+/* cdrmnull's FENCE_SELFTEST: the facade's fence callbacks. */
+static void
+fence_selftest(struct dev *c)
+{
+	struct cdrmnull_fence_selftest ft;
+	uint32_t h = 0;
+	char what[160];
+
+	(void) printf("--- FENCE_SELFTEST\n");
+	check(drmSyncobjCreate(c->fd, 0, &h) == 0 && h != 0, "a sync object for the test");
+	if (h == 0)
+		return;
+	(void) memset(&ft, 0, sizeof (ft));
+	ft.syncobj = h;
+	check(xioctl(c->fd, DRM_IOCTL_CDRMNULL_FENCE_SELFTEST, &ft) == 0, "FENCE_SELFTEST runs");
+	(void) snprintf(what, sizeof (what),
+	    "fence callbacks: self put, remove, signalled, released, queued (0x%x of 0x%x)",
+	    ft.passed, CDRMNULL_FENCE_T_ALL);
+	check(ft.passed == CDRMNULL_FENCE_T_ALL, what);
+	(void) drmSyncobjDestroy(c->fd, h);
 }
 
 int
@@ -342,6 +377,7 @@ main(void)
 	}
 	for (i = 1; i < nd; i++)
 		selftest(&d[0], &d[i]);
+	fence_selftest(&d[0]);
 	fences(&d[0], &d[1]);
 	fences(&d[1], &d[0]);
 	for (i = 0; i < nd; i++)

@@ -3,28 +3,28 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# The guest test of illumos-drm R5a: the DRM core as the module misc/drm
+# The guest test of illumos-drm R5a: the DRM core as the module misc/drm_core
 # with three drivers on its facade at once, rdrmnull and virtio_gpu (Rust,
 # through drm-facade) and cdrmnull (C, drivers/cdrmnull).
 #
-#   A  misc/drm alone: its global symbols are exactly drm.mapfile's, the
+#   A  misc/drm_core alone: its global symbols are exactly drm_core.mapfile's, the
 #      facade's structure layouts as gcc compiles include/drm match the
 #      Rust bindings (tools/facade/facade_layout.c, compared by the caller
 #      with `cargo xtask facade-check`), and it loads and unloads.
 #   B  The three drivers attached together: the device numbers, the R0 to
 #      R2 tests on cdrmnull and on rdrmnull, R3 on rdrmnull, R4 on
 #      virtio_gpu, drm_r5a_test (dma-bufs, sync files and cdrmnull's
-#      PRIME_SELFTEST across drivers), misc/drm refusing to unload while
+#      PRIME_SELFTEST across drivers), misc/drm_core refusing to unload while
 #      any driver depends on it, then the drivers unloading and coming back
 #      in three orders.
 #   C  run-g6-test.sh (rdrmnull twice and virtio_gpu), and run-r1-test.sh
 #      for cdrmnull with two devices.
 #
-# Run as root in a directory that holds drm.a and drm.mapfile, rdrmnull.a,
+# Run as root in a directory that holds drm_module.a and drm_core.mapfile, rdrmnull.a,
 # rdrmnull.conf, rdrmnull-two.conf, virtio_gpu.a, cdrmnull (the module of
 # drivers/cdrmnull/build.sh), cdrmnull.conf, cdrmnull-two.conf,
 # cdrmnull_ioctl.h, facade_mismatch.c, drm_facade_ctf.o (optional, from
-# modules/drm/ctf/build-ctf.sh), the tests drm_r0_test.c to drm_r4_test.c, drm_g6_test.c
+# modules/drm_core/ctf/build-ctf.sh), the tests drm_r0_test.c to drm_r4_test.c, drm_g6_test.c
 # and drm_r5a_test.c, drm-test-lib.sh, run-r1-test.sh, run-r3-test.sh,
 # run-r4-test.sh, run-g6-test.sh, the uAPI headers in drm/ and the facade
 # headers in include/drm/ with tools/facade/facade_layout.c. The machine
@@ -85,17 +85,35 @@ unload() {
 
 attach() {
 	step devfsadm -i "$1"
-	step sh -c "modinfo | grep -E '$1| drm '"
+	step sh -c "modinfo | grep -E '$1| drm_core '"
+	if [ -n "$(modid $1)" ]; then
+		pass "$1 attaches again"
+	else
+		bad "$1 does not attach again"
+	fi
+}
+
+# three_nodes: sets $1 to $6 to the card and render nodes of cdrmnull,
+# rdrmnull and virtio_gpu; fails (and returns 1) unless all six exist.
+three_nodes() {
+	set -- $(nodes cdrmnull@0) $(nodes rdrmnull@0) $(nodes pci1af4,1100@)
+	NODES="$*"
+	if [ $# -eq 6 ]; then
+		pass "the nodes of all three drivers are there: $NODES"
+		return 0
+	fi
+	bad "only $# of the 6 nodes of the three drivers are there: $NODES"
+	return 1
 }
 
 core_refuses() {
-	id=$(modid drm)
+	id=$(modid drm_core)
 	if [ -z "$id" ]; then
-		bad "misc/drm is not loaded while $1 is"
+		bad "misc/drm_core is not loaded while $1 is"
 	elif step modunload -i "$id"; then
-		bad "misc/drm unloaded while $1 depends on it"
+		bad "misc/drm_core unloaded while $1 depends on it"
 	else
-		pass "misc/drm refuses to unload while $1 depends on it"
+		pass "misc/drm_core refuses to unload while $1 depends on it"
 	fi
 }
 
@@ -114,7 +132,8 @@ run_test() {
 }
 
 all_tests() {
-	set -- $(nodes cdrmnull@0) $(nodes rdrmnull@0) $(nodes pci1af4,1100@)
+	three_nodes || return 1
+	set -- $NODES
 	echo "cdrmnull: $1 $2, rdrmnull: $3 $4, virtio_gpu: $5 $6"
 	for t in drm_r0_test drm_r0_probe32 drm_r1_test drm_r1_probe32 drm_r2_test drm_r2_probe32; do
 		run_test $t cdrmnull "$1" "$2"
@@ -138,12 +157,12 @@ all_tests() {
 	fi
 }
 
-# ctf_check: with the CTF shadow linked into misc/drm, mdb -k knows the
+# ctf_check: with the CTF shadow linked into misc/drm_core, mdb -k knows the
 # facade's structures and prints cdrmnull's live drm_device (the first
 # field of its soft state's structure).
 ctf_check() {
 	if [ ! -f drm_facade_ctf.o ]; then
-		echo "no drm_facade_ctf.o: misc/drm has no CTF, no mdb check"
+		echo "no drm_facade_ctf.o: misc/drm_core has no CTF, no mdb check"
 		return 0
 	fi
 	echo "\$ mdb -k: ::print -t struct drm_device, ::sizeof of every facade structure"
@@ -180,7 +199,7 @@ had_dri=no
 [ -d /dev/dri ] && had_dri=yes
 
 echo
-echo "=== A: misc/drm alone"
+echo "=== A: misc/drm_core alone"
 drm_core_install || exit 1
 echo "\$ gcc -S facade_layout.c: the facade's layouts as gcc compiles them"
 gcc -m64 -D_KERNEL -std=gnu99 -I include -S -o - facade_layout.c 2> facade_layout.err |
@@ -204,35 +223,44 @@ for v in major size; do
 	esac
 	cmp -s include/drm/drm_facade_version.h mismatch-$v/include/drm/drm_facade_version.h &&
 	    cmp -s include/drm/drm_device.h mismatch-$v/include/drm/drm_device.h && bad "mismatch-$v: no change"
-	n=$(grep -c facade_mismatch /var/adm/messages)
+	case $v in
+	major) want="facade_mismatch: built for DRM facade 1\.[0-9]*, misc/drm_core provides 0\." ;;
+	size) want="facade_mismatch: struct drm_device is [0-9]* bytes in misc/drm_core, [0-9]* in the driver" ;;
+	esac
+	n=$(grep -c "$want" /var/adm/messages)
 	if step gcc -m64 -std=gnu99 -O2 -D_KERNEL -ffreestanding -mcmodel=kernel -mno-red-zone \
 	    -fno-builtin -mno-mmx -mno-sse -I mismatch-$v/include -c facade_mismatch.c -o mismatch-$v/fm.o &&
-	    step ld -ztype=kmod -N misc/drm -o mismatch-$v/facade_mismatch mismatch-$v/fm.o; then
+	    step ld -ztype=kmod -N misc/drm_core -o mismatch-$v/facade_mismatch mismatch-$v/fm.o; then
 		if step modload ./mismatch-$v/facade_mismatch; then
 			bad "facade_mismatch ($v) loaded"
 			id=$(modid facade_mismatch)
 			[ -n "$id" ] && modunload -i "$id"
 		else
-			wait_log facade_mismatch "$n"
-			grep facade_mismatch /var/adm/messages | tail -1
-			pass "a driver built for another facade ($v) refuses to load"
+			wait_log "$want" "$n"
+			if [ "$(grep -c "$want" /var/adm/messages)" -gt "$n" ]; then
+				grep "$want" /var/adm/messages | tail -1
+				pass "a driver built for another facade ($v) refuses to load with the check's warning"
+			else
+				tail -5 /var/adm/messages
+				bad "facade_mismatch ($v) failed to load without the check's warning"
+			fi
 		fi
 	else
 		bad "facade_mismatch ($v) does not build"
 	fi
 done
-id=$(modid drm)
+id=$(modid drm_core)
 if [ -n "$id" ] && step modunload -i "$id"; then
-	pass "misc/drm unloads with no driver"
+	pass "misc/drm_core unloads with no driver"
 else
-	bad "misc/drm does not unload with no driver"
+	bad "misc/drm_core does not unload with no driver"
 fi
 
 echo
 echo "=== Link the Rust drivers, build the tests"
-step ld -ztype=kmod -N misc/drm -z allextract rdrmnull.a -o rdrmnull || exit 1
-step ld -ztype=kmod -N misc/virtio -N misc/drm -z allextract virtio_gpu.a -o virtio_gpu || exit 1
-step modload -p misc/drm
+step ld -ztype=kmod -N misc/drm_core -z allextract rdrmnull.a -o rdrmnull || exit 1
+step ld -ztype=kmod -N misc/virtio -N misc/drm_core -z allextract virtio_gpu.a -o virtio_gpu || exit 1
+step modload -p misc/drm_core
 step modload /kernel/misc/amd64/virtio
 for m in rdrmnull virtio_gpu cdrmnull; do
 	step digest -a sha256 $m
@@ -243,20 +271,28 @@ for m in rdrmnull virtio_gpu cdrmnull; do
 	for s in $(cat undefined-$m.txt); do
 		w=$(echo "$s::whatis" | mdb -k 2>&1)
 		case $w in
-		*"in drm's"*) from_drm=$((from_drm + 1)) ;;
+		*"in drm_core's"*) from_drm=$((from_drm + 1)) ;;
 		*" is "*) ;;
 		*) echo "unresolved: $s"; unresolved=$((unresolved + 1)) ;;
 		esac
 	done
-	echo "$m: $(wc -l < undefined-$m.txt) undefined symbols, $from_drm from misc/drm, $unresolved not in the running kernel"
+	echo "$m: $(wc -l < undefined-$m.txt) undefined symbols, $from_drm from misc/drm_core, $unresolved not in the running kernel"
 	[ $unresolved -eq 0 ] && pass "$m: every undefined symbol resolves" || bad "$m: unresolved symbols"
 	# A driver must not carry the core: it may compile drm-core's value
 	# helpers (modes, dumb layouts, kmem), but no symbol of the stateful
-	# modules that only misc/drm builds (feature "kernel").
-	core='8drm_core(3gem|5fence|9fence_dev|4resv|5slots|7syncobj|14syncobj_ioctl|5prime|5ioctl|6device|5state|8anon_fd|5minor|7objects|6idmap|7dmaerr|4caps|9sync_file|8uaccess|7wwmutex|6driver)'
-	n=$(nm $m | awk -F'|' -v re="$core" '$5 ~ /GLOB/ && $7 !~ /UNDEF/ && $8 ~ re' | wc -l)
-	[ "$n" -eq 0 ] && pass "$m defines no core symbol" || bad "$m defines core symbols"
+	# modules that only misc/drm_core builds (feature "kernel").
+	core_symbols $m > core-symbols-$m.txt
+	if [ -s core-symbols-$m.txt ]; then
+		head -20 core-symbols-$m.txt
+		bad "$m defines $(wc -l < core-symbols-$m.txt) core symbols"
+	else
+		pass "$m defines no core symbol"
+	fi
 done
+# The pattern's control: the core's own archive matches it.
+n=$(core_symbols drm_module.a | wc -l)
+[ "$n" -gt 0 ] && pass "the core-symbol pattern finds $n symbols in drm_module.a" ||
+    bad "the core-symbol pattern finds nothing in drm_module.a"
 for t in r0 r1 r2 r3; do
 	step gcc -m64 -Wall -I drm -I /usr/include/libdrm -o drm_${t}_test drm_${t}_test.c \
 	    -L/usr/lib/xorg/amd64 -R/usr/lib/xorg/amd64 -ldrm -lkstat -lpthread -lsocket || exit 1
@@ -269,6 +305,10 @@ step gcc -m64 -Wall -I drm -I . -o drm_r5a_test drm_r5a_test.c \
 
 echo
 echo "=== B: cdrmnull, rdrmnull and virtio_gpu together"
+# cdrmnull's detach races drm_dev_unregister against facade calls from a
+# thread-level and a soft-interrupt periodic handler and logs the count.
+race_re='cdrmnull[0-9]*: unregister (0) raced [0-9]* facade calls'
+races0=$(grep -c "$race_re" /var/adm/messages)
 step cp cdrmnull /usr/kernel/drv/amd64/cdrmnull || exit 1
 step cp cdrmnull.conf /usr/kernel/drv/cdrmnull.conf || exit 1
 step add_drv -m '* 0666 root sys' cdrmnull || exit 1
@@ -295,17 +335,18 @@ for order in "cdrmnull rdrmnull virtio_gpu" "virtio_gpu cdrmnull rdrmnull" "rdrm
 		left=$(modinfo | awk '$6 ~ /^(cdrmnull|rdrmnull|virtio_gpu)$/' | wc -l)
 		[ "$left" -gt 0 ] && core_refuses "$left driver(s)"
 	done
-	id=$(modid drm)
+	id=$(modid drm_core)
 	if [ -n "$id" ] && step modunload -i "$id"; then
-		pass "misc/drm unloads after the drivers ($order)"
+		pass "misc/drm_core unloads after the drivers ($order)"
 	else
-		bad "misc/drm does not unload after the drivers ($order)"
+		bad "misc/drm_core does not unload after the drivers ($order)"
 	fi
 	for d in "$@"; do
 		attach $d
 	done
 	step ls -l /dev/dri
-	set -- $(nodes cdrmnull@0) $(nodes rdrmnull@0) $(nodes pci1af4,1100@)
+	three_nodes || continue
+	set -- $NODES
 	run_test drm_r1_test cdrmnull "$1" "$2"
 	step env DRM_CARD_C="$1" DRM_CARD_R="$3" DRM_CARD_V="$5" ./drm_r5a_test > drm_r5a_test.out 2>&1
 	grep -E '^FAIL|^drm_r5a_test:' drm_r5a_test.out
@@ -326,6 +367,14 @@ step devfsadm -C
 remove_dri_links cdrmnull@
 remove_dri_links rdrmnull@
 remove_dri_links pci1af4,1100@
+wait_log "$race_re" $((races0 + 3))
+races=$(($(grep -c "$race_re" /var/adm/messages) - races0))
+grep "$race_re" /var/adm/messages | tail -$races
+if [ $races -ge 4 ] && ! grep "$race_re" /var/adm/messages | tail -$races | grep -q ' raced 0 facade'; then
+	pass "cdrmnull unregistered $races times while facade calls raced it"
+else
+	bad "cdrmnull unregistered $races times while facade calls raced it (expected 4, each with calls)"
+fi
 
 echo
 echo "=== C: run-g6-test.sh and run-r1-test.sh for cdrmnull"
@@ -339,7 +388,6 @@ grep -q 'run-r1-test: fail=0' run-r1-cdrmnull.out && pass "run-r1-test.sh for cd
 
 echo
 echo "=== Clean up"
-DRM_CORE_OURS=yes
 drm_core_remove || fail=1
 [ $had_dri = no ] && [ -d /dev/dri ] && step rmdir /dev/dri
 step devfsadm -C
