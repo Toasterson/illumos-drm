@@ -16,12 +16,12 @@
 #   drm_r4_test.c     tools/test/drm_r4_test.c
 #   drm/              the headers of tools/uapi/generate.sh
 #   drm-test-lib.sh   tools/test/drm-test-lib.sh
-#   drm_minor.a       from `cargo xtask build drm_minor`, and drm_minor.mapfile
-#                     (modules/drm-minor/exports.mapfile), unless
-#                     misc/drm_minor is installed already
+#   drm.a             from `cargo xtask build drm`, and drm.mapfile
+#                     (modules/drm/drm.mapfile), unless
+#                     misc/drm is installed already
 #
 # virtio_gpu's nodes are card<N> and renderD<128+N> for the device number
-# N it gets from misc/drm_minor, which it shares with every other DRM
+# N it gets from misc/drm, which it shares with every other DRM
 # driver of the core; the script finds them through /dev/dri and passes
 # them to drm_r4_test in DRM_CARD and DRM_RENDER.
 #
@@ -182,12 +182,12 @@ step uname -a
 step sh -c 'prtconf -v 2>/dev/null | grep -i -B2 -A2 "pci1af4,1050" | head -20'
 step devfsadm -C
 state before
-drm_minor_install || exit 1
+drm_core_install || exit 1
 step digest -a sha256 virtio_gpu.a
 # -N misc/virtio: the virtio framework (illumos-kernel-private-virtio-sys);
 # -N fs/specfs: makespecvp, for dma-bufs, sync objects and sync files;
-# -N misc/drm_minor: the DRM device numbers every driver shares.
-step ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_minor -z allextract virtio_gpu.a -o virtio_gpu || exit 1
+# -N misc/drm: the DRM core, which every driver links against.
+step ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm -z allextract virtio_gpu.a -o virtio_gpu || exit 1
 step digest -a sha256 virtio_gpu
 step elfdump -d virtio_gpu
 echo
@@ -250,7 +250,7 @@ step devfsadm -C
 # /dev/dri links to virtio_gpu's nodes, and the directory if the test made it.
 remove_dri_links pci1af4,1100@
 [ $had_dri = no ] && [ -d /dev/dri ] && step rmdir /dev/dri
-drm_minor_remove || fail=1
+drm_core_remove || fail=1
 state after
 if cmp -s state-before.etc state-after.etc && cmp -s state-before.devices state-after.devices; then
 	echo "PASS /etc driver files and /devices are as before"

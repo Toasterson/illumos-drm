@@ -20,12 +20,12 @@
 #   drm_r3_test.c    tools/test/drm_r3_test.c
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #   drm-test-lib.sh  tools/test/drm-test-lib.sh
-#   drm_minor.a      from `cargo xtask build drm_minor`, and drm_minor.mapfile
-#                    (modules/drm-minor/exports.mapfile), unless misc/drm_minor
+#   drm.a            from `cargo xtask build drm`, and drm.mapfile
+#                    (modules/drm/drm.mapfile), unless misc/drm
 #                    is installed already
 #
 # rdrmnull's nodes are card<N> and renderD<128+N> for the device number N
-# it gets from misc/drm_minor (see run-r1-test.sh); modetest opens it by
+# it gets from misc/drm (see run-r1-test.sh); modetest opens it by
 # its bus ID, pseudo:rdrmnull@0.
 #
 # modetest is taken from $MODETEST, default /opt/drm-tests/amd64/modetest
@@ -67,7 +67,9 @@ ETC="/etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/driver_classes 
 state() {
 	# $1: before or after
 	digest -a sha256 $ETC > "state-$1.etc"
-	find /devices -print | sort > "state-$1.devices"
+	# The clone@0 nodes of idle drivers come and go with devfs (see the
+	# devfsadm -C below); they are not the test's.
+	find /devices -print | grep -v "^/devices/pseudo/clone@0:" | sort > "state-$1.devices"
 	# The links only: the directory's own line changes whenever a link
 	# comes and goes, and it may exist before the test (another driver).
 	ls -l /dev/dri 2>&1 | grep -v '^total' > "state-$1.dri"
@@ -217,13 +219,13 @@ step uname -a
 # devfsadm -C.
 step devfsadm -C
 state before
-drm_minor_install || exit 1
+drm_core_install || exit 1
 step digest -a sha256 rdrmnull.a
 # -N fs/specfs: makespecvp, for the file descriptors of dma-bufs, sync
 # objects and sync files (illumos-kernel-private-sys), lives in the specfs
 # module, which krtld does not search unless the module depends on it.
-# -N misc/drm_minor: the DRM device numbers every driver shares.
-step ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract rdrmnull.a -o rdrmnull || exit 1
+# -N misc/drm: the DRM core, which every driver links against.
+step ld -ztype=kmod -N misc/drm -z allextract rdrmnull.a -o rdrmnull || exit 1
 step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo
@@ -343,7 +345,7 @@ if [ -d /dev/dri ]; then
 	remove_dri_links rdrmnull@
 	[ $had_dri = no ] && step rmdir /dev/dri
 fi
-drm_minor_remove || fail=1
+drm_core_remove || fail=1
 state after
 for f in etc devices dri; do
 	if cmp -s "state-before.$f" "state-after.$f"; then

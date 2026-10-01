@@ -10,15 +10,15 @@
 # number N (the lowest free one), card<N> and renderD<128+N> under
 # /dev/dri, libdrm must list them all (drmdevice, getsundev), the tests of
 # R0 to R4 and drm_g6_test must pass on each, the drivers must unload in
-# every order without a panic, misc/drm_minor must refuse to unload while
+# every order without a panic, misc/drm must refuse to unload while
 # a driver depends on it, and numbers must be reused after a reload.
 # Then the per-milestone scripts run in the mixed configuration:
 # run-r4-test.sh (KEEP=1), run-r1-test.sh with two rdrmnull devices and
 # run-r3-test.sh while virtio_gpu stays attached.
 #
 # Run as root in a directory that holds rdrmnull.a, virtio_gpu.a and
-# drm_minor.a (`cargo xtask build ...`), drm_minor.mapfile
-# (modules/drm-minor/exports.mapfile), rdrmnull.conf,
+# drm.a (`cargo xtask build ...`), drm.mapfile
+# (modules/drm/drm.mapfile), rdrmnull.conf,
 # tools/test/rdrmnull-two.conf, the tests drm_r0_test.c to drm_r4_test.c
 # and drm_g6_test.c, drm-test-lib.sh, run-r1-test.sh, run-r3-test.sh,
 # run-r4-test.sh and the headers of tools/uapi/generate.sh in drm/. The
@@ -53,7 +53,8 @@ ETC="/etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/driver_classes 
 
 state() {
 	digest -a sha256 $ETC > "g6-state-$1.etc"
-	find /devices -print | sort > "g6-state-$1.devices"
+	# The clone@0 nodes of idle drivers come and go with devfs.
+	find /devices -print | grep -v "^/devices/pseudo/clone@0:" | sort > "g6-state-$1.devices"
 	cp /etc/path_to_inst "g6-state-$1.path_to_inst"
 	echo "\$ state $1"
 	cat "g6-state-$1.etc"
@@ -191,19 +192,19 @@ unload() {
 }
 
 minor_refuses() {
-	id=$(modid drm_minor)
+	id=$(modid drm)
 	if [ -z "$id" ]; then
-		bad "misc/drm_minor is not loaded while $1 is"
+		bad "misc/drm is not loaded while $1 is"
 	elif step modunload -i "$id"; then
-		bad "misc/drm_minor unloaded while $1 depends on it"
+		bad "misc/drm unloaded while $1 depends on it"
 	else
-		pass "misc/drm_minor refuses to unload while $1 depends on it"
+		pass "misc/drm refuses to unload while $1 depends on it"
 	fi
 }
 
 attach() {
 	step devfsadm -i "$1"
-	step sh -c "modinfo | grep -E '$1|drm_minor'"
+	step sh -c "modinfo | grep -E '$1| drm '"
 }
 
 [ -f REVISION ] && step cat REVISION
@@ -216,9 +217,9 @@ had_dri=no
 
 echo
 echo "=== Link and check the modules"
-drm_minor_install || exit 1
-step ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract rdrmnull.a -o rdrmnull || exit 1
-step ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_minor -z allextract virtio_gpu.a -o virtio_gpu || exit 1
+drm_core_install || exit 1
+step ld -ztype=kmod -N misc/drm -z allextract rdrmnull.a -o rdrmnull || exit 1
+step ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm -z allextract virtio_gpu.a -o virtio_gpu || exit 1
 step modload /kernel/misc/amd64/virtio
 for m in rdrmnull virtio_gpu; do
 	step digest -a sha256 $m.a $m
@@ -233,12 +234,12 @@ for m in rdrmnull virtio_gpu; do
 	done
 	echo "$m: $(wc -l < undefined-$m.txt) undefined symbols, $unresolved not in the running kernel"
 	[ $unresolved -eq 0 ] || exit 1
-	for s in drm_minor_alloc drm_minor_free; do
+	for s in drm_dev_register drm_open drm_gem_object_init; do
 		w=$(echo "$s::whatis" | mdb -k 2>&1)
 		echo "$w"
 		case $w in
-		*"in drm_minor's"*) ;;
-		*) bad "$s does not resolve from drm_minor" ;;
+		*"in drm's"*) ;;
+		*) bad "$s does not resolve from misc/drm" ;;
 		esac
 	done
 done
@@ -316,20 +317,20 @@ listing 3
 r4test /dev/dri/card0 /dev/dri/renderD128
 unload rdrmnull rdrmnull@
 unload virtio_gpu pci1af4,1100@
-id=$(modid drm_minor)
+id=$(modid drm)
 if [ -n "$id" ] && step modunload -i "$id"; then
-	pass "misc/drm_minor unloads once no driver depends on it"
+	pass "misc/drm unloads once no driver depends on it"
 else
-	bad "misc/drm_minor does not unload with no driver loaded"
+	bad "misc/drm does not unload with no driver loaded"
 fi
 
 echo
-echo "=== B: two rdrmnull devices first (misc/drm_minor loads with them), then virtio_gpu"
+echo "=== B: two rdrmnull devices first (misc/drm loads with them), then virtio_gpu"
 attach rdrmnull
-if [ -n "$(modid drm_minor)" ]; then
-	pass "loading rdrmnull loaded misc/drm_minor (its -N dependency)"
+if [ -n "$(modid drm)" ]; then
+	pass "loading rdrmnull loaded misc/drm (its -N dependency)"
 else
-	bad "misc/drm_minor was not loaded with rdrmnull"
+	bad "misc/drm was not loaded with rdrmnull"
 fi
 expect rdrmnull@0 0
 expect rdrmnull@1 1
@@ -345,15 +346,15 @@ rtests /dev/dri/card0 /dev/dri/renderD128 0 /dev/dri/card1
 r4test /dev/dri/card2 /dev/dri/renderD130
 minor_refuses "rdrmnull and virtio_gpu"
 echo
-echo "=== B: virtio_gpu unloads first, then rdrmnull, then misc/drm_minor"
+echo "=== B: virtio_gpu unloads first, then rdrmnull, then misc/drm"
 unload virtio_gpu pci1af4,1100@
 minor_refuses rdrmnull
 unload rdrmnull rdrmnull@
-id=$(modid drm_minor)
+id=$(modid drm)
 if [ -n "$id" ] && step modunload -i "$id"; then
-	pass "misc/drm_minor unloads after both drivers"
+	pass "misc/drm unloads after both drivers"
 else
-	bad "misc/drm_minor does not unload after both drivers"
+	bad "misc/drm does not unload after both drivers"
 fi
 
 echo
@@ -364,8 +365,8 @@ step rm -f /usr/kernel/drv/amd64/rdrmnull /usr/kernel/drv/rdrmnull.conf /kernel/
 step devfsadm -C
 remove_dri_links rdrmnull@
 remove_dri_links pci1af4,1100@
-step sh -c 'modinfo | grep -E "rdrmnull|virtio_gpu|drm_minor" || echo "none loaded"'
-step sh -c 'dmesg 2>/dev/null | grep -i drm_minor | tail -5; grep -i "drm_minor" /var/adm/messages | tail -5'
+step sh -c 'modinfo | grep -E "rdrmnull|virtio_gpu| drm " || echo "none loaded"'
+step sh -c 'dmesg 2>/dev/null | grep -i "drm:" | tail -5; grep -i "drm:" /var/adm/messages | tail -5'
 
 echo
 echo "=== C: the milestone scripts with virtio_gpu and rdrmnull attached together"
@@ -389,7 +390,7 @@ remove_dri_links pci1af4,1100@
 echo
 echo "=== Clean up"
 DRM_MINOR_OURS=yes
-drm_minor_remove || fail=1
+drm_core_remove || fail=1
 [ $had_dri = no ] && [ -d /dev/dri ] && step rmdir /dev/dri
 # devfs drops the clone@0 nodes of idle drivers a while after devfsadm
 # made them; make them again before both snapshots (as run-r1-test.sh).

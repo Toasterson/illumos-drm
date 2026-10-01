@@ -40,7 +40,7 @@
 
 /*
  * The nodes under test. Device numbers are shared by every DRM driver
- * (misc/drm_minor), so rdrmnull's devices are card<N> and renderD<128+N>
+ * (misc/drm), so rdrmnull's devices are card<N> and renderD<128+N>
  * for whatever N they were given; the run scripts pass them in DRM_CARD
  * and DRM_RENDER, and the driver instance (for the kstats and the bus ID) in
  * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.
@@ -49,6 +49,12 @@ static const char *card_path __attribute__((unused)) = "/dev/dri/card0";
 static const char *render_path __attribute__((unused)) = "/dev/dri/renderD128";
 static int drm_instance __attribute__((unused));
 static char busid_str[32] = "pseudo:rdrmnull@0";
+
+/*
+ * The driver under test (DRM_DRIVER): rdrmnull, or cdrmnull, its C port on
+ * the facade (milestone R5a). Its name is also its kstat module.
+ */
+static const char *drv_name = "rdrmnull";
 
 static void nodes_from_env(void) __attribute__((constructor));
 static void
@@ -62,7 +68,9 @@ nodes_from_env(void)
 		render_path = s;
 	if ((s = getenv("DRM_INSTANCE")) != NULL && *s != '\0')
 		drm_instance = atoi(s);
-	(void) snprintf(busid_str, sizeof (busid_str), "pseudo:rdrmnull@%d", drm_instance);
+	if ((s = getenv("DRM_DRIVER")) != NULL && *s != '\0')
+		drv_name = s;
+	(void) snprintf(busid_str, sizeof (busid_str), "pseudo:%s@%d", drv_name, drm_instance);
 }
 
 #define	CARD	card_path
@@ -169,9 +177,10 @@ test_version(int fd, const char *node)
 	(void) printf("INFO version %d.%d.%d name=\"%s\" date=\"%s\" desc=\"%s\"\n",
 	    v->version_major, v->version_minor, v->version_patchlevel,
 	    v->name, v->date, v->desc);
-	check(strcmp(v->name, "rdrmnull") == 0 && v->version_major == 1 &&
-	    v->version_minor == 0 && strcmp(v->date, "20260928") == 0 &&
-	    v->name_len == 8, "version fields are those of rdrmnull");
+	check(strcmp(v->name, drv_name) == 0 && v->version_major == 1 &&
+	    v->version_minor == 0 &&
+	    strcmp(v->date, strcmp(drv_name, "cdrmnull") == 0 ? "20261001" : "20260928") == 0 &&
+	    v->name_len == (int)strlen(drv_name), "version fields are those of the driver under test");
 	drmFreeVersion(v);
 }
 
@@ -424,8 +433,8 @@ main(int argc, char **argv)
 	 * own card node, again as the first open.
 	 */
 	(void) printf("INFO nodes under test: %s %s, instance %d, bus ID %s\n", CARD, RENDER, drm_instance, BUSID);
-	fd = drmOpen("rdrmnull", NULL);
-	check(fd >= 0, "drmOpen(\"rdrmnull\", NULL) as root");
+	fd = drmOpen(drv_name, NULL);
+	check(fd >= 0, "drmOpen(driver name, NULL) as root");
 	if (fd < 0)
 		return (1);
 	print_minor("drmOpen", fd);

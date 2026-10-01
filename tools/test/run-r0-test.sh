@@ -11,12 +11,12 @@
 #   drm_r0_test.c    tools/test/drm_r0_test.c
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #   drm-test-lib.sh  tools/test/drm-test-lib.sh
-#   drm_minor.a      from `cargo xtask build drm_minor`, and drm_minor.mapfile
-#                    (modules/drm-minor/exports.mapfile), unless misc/drm_minor
+#   drm.a            from `cargo xtask build drm`, and drm.mapfile
+#                    (modules/drm/drm.mapfile), unless misc/drm
 #                    is installed already
 #
 # rdrmnull's nodes are card<N> and renderD<128+N> for the device number N
-# it gets from misc/drm_minor (see run-r1-test.sh).
+# it gets from misc/drm (see run-r1-test.sh).
 #
 # The machine needs gcc and the libdrm 2.4.109 library in /usr/lib/xorg/amd64
 # (x11/library/libdrm). The script changes nothing outside this directory
@@ -43,13 +43,13 @@ had_dri=no
 [ -d /dev/dri ] && had_dri=yes
 
 step uname -a
-drm_minor_install || exit 1
+drm_core_install || exit 1
 step digest -a sha256 rdrmnull.a
 # -N fs/specfs: makespecvp, for the file descriptors of dma-bufs, sync
 # objects and sync files (illumos-kernel-private-sys), lives in the specfs
 # module, which krtld does not search unless the module depends on it.
-# -N misc/drm_minor: the DRM device numbers every driver shares.
-step ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract rdrmnull.a -o rdrmnull || exit 1
+# -N misc/drm: the DRM core, which every driver links against.
+step ld -ztype=kmod -N misc/drm -z allextract rdrmnull.a -o rdrmnull || exit 1
 step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo
@@ -138,7 +138,7 @@ if [ -d /dev/dri ]; then
 	remove_dri_links rdrmnull@
 	[ $had_dri = no ] && step rmdir /dev/dri
 fi
-drm_minor_remove || fail=1
+drm_core_remove || fail=1
 step sh -c 'ls -la /dev/dri 2>&1; grep -n rdrmnull /etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/devlink.tab || echo "no rdrmnull entries in /etc"'
 echo
 echo "run-r0-test: fail=$fail"
