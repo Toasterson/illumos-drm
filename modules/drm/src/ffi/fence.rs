@@ -209,6 +209,16 @@ fn new_core(fence: Fence) -> Option<KArc<FenceCore>> {
     KArc::try_new(FenceCore { fence, cbs: Spin::new(KVec::new()) }).ok()
 }
 
+/// Publishes the counters of the module's fence domain (kstat
+/// `drm:0:sync`), in thread context only (the kstat's lock is a thread
+/// lock); the domain's drain task publishes what interrupt-context calls
+/// changed.
+fn publish_module() {
+    if let ddi::private::Context::Sleep(_) = ddi::private::current_context() {
+        crate::module_fences().publish();
+    }
+}
+
 /// A new structure for a core fence, with one reference; NULL without
 /// memory. Any context.
 pub(crate) fn proxy(fence: Fence) -> *mut f::dma_fence {
@@ -271,7 +281,10 @@ pub unsafe extern "C" fn dma_fence_init(
         Ctx::Atomic(_) => Fence::try_new(domain, context, seqno).ok(),
     });
     match made.and_then(new_core) {
-        Some(fc) => init_tail(fence, fc),
+        Some(fc) => {
+            init_tail(fence, fc);
+            publish_module();
+        }
         None => {
             // Nothing may wait for it forever: signalled, with an error.
             // SAFETY: as above.
@@ -295,6 +308,7 @@ pub unsafe extern "C" fn dma_fence_signal(fence: *mut f::dma_fence) {
     super::with_ctx(|ctx| c.fence.signal(ctx));
     // SAFETY: as above.
     unsafe { mark_signaled(fence) };
+    publish_module();
 }
 
 #[unsafe(no_mangle)]
@@ -344,6 +358,7 @@ pub unsafe extern "C" fn dma_fence_put(fence: *mut f::dma_fence) {
             // handlers may call, and FenceCore has no kernel lock.
             drop(KArc::from_raw(NonNull::new_unchecked(p as *mut FenceCore)));
         }
+        publish_module();
         let ops = (*fence).ops;
         if !ops.is_null()
             && let Some(rel) = (*ops).release
