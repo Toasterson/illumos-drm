@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/drm-uapi",
     "crates/drm-minor-sys",
+    "crates/drm-facade-sys",
     "crates/drm",
     "modules/drm-minor",
     "examples/rdrmnull",
@@ -12,6 +13,7 @@ members = [
 default-members = [
     "crates/drm-uapi",
     "crates/drm-minor-sys",
+    "crates/drm-facade-sys",
     "crates/drm",
     "modules/drm-minor",
     "examples/rdrmnull",
@@ -29,6 +31,7 @@ rust-version = "1.97"
 drm-uapi = { path = "crates/drm-uapi" }
 drm = { path = "crates/drm" }
 drm-minor-sys = { path = "crates/drm-minor-sys" }
+drm-facade-sys = { path = "crates/drm-facade-sys" }
 # illumos-ddi at the head of its r4-virtio branch: its r2-private-fd
 # branch (clone opens, the devmap(9E) entry point, OwnNode, chpoll(9E),
 # the private tier for dma-bufs, sync objects and sync files, PollBox)

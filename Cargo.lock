@@ -28,6 +28,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "drm-facade-sys"
+version = "0.0.1"
+
+[[package]]
 name = "drm-minor-sys"
 version = "0.0.1"
 
@@ -180,6 +184,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.1"
 dependencies = [
+ "drm-facade-sys",
  "drm-uapi",
  "serde_json",
 ]

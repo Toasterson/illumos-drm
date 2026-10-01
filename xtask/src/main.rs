@@ -13,8 +13,14 @@
 //   feature of rdrmnull.
 // * `link` reads an `exports` mapfile from the package's
 //   `[package.metadata.kmod]` table and links with `-B reduce -M <file>`,
-//   so that a module other modules depend on (misc/drm_minor) exports only
+//   so that a module other modules depend on (misc/drm) exports only
 //   the symbols the mapfile names; `deps` prints it.
+// * `local-mapfiles` in a `[package.metadata.kmod]` table name mapfiles of
+//   this workspace (relative to its root), used like the gate's mapfiles
+//   with `-z defs`; `deps` drops a package's own module from its `-N`
+//   list (misc/drm uses drm-facade-sys for its types).
+// * `facade-dump` and `facade-check` are new (the DRM facade layouts), as
+//   is `symbols`, the symbol-scope check of a linked module.
 //
 // Keep build, link, deps and kernel-check in step with upstream when the
 // pinned illumos-ddi revision moves.
@@ -28,12 +34,16 @@
 //! cargo xtask kernel-check --emit | ssh root@host mdb -k | cargo xtask kernel-check --verify -
 //! cargo xtask uapi-dump              # sizes, offsets and ioctl numbers of drm-uapi
 //! cargo xtask uapi-check <file>      # compare with the output of tools/uapi/drm_layout.c
+//! cargo xtask facade-dump            # sizes and offsets of drm-facade-sys
+//! cargo xtask facade-check <file>    # compare with tools/facade/facade_layout.c (gcc -S)
+//! cargo xtask symbols <module> <mapfile>  # on illumos: global symbols = the mapfile's
 //! ```
 //!
 //! The `-N` dependencies and the mapfile names are collected from the
 //! `[package.metadata.kmod]` table of every crate in the dependency graph,
 //! as in illumos-ddi (section 6 of its `docs/DESIGN.md`).
 
+mod facade_table;
 mod kernel_check;
 mod uapi_compat;
 mod uapi_table;
@@ -59,6 +69,7 @@ fn main() -> ExitCode {
         [cmd, pkg] if cmd == "deps" => deps(pkg).map(|d| {
             println!("-N: {:?}", d.needed);
             println!("mapfiles: {:?}", d.mapfiles);
+            println!("local mapfiles: {:?}", d.local_mapfiles);
             println!("class: {}", d.class);
             println!("exports: {:?}", d.exports);
         }),
@@ -70,9 +81,18 @@ fn main() -> ExitCode {
             Ok(())
         }
         [cmd, file] if cmd == "uapi-check" => uapi_check(file),
+        [cmd] if cmd == "facade-dump" => {
+            for l in facade_table::lines() {
+                println!("{l}");
+            }
+            Ok(())
+        }
+        [cmd, file] if cmd == "facade-check" => facade_check(file),
+        [cmd, module, mapfile] if cmd == "symbols" => symbols(module, mapfile),
         _ => Err("usage: cargo xtask (build [--debug] [--features LIST]|link|deps) <package> \
                   | kernel-check --emit|--verify FILE \
-                  | uapi-dump | uapi-check FILE"
+                  | uapi-dump | uapi-check FILE | facade-dump | facade-check FILE \
+                  | symbols MODULE MAPFILE"
             .into()),
     };
     match r {
@@ -87,6 +107,8 @@ fn main() -> ExitCode {
 struct KmodDeps {
     needed: BTreeSet<String>,
     mapfiles: BTreeSet<String>,
+    /// Mapfiles of this workspace (`local-mapfiles`), for `-z defs`.
+    local_mapfiles: BTreeSet<PathBuf>,
     class: String,
     conf: Option<PathBuf>,
     /// The package's own symbol-scope mapfile (`exports`), if it has one.
@@ -158,8 +180,14 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
             stack.extend(nodes.get(id).into_iter().flatten().copied());
         }
     }
-    let mut d =
-        KmodDeps { needed: BTreeSet::new(), mapfiles: BTreeSet::new(), class: "drv".into(), conf: None, exports: None };
+    let mut d = KmodDeps {
+        needed: BTreeSet::new(),
+        mapfiles: BTreeSet::new(),
+        local_mapfiles: BTreeSet::new(),
+        class: "drv".into(),
+        conf: None,
+        exports: None,
+    };
     for id in seen {
         let Some(p) = by_id.get(id) else { continue };
         let kmod = &p["metadata"]["kmod"];
@@ -171,6 +199,9 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
         }
         for m in kmod["mapfiles"].as_array().into_iter().flatten() {
             d.mapfiles.insert(m.as_str().unwrap_or_default().to_string());
+        }
+        for m in kmod["local-mapfiles"].as_array().into_iter().flatten() {
+            d.local_mapfiles.insert(workspace_root().join(m.as_str().unwrap_or_default()));
         }
         if p["name"] == pkg {
             if let Some(c) = kmod["class"].as_str() {
@@ -185,6 +216,10 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
             }
         }
     }
+    // A module does not depend on itself (misc/drm uses drm-facade-sys,
+    // which names misc/drm, for the facade's types).
+    let own = format!("{}/{}", d.class, pkg);
+    d.needed.remove(&own);
     Ok(d)
 }
 
@@ -230,6 +265,9 @@ fn link(pkg: &str) -> Result<(), String> {
         for m in &d.mapfiles {
             cmd.arg("-M").arg(format!("{gate}/usr/src/uts/common/mapfiles/{m}.mapfile"));
         }
+        for m in &d.local_mapfiles {
+            cmd.arg("-M").arg(m);
+        }
     }
     if let Some(m) = &d.exports {
         // Everything the mapfile does not name becomes local.
@@ -259,14 +297,26 @@ fn link(pkg: &str) -> Result<(), String> {
 /// the same facts computed from the Rust definitions, line by line. Every
 /// line must be present on both sides with the same value.
 fn uapi_check(file: &str) -> Result<(), String> {
+    let rust: Vec<String> = uapi_table::lines().into_iter().chain(uapi_compat::lines()).collect();
+    layout_check("uapi-check", file, &rust)
+}
+
+/// Compares the output of `tools/facade/facade_layout.c` (gcc -S on
+/// illumos, the `@@` lines) with the sizes and offsets of drm-facade-sys.
+fn facade_check(file: &str) -> Result<(), String> {
+    layout_check("facade-check", file, &facade_table::lines())
+}
+
+/// Compares `key value` lines from gcc with the same lines from Rust; every
+/// line must be present on both sides with the same value.
+fn layout_check(what: &str, file: &str, rust_lines: &[String]) -> Result<(), String> {
     let c_text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
     let split = |l: &str| -> Option<(String, String)> {
         let (key, value) = l.trim().rsplit_once(' ')?;
         Some((key.to_string(), value.to_string()))
     };
     let c: BTreeMap<String, String> = c_text.lines().filter_map(split).collect();
-    let rust: BTreeMap<String, String> =
-        uapi_table::lines().iter().chain(uapi_compat::lines().iter()).filter_map(|l| split(l)).collect();
+    let rust: BTreeMap<String, String> = rust_lines.iter().filter_map(|l| split(l)).collect();
     let mut errors = 0;
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for (key, rv) in &rust {
@@ -287,11 +337,59 @@ fn uapi_check(file: &str) -> Result<(), String> {
         eprintln!("missing in Rust: {key}");
     }
     println!(
-        "uapi-check: {} sizes, {} offsets, {} ioctl numbers identical; {} lines compared, {errors} differences",
+        "{what}: {} sizes, {} offsets, {} ioctl numbers identical; {} lines compared, {errors} differences",
         counts.get("size").copied().unwrap_or(0),
-        counts.get("off").copied().unwrap_or(0),
+        counts.get("off").copied().unwrap_or(0) + counts.get("offset").copied().unwrap_or(0),
         counts.get("ioctl").copied().unwrap_or(0),
         rust.len()
     );
-    if errors > 0 { Err(format!("{errors} uAPI layout differences")) } else { Ok(()) }
+    if errors > 0 { Err(format!("{what}: {errors} layout differences")) } else { Ok(()) }
+}
+
+/// The names a symbol-scope mapfile makes global (`global:` up to `local:`).
+fn mapfile_globals(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut global = false;
+    for l in text.lines() {
+        let l = l.split('#').next().unwrap_or("").trim();
+        if l.starts_with("global:") {
+            global = true;
+        } else if l.starts_with("local:") {
+            global = false;
+        } else if global && let Some(name) = l.strip_suffix(';') {
+            let name = name.split_whitespace().next().unwrap_or("");
+            if !name.is_empty() {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Checks a linked module's symbol scope: its global defined symbols must
+/// be exactly the mapfile's global names (on illumos, with elfdump(1)).
+fn symbols(module: &str, mapfile: &str) -> Result<(), String> {
+    let want = mapfile_globals(&std::fs::read_to_string(mapfile).map_err(|e| format!("{mapfile}: {e}"))?);
+    let out = Command::new("elfdump").args(["-s", "-N", ".symtab", module]).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!("elfdump {module} failed"));
+    }
+    // [Index]  Value  Size  Type  Bind  Other Ver Shndx  Name
+    let mut have = BTreeSet::new();
+    for l in String::from_utf8_lossy(&out.stdout).lines() {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() >= 9 && f[0].starts_with('[') && f[4] == "GLOB" && f[7] != "UNDEF" {
+            have.insert(f[8].to_string());
+        }
+    }
+    let extra: Vec<_> = have.difference(&want).collect();
+    let missing: Vec<_> = want.difference(&have).collect();
+    for s in &extra {
+        eprintln!("global but not in the mapfile: {s}");
+    }
+    for s in &missing {
+        eprintln!("in the mapfile but not defined: {s}");
+    }
+    println!("symbols: {} global symbols, {} extra, {} missing", have.len(), extra.len(), missing.len());
+    if extra.is_empty() && missing.is_empty() { Ok(()) } else { Err("symbol scope differs from the mapfile".into()) }
 }

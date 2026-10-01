@@ -1,0 +1,18 @@
+[package]
+name = "drm-facade-sys"
+description = "Raw bindings to the DRM facade of illumos-drm: the C interface of the kernel module misc/drm, generated from include/drm"
+version.workspace = true
+edition.workspace = true
+# The bindings are generated from the MIT-licensed facade headers.
+license = "MIT"
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[package.metadata.kmod]
+# The functions resolve from misc/drm (modules/drm), so every driver that
+# uses the facade names it with -N; drivers linked with -z defs add the
+# facade's mapfile (generated from the same headers).
+depends = ["misc/drm"]
+local-mapfiles = ["include/drm/drm_facade.mapfile"]
