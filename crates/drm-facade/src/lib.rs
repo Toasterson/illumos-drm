@@ -41,6 +41,7 @@ pub mod gem;
 pub mod ioctl;
 pub mod kms;
 pub mod sync;
+mod version;
 
 pub use drm_facade_sys as sys;
 
@@ -51,6 +52,7 @@ pub use fence::Fence;
 pub use gem::{Gem, GemObject, GemRef, Usage};
 pub use ioctl::{Ioctl, IoctlData, Plain};
 pub use sync::Syncobj;
+pub use version::check_facade;
 
 use ddi::Errno;
 

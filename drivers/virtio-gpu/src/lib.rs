@@ -309,6 +309,12 @@ impl Driver for VirtioGpuModule {
     type Instance = Device<VirtioGpu>;
     const LINKINFO: &'static CStr = c"virtio-gpu DRM driver (illumos-drm R5a)";
 
+    /// Refuses to load on a `misc/drm` with another facade version or
+    /// other structure sizes than this driver was built against.
+    fn load(_ctx: &Sleepable) -> Result<(), Errno> {
+        drm_facade::check_facade("virtio_gpu")
+    }
+
     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
         let gpu = VirtioGpu::probe(&node, ctx)?;
         let unique = bus_id(&node, ctx);

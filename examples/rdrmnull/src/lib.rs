@@ -786,6 +786,12 @@ impl Driver for RDrmNull {
     type Instance = Device<NullDriver>;
     const LINKINFO: &'static CStr = c"Rust DRM null driver r5a";
 
+    /// Refuses to load on a `misc/drm` with another facade version or
+    /// other structure sizes than this driver was built against.
+    fn load(_ctx: &Sleepable) -> Result<(), Errno> {
+        drm_facade::check_facade("rdrmnull")
+    }
+
     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
         let dma = DmaDrill::from_conf(&node, ctx)?;
         let dma_attr = if dma == DmaDrill::OwnNode { Some(drill_dma_attr(&node, ctx)?) } else { None };

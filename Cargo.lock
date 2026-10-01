@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "ddi"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=72219f66c433bb80823aa838a2278581028e5e5b#72219f66c433bb80823aa838a2278581028e5e5b"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=7fbd6028b734ce52c045f82cfde3df49e01aa706#7fbd6028b734ce52c045f82cfde3df49e01aa706"
 dependencies = [
  "ddi-sys",
  "illumos-kernel-private-sys",
@@ -16,7 +16,7 @@ dependencies = [
 [[package]]
 name = "ddi-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=72219f66c433bb80823aa838a2278581028e5e5b#72219f66c433bb80823aa838a2278581028e5e5b"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=7fbd6028b734ce52c045f82cfde3df49e01aa706#7fbd6028b734ce52c045f82cfde3df49e01aa706"
 
 [[package]]
 name = "drm"
@@ -57,7 +57,7 @@ version = "0.0.1"
 [[package]]
 name = "illumos-kernel-private-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=72219f66c433bb80823aa838a2278581028e5e5b#72219f66c433bb80823aa838a2278581028e5e5b"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=7fbd6028b734ce52c045f82cfde3df49e01aa706#7fbd6028b734ce52c045f82cfde3df49e01aa706"
 dependencies = [
  "ddi-sys",
 ]
@@ -65,7 +65,7 @@ dependencies = [
 [[package]]
 name = "illumos-kernel-private-virtio-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=72219f66c433bb80823aa838a2278581028e5e5b#72219f66c433bb80823aa838a2278581028e5e5b"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=7fbd6028b734ce52c045f82cfde3df49e01aa706#7fbd6028b734ce52c045f82cfde3df49e01aa706"
 dependencies = [
  "ddi-sys",
 ]
