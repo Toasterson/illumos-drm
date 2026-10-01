@@ -74,6 +74,8 @@ SYMBOL_SCOPE {
 		drm_illumos_gem_sg_count	{ FLAGS = EXTERN };
 		drm_illumos_gem_umem	{ FLAGS = EXTERN };
 		drm_illumos_gem_vaddr	{ FLAGS = EXTERN };
+		drm_illumos_ioctl_cmd	{ FLAGS = EXTERN };
+		drm_illumos_ioctl_user_cmd	{ FLAGS = EXTERN };
 		drm_illumos_mapping_cookie	{ FLAGS = EXTERN };
 		drm_illumos_mapping_is_settled	{ FLAGS = EXTERN };
 		drm_illumos_mapping_len	{ FLAGS = EXTERN };
@@ -90,6 +92,7 @@ SYMBOL_SCOPE {
 		drm_rkms_fb_info	{ FLAGS = EXTERN };
 		drm_rkms_fb_object	{ FLAGS = EXTERN };
 		drm_rkms_fb_put	{ FLAGS = EXTERN };
+		drm_rkms_layout_set	{ FLAGS = EXTERN };
 		drm_rkms_probe_add_mode	{ FLAGS = EXTERN };
 		drm_rkms_probe_set_edid	{ FLAGS = EXTERN };
 		drm_rkms_probe_set_size_mm	{ FLAGS = EXTERN };

@@ -16,7 +16,7 @@ crate-type = ["staticlib"]
 # unstable-gate-cda5b9a49f: the private tier for dma-bufs, sync objects and
 # sync files (and the devmap guard of the char glue).
 ddi = { workspace = true, features = ["panic-handler", "global-alloc-sleep", "unstable-gate-cda5b9a49f"] }
-drm-core.workspace = true
+drm-core = { workspace = true, features = ["kernel"] }
 drm-uapi.workspace = true
 # The facade's types; its functions are defined here.
 drm-facade-sys.workspace = true

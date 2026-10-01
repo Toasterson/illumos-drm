@@ -73,7 +73,7 @@ impl CDriver {
         // SAFETY: k <= 255 bytes of buf.
         unsafe { a.copy_in_struct(buf.0.as_mut_ptr(), k)? };
         let ddev = core.ddev();
-        let r = crate::ctxt::with_frame(self.core, arg, ctx, || {
+        let r = crate::ctxt::with_frame(self.core, (entry.cmd, cmd), arg, ctx, || {
             // SAFETY: the driver's handler with its device, a buffer of the
             // table's size and its file.
             unsafe { func(ddev, buf.0.as_mut_ptr().cast(), fp.as_ptr()) }

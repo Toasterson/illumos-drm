@@ -155,11 +155,71 @@ fn plane_type(t: u32) -> PlaneType {
     }
 }
 
+/// A core layout from a driver's.
+///
+/// # Safety
+/// The arrays of `l` hold the counts it gives.
+pub(crate) unsafe fn layout_from_c(l: &f::drm_rkms_layout) -> Layout {
+    let mut out = Layout {
+        min_width: l.min_width,
+        max_width: l.max_width,
+        min_height: l.min_height,
+        max_height: l.max_height,
+        planes: Vec::new(),
+        crtcs: Vec::new(),
+        encoders: Vec::new(),
+        connectors: Vec::new(),
+    };
+    // SAFETY: the caller's contract.
+    unsafe {
+        for p in slice(l.planes, l.num_planes) {
+            out.planes.push(PlaneDesc {
+                typ: plane_type(p.type_),
+                possible_crtcs: p.possible_crtcs,
+                formats: slice(p.formats, p.num_formats).to_vec(),
+                modifiers: slice(p.modifiers, p.num_modifiers).to_vec(),
+            });
+        }
+        for c in slice(l.crtcs, l.num_crtcs) {
+            out.crtcs.push(CrtcDesc {
+                primary: c.primary as usize,
+                cursor: usize::try_from(c.cursor).ok(),
+                gamma_size: c.gamma_size,
+            });
+        }
+        for e in slice(l.encoders, l.num_encoders) {
+            out.encoders.push(EncoderDesc {
+                typ: e.type_,
+                possible_crtcs: e.possible_crtcs,
+                possible_clones: e.possible_clones,
+            });
+        }
+        for c in slice(l.connectors, l.num_connectors) {
+            out.connectors.push(ConnectorDesc {
+                typ: c.type_,
+                encoders: c.encoders,
+                limits: ModeLimits {
+                    max_width: u16::try_from(c.limits.max_width).unwrap_or(u16::MAX),
+                    max_height: u16::try_from(c.limits.max_height).unwrap_or(u16::MAX),
+                    max_clock: c.limits.max_clock,
+                    interlace: c.limits.interlace,
+                    dblscan: c.limits.dblscan,
+                },
+            });
+        }
+    }
+    out
+}
+
 impl KmsDriver<GemRef<FObj>> for CKms {
     fn layout(&self) -> Layout {
-        // SAFETY: plain data; zero is valid.
-        let mut l: f::drm_rkms_layout = unsafe { core::mem::zeroed() };
-        let mut out = Layout {
+        let mut sink: Option<Layout> = None;
+        if let Some(cb) = self.funcs.layout {
+            // SAFETY: the driver's callback with its device and a sink valid
+            // during the call (drm_rkms_layout_set copies into it).
+            unsafe { cb(self.dev(), ptr::addr_of_mut!(sink).cast()) };
+        }
+        sink.unwrap_or(Layout {
             min_width: 0,
             max_width: 0,
             min_height: 0,
@@ -168,56 +228,7 @@ impl KmsDriver<GemRef<FObj>> for CKms {
             crtcs: Vec::new(),
             encoders: Vec::new(),
             connectors: Vec::new(),
-        };
-        let Some(cb) = self.funcs.layout else { return out };
-        // SAFETY: the driver's callback with its device and a structure to
-        // fill; the arrays it points to are valid during this function.
-        if unsafe { cb(self.dev(), &mut l) } != 0 {
-            return out;
-        }
-        out.min_width = l.min_width;
-        out.max_width = l.max_width;
-        out.min_height = l.min_height;
-        out.max_height = l.max_height;
-        // SAFETY: the counts the driver gave for its arrays.
-        unsafe {
-            for p in slice(l.planes, l.num_planes) {
-                out.planes.push(PlaneDesc {
-                    typ: plane_type(p.type_),
-                    possible_crtcs: p.possible_crtcs,
-                    formats: slice(p.formats, p.num_formats).to_vec(),
-                    modifiers: slice(p.modifiers, p.num_modifiers).to_vec(),
-                });
-            }
-            for c in slice(l.crtcs, l.num_crtcs) {
-                out.crtcs.push(CrtcDesc {
-                    primary: c.primary as usize,
-                    cursor: usize::try_from(c.cursor).ok(),
-                    gamma_size: c.gamma_size,
-                });
-            }
-            for e in slice(l.encoders, l.num_encoders) {
-                out.encoders.push(EncoderDesc {
-                    typ: e.type_,
-                    possible_crtcs: e.possible_crtcs,
-                    possible_clones: e.possible_clones,
-                });
-            }
-            for c in slice(l.connectors, l.num_connectors) {
-                out.connectors.push(ConnectorDesc {
-                    typ: c.type_,
-                    encoders: c.encoders,
-                    limits: ModeLimits {
-                        max_width: u16::try_from(c.limits.max_width).unwrap_or(u16::MAX),
-                        max_height: u16::try_from(c.limits.max_height).unwrap_or(u16::MAX),
-                        max_clock: c.limits.max_clock,
-                        interlace: c.limits.interlace,
-                        dblscan: c.limits.dblscan,
-                    },
-                });
-            }
-        }
-        out
+        })
     }
 
     fn probe(&self, connector: usize, _ctx: &Sleepable) -> Probe {

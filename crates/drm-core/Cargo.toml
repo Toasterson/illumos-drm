@@ -8,6 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
+default = ["kernel"]
+# The core proper: devices, files, GEM, fences, PRIME, sync objects and mode
+# setting, for the kernel module misc/drm (modules/drm), the only crate that
+# enables it. Without it the crate is only its value helpers (dumb-buffer
+# layouts, display modes and formats, EDID, KArc/KVec/ksync, the software
+# vblank), which drivers may compile in: they hold no state of the core.
+kernel = []
 # Test aid, off by default: lets GemDma::against name a device node other
 # than the driver's own, bypassing illumos-ddi's own-node rule with raw
 # ddi_dma_alloc_handle(9F) calls. It exists only so that the rdrmnull DMA

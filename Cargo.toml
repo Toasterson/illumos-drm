@@ -4,14 +4,18 @@ members = [
     "crates/drm-uapi",
     "crates/drm-facade-sys",
     "crates/drm-core",
+    "crates/drm-facade",
     "modules/drm",
+    "examples/rdrmnull",
     "xtask",
 ]
 default-members = [
     "crates/drm-uapi",
     "crates/drm-facade-sys",
     "crates/drm-core",
+    "crates/drm-facade",
     "modules/drm",
+    "examples/rdrmnull",
 ]
 
 [workspace.package]
@@ -23,7 +27,8 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 drm-uapi = { path = "crates/drm-uapi" }
-drm-core = { path = "crates/drm-core" }
+drm-core = { path = "crates/drm-core", default-features = false }
+drm-facade = { path = "crates/drm-facade" }
 drm-facade-sys = { path = "crates/drm-facade-sys" }
 # illumos-ddi at the head of its r5a-char-table branch (pull request
 # stacked on g1-gate-pin, which is stacked on r4-virtio): clone opens, the

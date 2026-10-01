@@ -15,6 +15,24 @@ use drm_facade_sys as f;
 use crate::ckms::{Fb, mode_from_c, status_from_c};
 use crate::devcore::{DevCore, neg};
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_rkms_layout_set(
+    sink: *mut f::drm_rkms_layout_sink,
+    layout: *const f::drm_rkms_layout,
+) -> i32 {
+    if sink.is_null() || layout.is_null() {
+        return neg(Errno::EINVAL);
+    }
+    // SAFETY: the sink ckms::layout passed to the running callback.
+    let s = unsafe { &mut *(sink as *mut Option<drm_core::kms::Layout>) };
+    if s.is_some() {
+        return neg(Errno::EINVAL);
+    }
+    // SAFETY: the driver's layout with arrays of its counts.
+    *s = Some(unsafe { crate::ckms::layout_from_c(&*layout) });
+    0
+}
+
 /// # Safety
 /// `p` is the probe sink the facade passed to the running probe callback.
 unsafe fn probe<'a>(p: *mut f::drm_rkms_probe) -> Option<&'a mut Probe> {

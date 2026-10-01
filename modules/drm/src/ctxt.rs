@@ -32,6 +32,9 @@ pub(crate) struct Frame {
     arg: NonNull<IoctlArg<'static>>,
     /// The device the ioctl is on.
     pub(crate) core: NonNull<DevCore>,
+    /// The matched table entry's command and the caller's.
+    pub(crate) entry_cmd: u32,
+    pub(crate) user_cmd: u32,
 }
 
 // SAFETY: the pointers are only followed by the recording thread, while
@@ -73,6 +76,7 @@ fn current() -> sys::kt_did_t {
 /// Runs `f` with a frame for the calling thread recorded.
 pub(crate) fn with_frame<R>(
     core: NonNull<DevCore>,
+    cmds: (u32, u32),
     arg: &IoctlArg<'_>,
     ctx: &Sleepable,
     f: impl FnOnce() -> R,
@@ -81,7 +85,7 @@ pub(crate) fn with_frame<R>(
     // SAFETY: the lifetime is erased for the table; the frame is removed
     // before this function returns, while `arg` is still borrowed.
     let arg = unsafe { NonNull::new_unchecked(arg as *const IoctlArg<'_> as *mut IoctlArg<'static>) };
-    table().lock().push(Frame { thread: me, arg, core }, ctx)?;
+    table().lock().push(Frame { thread: me, arg, core, entry_cmd: cmds.0, user_cmd: cmds.1 }, ctx)?;
     let r = f();
     let mut t = table().lock();
     // The newest frame of this thread is this one (a handler does not

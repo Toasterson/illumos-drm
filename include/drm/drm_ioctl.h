@@ -73,6 +73,15 @@ struct drm_ioctl_desc {
 extern int drm_copy_from_user(void *dst, uint64_t uaddr, size_t len);
 extern int drm_copy_to_user(uint64_t uaddr, const void *src, size_t len);
 
+/*
+ * The command value of the table entry the calling thread's handler was
+ * matched with, and the caller's own command value (which differs in the
+ * size bits when Linux's size rule applied); 0 outside a handler. An
+ * illumos addition: one handler can serve several entries.
+ */
+extern unsigned int drm_illumos_ioctl_cmd(void);
+extern unsigned int drm_illumos_ioctl_user_cmd(void);
+
 #ifdef	__cplusplus
 }
 #endif

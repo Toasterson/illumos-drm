@@ -91,8 +91,9 @@ struct drm_rkms_connector_desc {
 };
 
 /*
- * The display's objects, fixed for the device's life. The arrays belong
- * to the driver and need only stay valid during the layout callback.
+ * The display's objects, fixed for the device's life. The layout callback
+ * hands it to drm_rkms_layout_set(), which copies it; the arrays need only
+ * stay valid during that call.
  */
 struct drm_rkms_layout {
 	uint32_t min_width;
@@ -111,6 +112,8 @@ struct drm_rkms_layout {
 
 /* A framebuffer: a counted reference to a core object. */
 struct drm_rkms_fb;
+/* Where the layout callback puts the layout. */
+struct drm_rkms_layout_sink;
 /* What a probe found, filled in by the driver. */
 struct drm_rkms_probe;
 /* The rest of an atomic update; not readable in facade version 0. */
@@ -180,14 +183,16 @@ struct drm_rkms_rect {
  * trait (README "Mode setting (R3)"). Indices are into the layout's
  * arrays. Check callbacks return 0 or a negative errno and must not
  * change anything; commit callbacks cannot fail. Every callback runs in
- * thread context. Required: layout, probe.
+ * thread context. Required: layout (which calls drm_rkms_layout_set()),
+ * probe.
  *
  * set_gamma	r, g and b have `size` entries (the CRTC's gamma_size).
  * dirty_fb	DIRTYFB: `planes` lists the planes showing fb, `clips` the
  *		damage (num_clips 0 means all of it). -ENOSYS if NULL.
  */
 struct drm_rkms_funcs {
-	int (*layout)(struct drm_device *dev, struct drm_rkms_layout *out);
+	int (*layout)(struct drm_device *dev,
+	    struct drm_rkms_layout_sink *sink);
 	void (*probe)(struct drm_device *dev, uint32_t connector,
 	    struct drm_rkms_probe *out);
 	bool (*format_mod_supported)(struct drm_device *dev, uint32_t plane,
@@ -216,6 +221,13 @@ struct drm_rkms_funcs {
 	    const uint32_t *planes, uint32_t num_planes,
 	    const struct drm_rkms_rect *clips, uint32_t num_clips);
 };
+
+/*
+ * The layout (inside the layout callback): copies it. Returns 0, or
+ * -EINVAL for a NULL layout or a second call.
+ */
+extern int drm_rkms_layout_set(struct drm_rkms_layout_sink *sink,
+    const struct drm_rkms_layout *layout);
 
 /* Probe results (inside the probe callback). */
 extern void drm_rkms_probe_set_status(struct drm_rkms_probe *probe,

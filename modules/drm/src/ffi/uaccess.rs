@@ -3,7 +3,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! `drm_copy_from_user` and `drm_copy_to_user` of `drm_ioctl.h`: copies
-//! with the data model and `FKIOCTL` flag of the calling thread's ioctl.
+//! with the data model and `FKIOCTL` flag of the calling thread's ioctl,
+//! and the command values of that ioctl.
 
 use core::ffi::c_void;
 
@@ -41,4 +42,14 @@ pub unsafe extern "C" fn drm_copy_to_user(uaddr: u64, src: *const c_void, len: u
         unsafe { sys::ddi_copyout(src, uaddr as usize as *mut c_void, len, arg.mode()) }
     });
     if r == Some(0) { 0 } else { neg(Errno::EFAULT) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_illumos_ioctl_cmd() -> u32 {
+    crate::ctxt::with_current(|fr, _| fr.entry_cmd).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_illumos_ioctl_user_cmd() -> u32 {
+    crate::ctxt::with_current(|fr, _| fr.user_cmd).unwrap_or(0)
 }

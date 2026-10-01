@@ -19,27 +19,37 @@
 //! The README's "Mode setting (R3)" sections give the decisions and the
 //! differences from Linux.
 
+#[cfg(feature = "kernel")]
 pub mod atomic;
+#[cfg(feature = "kernel")]
 pub mod core;
-#[cfg(not(test))]
+#[cfg(all(feature = "kernel", not(test)))]
 pub mod dev;
 pub mod edid;
+#[cfg(feature = "kernel")]
 pub mod events;
 pub mod formats;
+#[cfg(feature = "kernel")]
 pub mod ioctl;
+#[cfg(feature = "kernel")]
 pub mod legacy;
 pub mod modes;
+#[cfg(feature = "kernel")]
 pub mod objects;
+#[cfg(feature = "kernel")]
 pub mod props;
 #[cfg(not(test))]
 pub mod soft;
+#[cfg(feature = "kernel")]
 pub mod state;
-#[cfg(test)]
+#[cfg(all(feature = "kernel", test))]
 mod tests;
 
-#[cfg(not(test))]
+#[cfg(all(feature = "kernel", not(test)))]
 pub use dev::{Kms, VblankHandle};
+#[cfg(feature = "kernel")]
 pub use objects::{ConnectorDesc, CrtcDesc, EncoderDesc, Framebuffer, Layout, PlaneDesc, PlaneType};
+#[cfg(feature = "kernel")]
 pub use state::{
     ConnectorState, ConnectorStatus, CrtcState, DirtyRect, FbBacking, KmsDriver, PlaneGeometry, PlaneState, Probe,
     StateView, check_plane_geometry, check_plane_helper,

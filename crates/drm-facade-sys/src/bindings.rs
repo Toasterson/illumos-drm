@@ -690,6 +690,12 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn drm_copy_to_user(uaddr: u64, src: *const core::ffi::c_void, len: usize) -> core::ffi::c_int;
 }
+unsafe extern "C" {
+    pub fn drm_illumos_ioctl_cmd() -> core::ffi::c_uint;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_ioctl_user_cmd() -> core::ffi::c_uint;
+}
 pub const DMA_RESV_USAGE_KERNEL: dma_resv_usage = 0;
 pub const DMA_RESV_USAGE_WRITE: dma_resv_usage = 1;
 pub const DMA_RESV_USAGE_READ: dma_resv_usage = 2;
@@ -1530,6 +1536,11 @@ pub struct drm_rkms_fb {
 }
 #[repr(C)]
 #[derive(Debug)]
+pub struct drm_rkms_layout_sink {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Debug)]
 pub struct drm_rkms_probe {
     _unused: [u8; 0],
 }
@@ -1666,7 +1677,7 @@ const _: () = {
 #[derive(Debug, Default, Copy, Clone)]
 pub struct drm_rkms_funcs {
     pub layout: ::core::option::Option<
-        unsafe extern "C" fn(dev: *mut drm_device, out: *mut drm_rkms_layout) -> core::ffi::c_int,
+        unsafe extern "C" fn(dev: *mut drm_device, sink: *mut drm_rkms_layout_sink) -> core::ffi::c_int,
     >,
     pub probe:
         ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device, connector: u32, out: *mut drm_rkms_probe)>,
@@ -1753,6 +1764,9 @@ const _: () = {
     ["Offset of field: drm_rkms_funcs::set_gamma"][::core::mem::offset_of!(drm_rkms_funcs, set_gamma) - 72usize];
     ["Offset of field: drm_rkms_funcs::dirty_fb"][::core::mem::offset_of!(drm_rkms_funcs, dirty_fb) - 80usize];
 };
+unsafe extern "C" {
+    pub fn drm_rkms_layout_set(sink: *mut drm_rkms_layout_sink, layout: *const drm_rkms_layout) -> core::ffi::c_int;
+}
 unsafe extern "C" {
     pub fn drm_rkms_probe_set_status(probe: *mut drm_rkms_probe, status: u32);
 }

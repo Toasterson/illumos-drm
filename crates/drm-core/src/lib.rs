@@ -77,44 +77,66 @@
 
 extern crate alloc;
 
+#[cfg(feature = "kernel")]
 pub mod anon_fd;
+#[cfg(feature = "kernel")]
 pub mod caps;
 pub mod defer;
 #[cfg(not(test))]
+#[cfg(feature = "kernel")]
 mod device;
+#[cfg(feature = "kernel")]
 pub mod dmaerr;
+#[cfg(feature = "kernel")]
 pub mod driver;
 pub mod dumb;
+#[cfg(feature = "kernel")]
 pub mod fence;
 #[cfg(not(test))]
+#[cfg(feature = "kernel")]
 pub mod fence_dev;
 #[cfg(not(test))]
+#[cfg(feature = "kernel")]
 pub mod gem;
+#[cfg(feature = "kernel")]
 pub mod idmap;
+#[cfg(feature = "kernel")]
 pub mod ioctl;
 pub mod karc;
 mod kmem;
 pub mod kms;
 pub mod ksync;
 pub mod kvec;
+#[cfg(feature = "kernel")]
 pub mod minor;
+#[cfg(feature = "kernel")]
 pub mod objects;
 pub mod offsets;
 #[cfg(not(test))]
+#[cfg(feature = "kernel")]
 pub mod prime;
+#[cfg(feature = "kernel")]
 pub mod resv;
+#[cfg(feature = "kernel")]
 pub mod slots;
+#[cfg(feature = "kernel")]
 pub mod state;
+#[cfg(feature = "kernel")]
 pub mod sync_file;
+#[cfg(feature = "kernel")]
 pub mod syncobj;
 #[cfg(not(test))]
+#[cfg(feature = "kernel")]
 pub mod syncobj_ioctl;
 #[cfg(not(test))]
+#[cfg(feature = "kernel")]
 pub mod uaccess;
+#[cfg(feature = "kernel")]
 pub mod wwmutex;
 
-#[cfg(not(test))]
+#[cfg(all(feature = "kernel", not(test)))]
 pub use device::{Device, numbers_taken};
+#[cfg(feature = "kernel")]
 pub use driver::{BusId, Driver, DriverInfo, DumbCreated, Features, ModeConfig};
-#[cfg(not(test))]
+#[cfg(all(feature = "kernel", not(test)))]
 pub use gem::{GemDma, GemObject, GemRef, SysMem};
