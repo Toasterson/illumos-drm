@@ -389,7 +389,7 @@ remove_dri_links pci1af4,1100@
 
 echo
 echo "=== Clean up"
-DRM_MINOR_OURS=yes
+DRM_CORE_OURS=yes
 drm_core_remove || fail=1
 [ $had_dri = no ] && [ -d /dev/dri ] && step rmdir /dev/dri
 # devfs drops the clone@0 nodes of idle drivers a while after devfsadm
