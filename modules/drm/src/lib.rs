@@ -7,12 +7,12 @@
 //!
 //! Until milestone R5a each driver module linked its own copy of the core
 //! (`drm-core`). Now the core lives here, monomorphised once for the
-//! facade driver ([`cdriver::CDriver`]), which forwards every hook of the
+//! facade driver (`cdriver::CDriver`), which forwards every hook of the
 //! core's `Driver` trait to a driver's C table (`struct drm_driver` of
 //! `include/drm`). A driver module, in C (`cdrmnull`) or in Rust
 //! (`rdrmnull`, `virtio_gpu` through the `drm-facade` crate), registers its
-//! devices with [`drm_dev_register`](ffi::device::drm_dev_register) and
-//! points its `cb_ops` at the entry points of [`table`], which find the
+//! devices with `drm_dev_register` and
+//! points its `cb_ops` at the entry points of `table`, which find the
 //! device of a device number in the module's device table and run
 //! illumos-ddi's character glue (`table_glue`) on it. Every other call is
 //! one of the facade's C functions (`ffi`), whose names, types and

@@ -137,7 +137,7 @@ impl<D: Driver> Device<D> {
     /// Registers a device for the driver instance `node`, the capability for
     /// the driver's own node that `ddi::Driver::attach` received; the GEM
     /// state keeps it to allocate DMA handles. Takes the lowest free device
-    /// number `N` of the system ([`NUMBERS`]), shared by every
+    /// number `N` of the system (`NUMBERS`), shared by every
     /// driver built on the core, and creates the primary node `card<N>`
     /// and, if the driver has [`Features::RENDER`], the render node
     /// `renderD<128+N>`. The number stays the device's until it detaches.
