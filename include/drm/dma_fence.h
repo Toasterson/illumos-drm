@@ -70,15 +70,16 @@ struct dma_fence {
 };
 
 /*
- * A fence's callbacks. Facade version 0 calls get_driver_name,
- * get_timeline_name and release. Fences are signalled explicitly with
- * dma_fence_signal(); enable_signaling, signaled, wait and set_deadline
- * are not called yet.
+ * A fence's callbacks. Facade version 0 calls only release: fences are
+ * signalled explicitly with dma_fence_signal(), and sync files report the
+ * device's driver name; get_driver_name, get_timeline_name,
+ * enable_signaling, signaled, wait and set_deadline are not called yet.
  *
  * release	called when the last reference is dropped, to free the
- *		driver's structure. NULL means the core frees nothing (the
- *		driver owns the memory some other way). May be called from a
- *		task queue, never from interrupt context.
+ *		driver's structure, in the context of that dma_fence_put()
+ *		(any context up to low-level interrupts, as on Linux). NULL
+ *		means the core frees nothing (the driver owns the memory some
+ *		other way).
  */
 struct dma_fence_ops {
 	const char *(*get_driver_name)(struct dma_fence *fence);
@@ -134,9 +135,10 @@ extern void dma_fence_set_error(struct dma_fence *fence, int error);
 extern struct dma_fence *dma_fence_get(struct dma_fence *fence);
 
 /*
- * Drops a reference; NULL is allowed. May be called from any context: a
- * last reference dropped in interrupt context is released by a task
- * queue.
+ * Drops a reference; NULL is allowed. May be called from any context up
+ * to low-level interrupts: the last reference releases the core's state
+ * (the core fence itself is destroyed by a task queue when this was its
+ * last reference too) and calls ops->release in the caller's context.
  */
 extern void dma_fence_put(struct dma_fence *fence);
 

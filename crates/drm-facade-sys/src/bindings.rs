@@ -1290,6 +1290,9 @@ unsafe extern "C" {
         cookie: *mut ddi_dma_cookie_t,
     ) -> core::ffi::c_int;
 }
+unsafe extern "C" {
+    pub fn drm_illumos_gem_object_put_deferred(obj: *mut drm_gem_object);
+}
 pub type drm_illumos_mapping_fn =
     ::core::option::Option<unsafe extern "C" fn(map: *mut drm_illumos_mapping, arg: *mut core::ffi::c_void)>;
 unsafe extern "C" {

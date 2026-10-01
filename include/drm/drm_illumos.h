@@ -47,6 +47,15 @@ extern int drm_illumos_gem_sg_cookie(struct drm_gem_object *obj,
     unsigned int backing, size_t i, ddi_dma_cookie_t *cookie);
 
 /*
+ * Drops a reference to an object whose last release must not run in the
+ * caller's context: it is parked and released by a task queue. For
+ * timeout(9F) handlers and other contexts that must not block but that
+ * drm_gem_object_put() cannot tell from thread context (it detects only
+ * interrupt threads). Any context.
+ */
+extern void drm_illumos_gem_object_put_deferred(struct drm_gem_object *obj);
+
+/*
  * User mappings of an object, for objects with funcs->illumos_movable.
  * A mapping is one piece of one process's mapping (fork and partial
  * munmap(2) make more pieces). drm_illumos_gem_foreach_mapping() calls

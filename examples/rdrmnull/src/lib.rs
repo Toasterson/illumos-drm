@@ -410,9 +410,10 @@ type LaterTimer = Timeout<fn(&Atomic)>;
 
 fn put_later(_a: &Atomic) {
     if let Some(p) = NonNull::new(LATER.swap(ptr::null_mut(), Ordering::AcqRel)) {
-        // SAFETY: stored by the ioctl from GemAny::into_raw, taken once; the
-        // facade drops references in interrupt context.
-        drop(unsafe { GemAny::from_raw(p) });
+        // SAFETY: stored by the ioctl from GemAny::into_raw, taken once.
+        // A timeout(9F) handler must not release the object itself: the
+        // last reference is parked for the core's task queue.
+        unsafe { GemAny::from_raw(p) }.put_deferred();
     }
 }
 

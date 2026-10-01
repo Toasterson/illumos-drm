@@ -63,8 +63,11 @@ enum drm_driver_feature {
  * major, minor, patchlevel, name, desc
  *		what the VERSION ioctl reports.
  * driver_features
- *		DRIVER_* flags; DRIVER_SYNCOBJ_TIMELINE needs DRIVER_SYNCOBJ,
- *		DRIVER_MODESET needs DRIVER_GEM and illumos_rkms.
+ *		DRIVER_* flags; DRIVER_SYNCOBJ_TIMELINE needs DRIVER_SYNCOBJ.
+ *		DRIVER_MODESET with illumos_rkms (and DRIVER_GEM) has a
+ *		display; without illumos_rkms the device reports the
+ *		mode-setting capabilities but has no display objects, and the
+ *		mode-setting ioctls fail with EOPNOTSUPP.
  * ioctls, num_ioctls
  *		the driver's private ioctls (drm_ioctl.h).
  *

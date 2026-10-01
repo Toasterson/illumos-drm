@@ -106,6 +106,18 @@ pub unsafe extern "C" fn drm_gem_object_put(obj: *mut f::drm_gem_object) {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_gem_object_put_deferred(obj: *mut f::drm_gem_object) {
+    // SAFETY: the caller holds a reference, which it gives up.
+    let Some(p) = (unsafe { crate::fobj::raw_of(obj) }) else { return };
+    // SAFETY: one of the caller's counted references.
+    let r = unsafe { GemRef::<FObj>::from_raw(p) };
+    // SAFETY: the caller promises nothing about its context; the atomic
+    // path never blocks and parks a last reference for the task queue.
+    let a = unsafe { ddi::Atomic::assume() };
+    r.put_in(drm_core::defer::Ctx::Atomic(&a));
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn drm_gem_handle_create(
     file: *mut f::drm_file,
     obj: *mut f::drm_gem_object,

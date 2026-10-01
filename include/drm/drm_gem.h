@@ -63,11 +63,11 @@ struct drm_illumos_fault;
  * free		frees the driver's structure once the last reference is
  *		gone and the core has released its state. Required. May be
  *		called from a task queue (never from interrupt context).
- * open		a handle to the object was created on `file` (also when an
- *		object is opened by name or imported). A negative errno
- *		refuses the handle. Optional.
- * close	the last handle of the object on `file` was closed.
- *		Optional.
+ * open		a handle to the object is being created on `file` (also when
+ *		an object is opened by name or imported; once per handle). A
+ *		negative errno refuses the handle. Optional.
+ * close	a handle of the object on `file` was closed (once per
+ *		handle, as Linux's drm_gem_object_release_handle). Optional.
  * illumos_umem	the ddi_umem cookie that user mappings of the object map
  *		now. NULL means the system memory drm_gem_object_init()
  *		allocated. Required for objects made with

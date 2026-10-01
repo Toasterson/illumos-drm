@@ -447,6 +447,17 @@ impl<T: GemObject> GemRef<T> {
         a.p == b.p
     }
 
+    /// Drops the reference without releasing the object in this context:
+    /// a last reference is parked for the core's task queue
+    /// (`drm_illumos_gem_object_put_deferred`). For a thread that must not
+    /// run the object's [`GemObject::release`], such as one that completes
+    /// the requests the release waits for. Any context.
+    pub fn put_deferred(self) {
+        let p = self.into_raw();
+        // SAFETY: this reference's count.
+        unsafe { sys::drm_illumos_gem_object_put_deferred(p.as_ptr().cast()) };
+    }
+
     /// The reference as a raw pointer, for a driver that parks it (a
     /// timer); give it back with [`GemRef::from_raw`].
     pub fn into_raw(self) -> NonNull<Gem<T>> {
@@ -504,6 +515,15 @@ impl GemAny {
         // SAFETY: a live object's reservation.
         unsafe { sys::dma_resv_test_signaled((*self.raw()).resv, usage.raw()) }
     }
+    /// Drops the reference without releasing the object in this context:
+    /// a last reference is parked for the core's task queue. For
+    /// `timeout(9F)` handlers.
+    pub fn put_deferred(self) {
+        let p = self.into_raw();
+        // SAFETY: this reference's count.
+        unsafe { sys::drm_illumos_gem_object_put_deferred(p.as_ptr()) };
+    }
+
     /// The reference as a raw pointer, for a driver that parks it (a
     /// timer); give it back with [`GemAny::from_raw`].
     pub fn into_raw(self) -> NonNull<sys::drm_gem_object> {

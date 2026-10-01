@@ -70,6 +70,7 @@ SYMBOL_SCOPE {
 		drm_illumos_fence_create	{ FLAGS = EXTERN };
 		drm_illumos_gem_add_backing	{ FLAGS = EXTERN };
 		drm_illumos_gem_foreach_mapping	{ FLAGS = EXTERN };
+		drm_illumos_gem_object_put_deferred	{ FLAGS = EXTERN };
 		drm_illumos_gem_sg_cookie	{ FLAGS = EXTERN };
 		drm_illumos_gem_sg_count	{ FLAGS = EXTERN };
 		drm_illumos_gem_umem	{ FLAGS = EXTERN };
