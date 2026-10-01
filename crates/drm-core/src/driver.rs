@@ -279,6 +279,20 @@ pub trait Driver: Send + Sync + Sized + 'static {
         dev.dumb_create_default(file, req, ctx)
     }
 
+    /// `MODE_MAP_DUMB`, after the core has checked the caller's permission:
+    /// the fake offset of handle `handle` of `file`. The default is
+    /// [`Device::dumb_map_offset_default`](crate::Device::dumb_map_offset_default).
+    #[cfg(not(test))]
+    fn dumb_map_offset(
+        &self,
+        dev: &crate::Device<Self>,
+        file: crate::minor::CloneId,
+        handle: u32,
+        ctx: &ddi::Sleepable,
+    ) -> Result<u64, Errno> {
+        dev.dumb_map_offset_default(file, handle, ctx)
+    }
+
     /// Handles one of [`Driver::ioctls`], after the core has checked its
     /// permission flags. `entry` is the matched table entry, `cmd` the
     /// caller's command value, `file` the calling file and `arg` the ioctl

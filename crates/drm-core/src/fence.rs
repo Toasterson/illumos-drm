@@ -254,6 +254,33 @@ impl FenceDomain {
         if kstat.is_err() {
             dev.warn(format_args!("cannot create the sync kstat; statistics are unavailable"));
         }
+        Self::with_queue(tq, pri, kstat.ok(), ctx)
+    }
+
+    /// Creates the fence domain of the core module itself, for fences that
+    /// belong to no device (the facade's `dma_fence_init` on a driver's C
+    /// structure): its task queue `drm_fencefree` has no device node, and
+    /// its statistics are the kstat `drm:0:sync`. Its locks are created
+    /// without an interrupt priority; they are adaptive mutexes, which
+    /// soft interrupts and low-level interrupt handlers may take.
+    #[cfg(not(test))]
+    pub fn for_module(ctx: &Sleepable) -> Result<KArc<FenceDomain>, Errno> {
+        let tq = ddi::TaskQueue::without_node(c"drm_fencefree", core::num::NonZeroU32::MIN, ctx)
+            .map_err(|_| Errno::ENOMEM)?;
+        let kstat = ddi::TypedKstat::<SyncKstat>::new(
+            ddi::KstatId { module: c"drm", instance: ddi::Instance(0), name: c"sync", class: c"misc" },
+            ctx,
+        );
+        Self::with_queue(tq, None, kstat.ok(), ctx)
+    }
+
+    #[cfg(not(test))]
+    fn with_queue(
+        tq: ddi::TaskQueue,
+        pri: Option<IntrPriority>,
+        kstat: Option<ddi::TypedKstat<SyncKstat>>,
+        ctx: &Sleepable,
+    ) -> Result<KArc<FenceDomain>, Errno> {
         KArc::new(
             FenceDomain {
                 tq,
@@ -261,7 +288,7 @@ impl FenceDomain {
                 deferred: DeferList::new(),
                 drain_scheduled: AtomicBool::new(false),
                 stats: SyncStats::default(),
-                kstat: kstat.ok(),
+                kstat,
             },
             ctx,
         )

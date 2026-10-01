@@ -211,7 +211,7 @@ impl<O: GemObject> SyncCore<O> {
         if flags == EXPORT_SYNC_FILE {
             let f = s.find_fence(0, false, ctx);
             drop(s);
-            return self.export_sync_file(f?, b"", arg.io(), write, ctx);
+            return self.export_sync_file(f?, b"", true, arg.io(), write, ctx);
         }
         let flags = FdFlags { write: false, cloexec: true };
         self.anon.export(&self.dev, AnonObj::Syncobj(s), flags, arg.io(), write, &self.domain.stats, ctx)

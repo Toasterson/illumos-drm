@@ -4,12 +4,14 @@ members = [
     "crates/drm-uapi",
     "crates/drm-facade-sys",
     "crates/drm-core",
+    "modules/drm",
     "xtask",
 ]
 default-members = [
     "crates/drm-uapi",
     "crates/drm-facade-sys",
     "crates/drm-core",
+    "modules/drm",
 ]
 
 [workspace.package]
@@ -30,10 +32,10 @@ drm-facade-sys = { path = "crates/drm-facade-sys" }
 # (feature unstable-gate-cda5b9a49f-virtio) as pinned and checked at
 # illumos 7e802e88a3, and for R5a the CharTable glue with which misc/drm
 # serves the character devices other driver modules attach, the cb_ops:
-# form of module!, and FileRef::char_dev. Move the pin to the merge commit
+# form of module!, FileRef::char_dev, TaskQueue::without_node and IntrPriority::new. Move the pin to the merge commit
 # on illumos-ddi main once those branches are merged.
-ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "448e8242190034ef0c9e5328c9c1042f463ffa60" }
-ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "448e8242190034ef0c9e5328c9c1042f463ffa60", default-features = false }
+ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "72219f66c433bb80823aa838a2278581028e5e5b" }
+ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "72219f66c433bb80823aa838a2278581028e5e5b", default-features = false }
 serde_json = "1"
 
 # Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug

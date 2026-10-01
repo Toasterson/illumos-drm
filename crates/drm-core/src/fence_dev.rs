@@ -110,24 +110,23 @@ impl<O: GemObject> SyncCore<O> {
     ) -> Result<AnonObj<O>, Errno> {
         let f = FileRef::get(fd, arg)?;
         // The file's device number carries the major of the driver that
-        // attached its device and the device's number; check the major
-        // against this device's driver first, then against every other
-        // registered device's.
-        let decode = |dev: &DevInfo| f.own_minor(dev).and_then(|m| crate::anon_fd::decode(m.0));
-        let found = match decode(&self.dev) {
-            Some((index, id)) if index == self.index => Some((None, id)),
-            _ => (0..crate::minor::MAX_DEVICES).filter(|i| *i != self.index).find_map(|i| {
-                // SAFETY: the held file, if it is one of device i's, keeps
-                // the device from detaching during this call; a device that
-                // is not the file's is only asked for its node, which stays
-                // valid while it is registered (the registry entry goes
-                // before the device does).
-                let other = unsafe { registry::get::<O>(i) }?;
-                match decode(&other.dev) {
-                    Some((index, id)) if index == i => Some((Some(other), id)),
-                    _ => None,
-                }
-            }),
+        // attached its device and, in the minor, the device's number.
+        let Some(rdev) = f.char_dev() else {
+            drop(f);
+            return Err(Errno::EINVAL);
+        };
+        // SAFETY: plain arithmetic on a device number.
+        let (maj, min) = unsafe { (ddi::sys::getmajor(rdev), ddi::sys::getminor(rdev)) };
+        let found = match crate::anon_fd::decode(min) {
+            // SAFETY: plain arithmetic on the device's live node.
+            Some((index, id)) if index == self.index => {
+                (unsafe { ddi::sys::ddi_driver_major(self.dev.as_raw()) } == maj).then_some((None, id))
+            }
+            // SAFETY: the registry compares the major before it hands the
+            // device out; the held file is then an open file of that
+            // device, which cannot unregister during this call.
+            Some((index, id)) => unsafe { registry::get_with_major::<O>(index, maj) }.map(|o| (Some(o), id)),
+            None => None,
         };
         let Some((other, id)) = found else {
             drop(f);
@@ -307,13 +306,15 @@ impl<O: GemObject> SyncCore<O> {
     }
 
     /// Makes a sync file of `fence` and hands it out to the calling
-    /// process as a close-on-exec descriptor, from inside an ioctl;
+    /// process as a descriptor (close-on-exec with `cloexec`), from inside
+    /// an ioctl;
     /// `write_fd` copies the number out before the descriptor becomes
     /// visible. For drivers whose submissions return an out-fence.
     pub fn export_sync_file(
         &self,
         fence: Fence,
         name: &[u8],
+        cloexec: bool,
         arg: &IoctlArg<'_>,
         write_fd: impl FnOnce(i32) -> Result<(), Errno>,
         ctx: &Sleepable,
@@ -326,7 +327,7 @@ impl<O: GemObject> SyncCore<O> {
             }
         };
         fence.put(Ctx::Sleep(ctx));
-        let flags = FdFlags { write: false, cloexec: true };
+        let flags = FdFlags { write: false, cloexec };
         self.anon.export(&self.dev, AnonObj::SyncFile(sf), flags, arg, write_fd, &self.domain.stats, ctx)
     }
 
@@ -364,6 +365,7 @@ impl<O: GemObject> SyncCore<O> {
         self.export_sync_file(
             merged,
             &name,
+            true,
             arg,
             |fd| {
                 // SAFETY: a field assignment.
@@ -468,7 +470,7 @@ impl<O: GemObject> Drop for SyncCore<O> {
 mod registry {
     use core::ffi::c_void;
     use core::ptr;
-    use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 
     use super::SyncCore;
     use crate::gem::GemObject;
@@ -477,6 +479,9 @@ mod registry {
     static CORES: [AtomicPtr<c_void>; MAX_DEVICES as usize] =
         [const { AtomicPtr::new(ptr::null_mut()) }; MAX_DEVICES as usize];
     static TAGS: [AtomicUsize; MAX_DEVICES as usize] = [const { AtomicUsize::new(0) }; MAX_DEVICES as usize];
+    /// The driver major number of each registered device, recorded before
+    /// the device is published and cleared after it is withdrawn.
+    static MAJORS: [AtomicU32; MAX_DEVICES as usize] = [const { AtomicU32::new(u32::MAX) }; MAX_DEVICES as usize];
 
     fn tag<O: GemObject>() -> usize {
         get::<O> as *const () as usize
@@ -486,10 +491,15 @@ mod registry {
     pub(super) fn insert<O: GemObject>(index: u32, core: &SyncCore<O>) -> bool {
         let (Some(c), Some(t)) = (CORES.get(index as usize), TAGS.get(index as usize)) else { return false };
         let p = core as *const SyncCore<O> as *mut c_void;
+        // SAFETY: the device's node is live while it registers.
+        let major = unsafe { ddi::sys::ddi_driver_major(core.dev.as_raw()) };
         if c.compare_exchange(ptr::null_mut(), p, Ordering::AcqRel, Ordering::Relaxed).is_err() {
             return false;
         }
         t.store(tag::<O>(), Ordering::Release);
+        if let Some(m) = MAJORS.get(index as usize) {
+            m.store(major, Ordering::Release);
+        }
         true
     }
 
@@ -497,8 +507,26 @@ mod registry {
     pub(super) fn remove<O: GemObject>(index: u32, core: &SyncCore<O>) {
         if let Some(c) = CORES.get(index as usize) {
             let p = core as *const SyncCore<O> as *mut c_void;
-            let _ = c.compare_exchange(p, ptr::null_mut(), Ordering::AcqRel, Ordering::Relaxed);
+            if c.compare_exchange(p, ptr::null_mut(), Ordering::AcqRel, Ordering::Relaxed).is_ok()
+                && let Some(m) = MAJORS.get(index as usize)
+            {
+                m.store(u32::MAX, Ordering::Release);
+            }
         }
+    }
+
+    /// Returns device `index` if it is registered for driver major `major`.
+    ///
+    /// # Safety
+    /// The caller holds an open file with that major and a minor of device
+    /// `index`, which keeps the device registered during the call and the
+    /// lifetime `'a`.
+    pub(super) unsafe fn get_with_major<'a, O: GemObject>(index: u32, major: u32) -> Option<&'a SyncCore<O>> {
+        if MAJORS.get(index as usize)?.load(Ordering::Acquire) != major {
+            return None;
+        }
+        // SAFETY: as the caller promises.
+        unsafe { get::<O>(index) }
     }
 
     /// Finds the state of device `index`.

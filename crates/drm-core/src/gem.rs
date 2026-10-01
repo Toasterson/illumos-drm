@@ -961,6 +961,26 @@ impl<O: GemObject> GemRef<O> {
         }
     }
 
+    /// The object's address, for a structure that refers to the object
+    /// without holding a reference of its own (the facade's
+    /// `drm_gem_object`, whose references are counted here).
+    pub fn as_raw(&self) -> NonNull<c_void> {
+        KArc::as_ptr(&self.arc).cast()
+    }
+
+    /// A new reference to the object at `p`.
+    ///
+    /// # Safety
+    /// `p` came from [`GemRef::as_raw`] or [`GemRef::into_raw`] of a
+    /// `GemRef<O>` of the same `O`, and the object is alive: the caller
+    /// holds a reference to it, counted or borrowed.
+    pub unsafe fn clone_from_raw(p: NonNull<c_void>) -> GemRef<O> {
+        // SAFETY: the caller's contract; the borrowed reference is given
+        // back unchanged.
+        let borrowed = ManuallyDrop::new(unsafe { GemRef::<O>::from_raw(p) });
+        GemRef::clone(&borrowed)
+    }
+
     /// Gives up the reference as a pointer, for storage where a Rust value
     /// cannot go (a static read by a timer callback);
     /// [`GemRef::from_raw`] takes it back.

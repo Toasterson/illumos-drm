@@ -29,6 +29,7 @@
 //! in current Linux; a driver without [`Features::GEM`] answers `ENOSYS`,
 //! as Linux does without PRIME callbacks.
 
+use ddi::IoctlArg;
 use ddi::prelude::*;
 use ddi::private::fd::FdFlags;
 use drm_uapi as uapi;
@@ -37,7 +38,7 @@ use crate::Device;
 use crate::anon_fd::AnonObj;
 use crate::driver::{Driver, Features};
 use crate::fence_dev::SyncCore;
-use crate::gem::{GemCore, GemObject};
+use crate::gem::{GemCore, GemObject, GemRef};
 use crate::ioctl::Op;
 use crate::karc::KArc;
 use crate::minor::CloneId;
@@ -156,5 +157,38 @@ impl<O: GemObject> SyncCore<O> {
         // SAFETY: a field assignment.
         unsafe { a.get_mut() }.handle = handle;
         a.write(arg)
+    }
+
+    /// Hands `obj`'s dma-buf to the calling process as a new descriptor,
+    /// from inside an ioctl of this device (the facade's `dma_buf_fd`):
+    /// the same dma-buf as `PRIME_HANDLE_TO_FD` makes, `write` for writable
+    /// mappings. `write_fd` receives the number before it becomes visible.
+    pub fn export_dmabuf(
+        &self,
+        obj: GemRef<O>,
+        write: bool,
+        cloexec: bool,
+        arg: &IoctlArg<'_>,
+        write_fd: impl FnOnce(i32) -> Result<(), Errno>,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        self.housekeeping(ctx);
+        let fdf = FdFlags { write, cloexec };
+        let r = self.anon.export(&self.dev, AnonObj::DmaBuf(obj), fdf, arg, write_fd, &self.domain.stats, ctx);
+        self.publish();
+        r
+    }
+
+    /// The GEM object of dma-buf descriptor `fd` of the calling process, of
+    /// any device, from inside an ioctl (the facade's `dma_buf_get`):
+    /// `EINVAL` for another kind of file, `EBADF` for a closed descriptor.
+    pub fn dmabuf_object(&self, fd: i32, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<GemRef<O>, Errno> {
+        match self.lookup(fd, arg, false, ctx)? {
+            AnonObj::DmaBuf(g) => Ok(g),
+            o => {
+                o.put(ctx);
+                Err(Errno::EINVAL)
+            }
+        }
     }
 }

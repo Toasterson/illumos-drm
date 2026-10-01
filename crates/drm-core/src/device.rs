@@ -322,6 +322,16 @@ impl<D: Driver> Device<D> {
         Ok(DumbCreated { handle, pitch: layout.pitch, size })
     }
 
+    /// The core's own `MODE_MAP_DUMB`: the fake offset of the object of
+    /// `handle` in `file`, made if it has none.
+    pub fn dumb_map_offset_default(&self, file: CloneId, handle: u32, ctx: &Sleepable) -> Result<u64, Errno> {
+        let g = self.gem_or(ENOSYS)?;
+        let obj = g.lookup(file, handle)?;
+        let off = g.mmap_offset(&obj, ctx);
+        obj.put(ctx);
+        off
+    }
+
     /// Returns the synchronisation state: the fence domain drivers create
     /// their fences in, and the sync object and anonymous-file tables.
     pub fn sync(&self) -> &KArc<SyncCore<D::Object>> {
@@ -336,6 +346,21 @@ impl<D: Driver> Device<D> {
     /// Returns the mode-setting state, if the driver has a [`Driver::kms`].
     pub fn kms(&self) -> Option<&Kms<D::Object>> {
         self.kms.as_ref()
+    }
+
+    /// The node kind and opening process of open file `c`.
+    pub fn file_info(&self, c: CloneId) -> Option<(NodeKind, i32)> {
+        self.state.lock().file(c).map(|f| (f.kind, f.pid))
+    }
+
+    /// The device number `N` (`card<N>`, `renderD<128+N>`).
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// Whether the device has a render node.
+    pub fn has_render(&self) -> bool {
+        self.has_render
     }
 
     /// Returns the driver's state.
@@ -830,11 +855,9 @@ impl<D: Driver> Device<D> {
             Op::MapDumb => {
                 let mut a = UserArg::<uapi::drm_mode_map_dumb>::read(arg)?;
                 self.state.lock().permit(c, perm, privileged)?;
-                let g = self.dumb_gem()?;
+                self.dumb_gem()?;
                 // `pad` is ignored, as in Linux's drm_mode_mmap_dumb_ioctl.
-                let obj = g.lookup(c, a.get().handle)?;
-                let off = g.mmap_offset(&obj, ctx);
-                obj.put(ctx);
+                let off = self.driver.dumb_map_offset(self, c, a.get().handle, ctx);
                 // SAFETY: a field assignment.
                 unsafe { a.get_mut() }.offset = off?;
                 a.write(arg)?;

@@ -462,8 +462,47 @@ pub fn check_plane_helper<B>(
     can_position: bool,
     can_scale: bool,
 ) -> Result<(), Errno> {
-    let (Some(_), Some(c)) = (&new.fb, crtc) else { return Ok(()) };
-    let Some(mode) = c.mode.filter(|_| c.enable()) else { return Ok(()) };
+    let mode = crtc.filter(|c| c.enable()).and_then(|c| c.mode.as_ref());
+    let g = PlaneGeometry {
+        crtc_x: new.crtc_x,
+        crtc_y: new.crtc_y,
+        crtc_w: new.crtc_w,
+        crtc_h: new.crtc_h,
+        src_w: new.src_w,
+        src_h: new.src_h,
+    };
+    check_plane_geometry(new.fb.is_some(), mode, &g, can_position, can_scale)
+}
+
+/// The position and size of a plane, for [`check_plane_geometry`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlaneGeometry {
+    /// The destination's left edge on the CRTC.
+    pub crtc_x: i32,
+    /// The destination's top edge.
+    pub crtc_y: i32,
+    /// The destination's width.
+    pub crtc_w: u32,
+    /// The destination's height.
+    pub crtc_h: u32,
+    /// The source width, 16.16 fixed point.
+    pub src_w: u32,
+    /// The source height, 16.16 fixed point.
+    pub src_h: u32,
+}
+
+/// The rule of [`check_plane_helper`] on plain values: `has_fb` says
+/// whether the plane shows a framebuffer, `mode` is the mode of its CRTC
+/// if that CRTC is enabled with one. Also behind the facade's
+/// `drm_rkms_check_plane_helper`.
+pub fn check_plane_geometry(
+    has_fb: bool,
+    mode: Option<&DisplayMode>,
+    new: &PlaneGeometry,
+    can_position: bool,
+    can_scale: bool,
+) -> Result<(), Errno> {
+    let Some(mode) = mode.filter(|_| has_fb) else { return Ok(()) };
     let (w, h) = (i64::from(mode.hdisplay), i64::from(mode.vdisplay));
     let (x, y, cw, ch) = (i64::from(new.crtc_x), i64::from(new.crtc_y), i64::from(new.crtc_w), i64::from(new.crtc_h));
     if !can_scale && (u64::from(new.src_w) != (cw as u64) << 16 || u64::from(new.src_h) != (ch as u64) << 16) {
