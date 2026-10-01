@@ -23,7 +23,8 @@
 # Run as root in a directory that holds drm.a and drm.mapfile, rdrmnull.a,
 # rdrmnull.conf, rdrmnull-two.conf, virtio_gpu.a, cdrmnull (the module of
 # drivers/cdrmnull/build.sh), cdrmnull.conf, cdrmnull-two.conf,
-# cdrmnull_ioctl.h, the tests drm_r0_test.c to drm_r4_test.c, drm_g6_test.c
+# cdrmnull_ioctl.h, facade_mismatch.c, drm_facade_ctf.o (optional, from
+# modules/drm/ctf/build-ctf.sh), the tests drm_r0_test.c to drm_r4_test.c, drm_g6_test.c
 # and drm_r5a_test.c, drm-test-lib.sh, run-r1-test.sh, run-r3-test.sh,
 # run-r4-test.sh, run-g6-test.sh, the uAPI headers in drm/ and the facade
 # headers in include/drm/ with tools/facade/facade_layout.c. The machine
@@ -188,6 +189,37 @@ echo "$(grep -c '^size ' facade-gcc.out) sizes, $(grep -c '^offset ' facade-gcc.
 [ -s facade-gcc.out ] && pass "facade_layout.c compiles with gcc" || bad "facade_layout.c"
 step sh -c "kstat -p drm:0:sync | grep -E 'fences|syncobjs'"
 step sh -c 'echo "drm_facade_version::whatis" | mdb -k'
+# A driver built against another facade must refuse to load: the
+# facade_mismatch module runs drm_facade_check() in _init, built once
+# against a copy of the headers with major version 1 and once with a
+# larger struct drm_device.
+for v in major size; do
+	rm -rf mismatch-$v && mkdir -p mismatch-$v && cp -r include mismatch-$v/
+	case $v in
+	major) sed 's/^#define	DRM_FACADE_MAJOR	0$/#define	DRM_FACADE_MAJOR	1/' \
+	    include/drm/drm_facade_version.h > mismatch-$v/include/drm/drm_facade_version.h ;;
+	size) sed 's/uint64_t __core\[16\];/uint64_t __core[17];/' \
+	    include/drm/drm_device.h > mismatch-$v/include/drm/drm_device.h ;;
+	esac
+	cmp -s include/drm/drm_facade_version.h mismatch-$v/include/drm/drm_facade_version.h &&
+	    cmp -s include/drm/drm_device.h mismatch-$v/include/drm/drm_device.h && bad "mismatch-$v: no change"
+	n=$(grep -c facade_mismatch /var/adm/messages)
+	if step gcc -m64 -std=gnu99 -O2 -D_KERNEL -ffreestanding -mcmodel=kernel -mno-red-zone \
+	    -fno-builtin -mno-mmx -mno-sse -I mismatch-$v/include -c facade_mismatch.c -o mismatch-$v/fm.o &&
+	    step ld -ztype=kmod -N misc/drm -o mismatch-$v/facade_mismatch mismatch-$v/fm.o; then
+		if step modload ./mismatch-$v/facade_mismatch; then
+			bad "facade_mismatch ($v) loaded"
+			id=$(modid facade_mismatch)
+			[ -n "$id" ] && modunload -i "$id"
+		else
+			wait_log facade_mismatch "$n"
+			grep facade_mismatch /var/adm/messages | tail -1
+			pass "a driver built for another facade ($v) refuses to load"
+		fi
+	else
+		bad "facade_mismatch ($v) does not build"
+	fi
+done
 id=$(modid drm)
 if [ -n "$id" ] && step modunload -i "$id"; then
 	pass "misc/drm unloads with no driver"
