@@ -46,7 +46,8 @@ step() {
 . ./drm-test-lib.sh
 
 fail=0
-pass() { echo "PASS $*"; }
+npass=0
+pass() { echo "PASS $*"; npass=$((npass + 1)); }
 bad() { echo "FAIL $*"; fail=1; }
 
 ETC="/etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/driver_classes /etc/devlink.tab
@@ -351,6 +352,6 @@ for f in etc devices; do
 		bad "state $f changed"
 	fi
 done
-echo "checks: $(grep -c '^PASS' "$0.log" 2>/dev/null || echo see output)"
+echo "checks passed: $npass"
 [ $fail -eq 0 ] && echo "run-r5a-test: PASS" || echo "run-r5a-test: FAIL"
 exit $fail
