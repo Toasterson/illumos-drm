@@ -138,9 +138,12 @@ pub trait GemObject: Send + Sync + Sized + 'static {
         let _ = (gem, file);
     }
     /// The object is being destroyed (thread context), before its memory
-    /// goes: tell the device to stop using it.
-    fn release(gem: &mut Gem<Self>) {
+    /// goes: tell the device to stop using it. Return `false` if the
+    /// device may still use the memory (it did not answer): the core then
+    /// never frees it (`illumos_release`).
+    fn release(gem: &mut Gem<Self>) -> bool {
         let _ = gem;
+        true
     }
 }
 
@@ -204,12 +207,15 @@ impl<T: GemObject> Gem<T> {
     }
 }
 
+unsafe extern "C" fn release_thunk<T: GemObject>(obj: *mut sys::drm_gem_object) -> bool {
+    // SAFETY: the last reference is gone: nothing else uses the object.
+    T::release(unsafe { &mut *(obj as *mut Gem<T>) })
+}
+
 unsafe extern "C" fn free_thunk<T: GemObject>(obj: *mut sys::drm_gem_object) {
     // SAFETY: the structure is the first field of a boxed Gem<T> made by
     // GemRef::new; the core calls free once, in thread context.
-    let mut b = unsafe { Box::from_raw(obj as *mut Gem<T>) };
-    T::release(&mut b);
-    drop(b);
+    drop(unsafe { Box::from_raw(obj as *mut Gem<T>) });
 }
 
 unsafe extern "C" fn open_thunk<T: GemObject>(obj: *mut sys::drm_gem_object, file: *mut sys::drm_file) -> c_int {
@@ -268,6 +274,7 @@ impl<T: GemObject> Funcs for T {
         free: Some(free_thunk::<T>),
         open: Some(open_thunk::<T>),
         close: Some(close_thunk::<T>),
+        illumos_release: Some(release_thunk::<T>),
         illumos_umem: if T::CUSTOM_UMEM { Some(umem_thunk::<T>) } else { None },
         illumos_mapped: Some(mapped_thunk::<T>),
         illumos_access: Some(access_thunk::<T>),

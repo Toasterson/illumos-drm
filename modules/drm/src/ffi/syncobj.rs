@@ -166,6 +166,34 @@ pub unsafe extern "C" fn drm_sync_file_install(fence: *mut f::dma_fence, cloexec
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_sync_file_get_fence(fd: i32, fence: *mut *mut f::dma_fence) -> i32 {
+    // SAFETY: documented for ioctl handlers, thread context.
+    let ctx = unsafe { super::sleepable() };
+    if fence.is_null() {
+        return neg(Errno::EINVAL);
+    }
+    let r = crate::ctxt::with_current(|frame, arg| {
+        // SAFETY: as in drm_sync_file_install.
+        let core = unsafe { frame.core.as_ref() };
+        let d = core.device().ok_or(Errno::ENODEV)?;
+        d.sync().sync_file_fence(fd, arg, &ctx)
+    });
+    match r {
+        Some(Ok(fc)) => {
+            let p = super::fence::proxy(fc);
+            if p.is_null() {
+                return neg(Errno::ENOMEM);
+            }
+            // SAFETY: checked above.
+            unsafe { *fence = p };
+            0
+        }
+        Some(Err(e)) => neg(e),
+        None => neg(Errno::EINVAL),
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sync_file_get_fence(fd: i32) -> *mut f::dma_fence {
     // SAFETY: documented for ioctl handlers, thread context.
     let ctx = unsafe { super::sleepable() };

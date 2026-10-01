@@ -77,11 +77,14 @@ pub fn sync_file_export(f: &Fence, cloexec: bool) -> Result<i32, Errno> {
     Ok(fd)
 }
 
-/// The fence of sync file `fd` of the calling process (`EINVAL` for
-/// another kind of file); inside an ioctl handler.
+/// The fence of sync file `fd` of the calling process: `EBADF` for no
+/// such descriptor, `EINVAL` for another kind of file, `ENOTSUP` for a
+/// sync file of a device with another fence priority; inside an ioctl
+/// handler.
 pub fn sync_file_fence(fd: i32) -> Result<Fence, Errno> {
+    let mut p = core::ptr::null_mut();
     // SAFETY: inside a handler.
-    let p = unsafe { sys::sync_file_get_fence(fd) };
+    check(unsafe { sys::drm_illumos_sync_file_get_fence(fd, &mut p) })?;
     // SAFETY: returned with a reference for us.
     unsafe { Fence::from_owned(p) }.ok_or(Errno::EINVAL)
 }

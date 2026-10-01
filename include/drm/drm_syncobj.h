@@ -53,9 +53,9 @@ extern int drm_syncobj_find_fence(struct drm_file *file_private,
 
 /*
  * Sync files. Linux's sync_file_create() followed by fd_install() is one
- * step on illumos: drm_sync_file_install() makes a sync file of `fence`
- * and a descriptor of the calling process for it (with O_CLOEXEC if
- * `cloexec`). Only inside an ioctl handler. Returns 0 and the descriptor
+ * step on illumos: drm_sync_file_install() makes a sync file of `fence`,
+ * named after the driver of the ioctl's device, and a descriptor of the
+ * calling process for it (with O_CLOEXEC if `cloexec`). Only inside an ioctl handler. Returns 0 and the descriptor
  * in *fdp, or a negative errno.
  */
 extern int drm_sync_file_install(struct dma_fence *fence, bool cloexec,
@@ -66,6 +66,14 @@ extern int drm_sync_file_install(struct dma_fence *fence, bool cloexec,
  * reference, or NULL (not a sync file). Only inside an ioctl handler.
  */
 extern struct dma_fence *sync_file_get_fence(int fd);
+
+/*
+ * sync_file_get_fence() with the reason of a failure (an illumos
+ * addition): 0 and the fence in *fence, or -EBADF (no such descriptor),
+ * -EINVAL (not a sync file), -ENOTSUP (a sync file of a device whose
+ * fences are signalled at another interrupt priority).
+ */
+extern int drm_illumos_sync_file_get_fence(int fd, struct dma_fence **fence);
 
 #ifdef	__cplusplus
 }

@@ -803,6 +803,7 @@ pub struct drm_gem_object_funcs {
     pub open:
         ::core::option::Option<unsafe extern "C" fn(obj: *mut drm_gem_object, file: *mut drm_file) -> core::ffi::c_int>,
     pub close: ::core::option::Option<unsafe extern "C" fn(obj: *mut drm_gem_object, file: *mut drm_file)>,
+    pub illumos_release: ::core::option::Option<unsafe extern "C" fn(obj: *mut drm_gem_object) -> bool>,
     pub illumos_umem: ::core::option::Option<unsafe extern "C" fn(obj: *mut drm_gem_object) -> ddi_umem_cookie_t>,
     pub illumos_mapped: ::core::option::Option<
         unsafe extern "C" fn(obj: *mut drm_gem_object, map: *mut drm_illumos_mapping) -> core::ffi::c_int,
@@ -818,19 +819,21 @@ pub struct drm_gem_object_funcs {
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of drm_gem_object_funcs"][::core::mem::size_of::<drm_gem_object_funcs>() - 56usize];
+    ["Size of drm_gem_object_funcs"][::core::mem::size_of::<drm_gem_object_funcs>() - 64usize];
     ["Alignment of drm_gem_object_funcs"][::core::mem::align_of::<drm_gem_object_funcs>() - 8usize];
     ["Offset of field: drm_gem_object_funcs::free"][::core::mem::offset_of!(drm_gem_object_funcs, free) - 0usize];
     ["Offset of field: drm_gem_object_funcs::open"][::core::mem::offset_of!(drm_gem_object_funcs, open) - 8usize];
     ["Offset of field: drm_gem_object_funcs::close"][::core::mem::offset_of!(drm_gem_object_funcs, close) - 16usize];
+    ["Offset of field: drm_gem_object_funcs::illumos_release"]
+        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_release) - 24usize];
     ["Offset of field: drm_gem_object_funcs::illumos_umem"]
-        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_umem) - 24usize];
+        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_umem) - 32usize];
     ["Offset of field: drm_gem_object_funcs::illumos_mapped"]
-        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_mapped) - 32usize];
+        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_mapped) - 40usize];
     ["Offset of field: drm_gem_object_funcs::illumos_access"]
-        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_access) - 40usize];
+        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_access) - 48usize];
     ["Offset of field: drm_gem_object_funcs::illumos_movable"]
-        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_movable) - 48usize];
+        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_movable) - 56usize];
 };
 #[repr(C)]
 pub struct drm_gem_object {
@@ -1255,6 +1258,9 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn sync_file_get_fence(fd: core::ffi::c_int) -> *mut dma_fence;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_sync_file_get_fence(fd: core::ffi::c_int, fence: *mut *mut dma_fence) -> core::ffi::c_int;
 }
 pub const DRM_UT_CORE: drm_debug_category = 1;
 pub const DRM_UT_DRIVER: drm_debug_category = 2;

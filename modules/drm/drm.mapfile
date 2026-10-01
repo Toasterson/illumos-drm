@@ -89,6 +89,7 @@ SYMBOL_SCOPE {
 		drm_illumos_mapping_object_offset;
 		drm_illumos_mapping_unload;
 		drm_illumos_mapping_user_offset;
+		drm_illumos_sync_file_get_fence;
 		drm_ioctl;
 		drm_minor_instance;
 		drm_mode_size_dumb;

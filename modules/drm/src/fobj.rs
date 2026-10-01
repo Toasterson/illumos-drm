@@ -58,6 +58,9 @@ pub(crate) struct FObj {
     /// leaves the structure to its maker, as Linux's `drm_gem_object_init`
     /// leaves it to the driver.
     armed: core::sync::atomic::AtomicBool,
+    /// The driver's release said its device may still use the memory:
+    /// the backings are never freed.
+    leak: bool,
 }
 
 // SAFETY: the C structure is only touched through the facade's functions
@@ -124,6 +127,7 @@ impl FObj {
             segments: core::sync::atomic::AtomicUsize::new(segments),
             imported: AtomicPtr::new(imported),
             armed: core::sync::atomic::AtomicBool::new(false),
+            leak: false,
         })
     }
 
@@ -188,6 +192,13 @@ impl FObj {
 
 impl Drop for FObj {
     fn drop(&mut self) {
+        if self.leak {
+            // The device may still write into the memory: never free it.
+            let mut l = self.mem.lock();
+            while let Some(m) = l.swap_remove(0) {
+                core::mem::forget(m);
+            }
+        }
         if !self.armed.load(Ordering::Acquire) && ptr::eq(self.funcs, &IMPORT_FUNCS) {
             // A core-made import whose creation failed: its box is ours.
             // SAFETY: the box made by import_object, never freed (release
@@ -277,6 +288,17 @@ impl GemObject for FObj {
         if !self.armed.load(Ordering::Acquire) {
             return;
         }
+        if let Some(rel) = self.funcs.illumos_release {
+            // SAFETY: the driver's callback with its object, whose last
+            // reference is gone; thread context.
+            if !unsafe { rel(self.base()) } {
+                self.leak = true;
+                self.core().dip.warn(format_args!(
+                    "a GEM object of {} bytes is never freed: its device may still use it",
+                    self.bytes.load(Ordering::Relaxed)
+                ));
+            }
+        }
         // The core has released everything that refers to the object; the
         // C structure goes now. Its tail no longer names a live object.
         // SAFETY: the C structure is live until this call.
@@ -314,6 +336,7 @@ static IMPORT_FUNCS: f::drm_gem_object_funcs = f::drm_gem_object_funcs {
     free: Some(import_free),
     open: None,
     close: None,
+    illumos_release: None,
     illumos_umem: None,
     illumos_mapped: None,
     illumos_access: None,

@@ -83,6 +83,7 @@ SYMBOL_SCOPE {
 		drm_illumos_mapping_object_offset	{ FLAGS = EXTERN };
 		drm_illumos_mapping_unload	{ FLAGS = EXTERN };
 		drm_illumos_mapping_user_offset	{ FLAGS = EXTERN };
+		drm_illumos_sync_file_get_fence	{ FLAGS = EXTERN };
 		drm_ioctl	{ FLAGS = EXTERN };
 		drm_minor_instance	{ FLAGS = EXTERN };
 		drm_mode_size_dumb	{ FLAGS = EXTERN };

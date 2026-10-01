@@ -68,6 +68,14 @@ struct drm_illumos_fault;
  *		negative errno refuses the handle. Optional.
  * close	a handle of the object on `file` was closed (once per
  *		handle, as Linux's drm_gem_object_release_handle). Optional.
+ * illumos_release
+ *		called when the last reference is gone and the core has
+ *		released its state, before free, in thread context: the driver
+ *		tells its device to stop using the object's memory. Returning
+ *		false says the device may still use it (it did not answer);
+ *		the core then never frees the object's backings (they are
+ *		leaked, with a warning) rather than let the device write into
+ *		freed pages. Optional.
  * illumos_umem	the ddi_umem cookie that user mappings of the object map
  *		now. NULL means the system memory drm_gem_object_init()
  *		allocated. Required for objects made with
@@ -89,6 +97,7 @@ struct drm_gem_object_funcs {
 	int (*open)(struct drm_gem_object *obj, struct drm_file *file);
 	void (*close)(struct drm_gem_object *obj, struct drm_file *file);
 	/* illumos additions */
+	bool (*illumos_release)(struct drm_gem_object *obj);
 	ddi_umem_cookie_t (*illumos_umem)(struct drm_gem_object *obj);
 	int (*illumos_mapped)(struct drm_gem_object *obj,
 	    struct drm_illumos_mapping *map);
