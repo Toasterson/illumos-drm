@@ -24,8 +24,8 @@ kernel = ["ddi/panic-handler", "ddi/global-alloc-sleep"]
 # unstable-gate-cda5b9a49f-virtio: the virtio framework (misc/virtio), a
 # private interface checked against illumos cda5b9a49f.
 ddi = { workspace = true, features = ["unstable-gate-cda5b9a49f-virtio"] }
-# The DRM core is the module misc/drm; the driver uses it through the
-# facade (drm-facade-sys brings -N misc/drm).
+# The DRM core is the module misc/drm_core; the driver uses it through the
+# facade (drm-facade-sys brings -N misc/drm_core).
 drm-facade.workspace = true
 drm-uapi.workspace = true
 

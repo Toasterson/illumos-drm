@@ -8,15 +8,18 @@
  * cdrmnull: a DRM driver without hardware, in C, on the illumos-drm facade.
  *
  * cdrmnull is the C port of the Rust test driver rdrmnull and the first C
- * driver of misc/drm (work item R5a): it uses nothing of the DRM core but
- * the facade's C functions (include/drm), and it is linked against
- * misc/drm (ld -N misc/drm) instead of carrying a copy of the core. It
- * registers one DRM device per instance of its pseudo node (cdrmnull.conf
- * asks for instance 0), with the primary node card<N> and the render node
- * renderD<128+N>, and declares mode setting and atomic support, as
- * rdrmnull does, so that every capability path of the core answers. It
- * has no display: rdrmnull's virtual display (milestone R3) waits for the
- * C mode-setting core (R5i).
+ * driver of misc/drm_core (work item R5a): it uses nothing of the DRM core
+ * but the facade's C functions (include/drm), and it is linked against
+ * misc/drm_core (ld -N misc/drm_core) instead of carrying a copy of the
+ * core. It registers one DRM device per instance of its pseudo node
+ * (cdrmnull.conf asks for instance 0), with the primary node card<N> and
+ * the render node renderD<128+N>, and declares mode setting and atomic
+ * support, as rdrmnull does, so that every capability path of the core
+ * answers. It has no display: rdrmnull's virtual display (milestone R3)
+ * waits for the C mode-setting core (R5i). Nor does it port rdrmnull's
+ * DMA test properties (dma-mode, dma-max-transfer), which exercise the
+ * core's DMA binding on the device's own node; the Rust driver keeps
+ * them.
  *
  * GEM objects and dumb buffers live in system memory. As a pseudo device
  * it does no DMA, so its objects have no scatter/gather table.
@@ -59,7 +62,7 @@
  * working.
  *
  * The test fences are the driver's own structures (struct cdrmnull_tlf,
- * dma_fence_init()), so they belong to the fence domain of misc/drm
+ * dma_fence_init()), so they belong to the fence domain of misc/drm_core
  * (kstat drm:0:sync), not to the device's (kstat cdrmnull:<N>:sync).
  *
  * One symbol outside the DDI is used: devmap_umem_remap (see below).
@@ -97,7 +100,7 @@
 #define	CDRMNULL_MAX_DELAY_MS	10000
 /*
  * The page of GEM object sizes: the core's (drm_gem_object_init() takes
- * whole 4 KiB pages; misc/drm refuses to attach a device on a system with
+ * whole 4 KiB pages; misc/drm_core refuses to attach a device on a system with
  * another page size). PAGESIZE would be genunix's variable _pagesize,
  * which is not part of the DDI.
  */
@@ -201,6 +204,8 @@ struct cdrmnull {
 	uint64_t tl_signaled;
 	/* The timers of pending fences; thread context only. */
 	kmutex_t timers_lock;
+	/* The calls of the unregistration test (cdrmnull_unregister_race). */
+	volatile uint64_t race_calls;
 	list_t tl_timers;
 };
 
@@ -978,16 +983,148 @@ cdrmnull_ioctl_prime_selftest(struct drm_device *dev, void *data,
 			return (dbuf == NULL ? -ENOMEM : (int)PTR_ERR(dbuf));
 		}
 		fd = dma_buf_fd(dbuf, DRM_CLOEXEC | DRM_RDWR);
-		/* The descriptor's file holds the buffer now. */
-		dma_buf_put(dbuf);
 		drm_gem_object_put(obj);
-		if (fd < 0)
+		if (fd < 0) {
+			dma_buf_put(dbuf);
 			return (fd);
+		}
+		/* The descriptor took over our reference, as on Linux. */
 		a->fd = fd;
 		return (0);
 	default:
 		return (-EINVAL);
 	}
+}
+
+/* --- FENCE_SELFTEST: the facade's fence callbacks ----------------------- */
+
+struct cdrmnull_cbt {
+	struct dma_fence_cb cb;
+	volatile uint32_t ran;
+	boolean_t put_fence;
+};
+
+static void
+cdrmnull_cbt_func(struct dma_fence *fence, struct dma_fence_cb *cb)
+{
+	struct cdrmnull_cbt *t = container_of(cb, struct cdrmnull_cbt, cb);
+
+	t->ran++;
+	/* The last reference to the structure of this very fence. */
+	if (t->put_fence)
+		dma_fence_put(fence);
+}
+
+/*
+ * A new fence of the device with a second structure for it: `*second`
+ * from the sync object, which holds the core fence after this.
+ */
+static struct dma_fence *
+cdrmnull_fence_pair(struct drm_device *dev, struct drm_file *file,
+    struct drm_syncobj *so, uint32_t handle, struct dma_fence **second)
+{
+	struct dma_fence *f;
+
+	f = drm_illumos_fence_create(dev, dma_fence_context_alloc(1), 1);
+	if (IS_ERR(f))
+		return (NULL);
+	drm_syncobj_replace_fence(so, f);
+	*second = NULL;
+	if (drm_syncobj_find_fence(file, handle, 0, 0, second) != 0 ||
+	    *second == NULL || *second == f) {
+		drm_syncobj_replace_fence(so, NULL);
+		dma_fence_put(*second);
+		dma_fence_put(f);
+		return (NULL);
+	}
+	return (f);
+}
+
+static int
+cdrmnull_ioctl_fence_selftest(struct drm_device *dev, void *data,
+    struct drm_file *file)
+{
+	struct cdrmnull_fence_selftest *a = data;
+	struct cdrmnull_cbt *t;
+	struct drm_syncobj *so;
+	struct dma_fence *f, *g;
+	uint32_t passed = 0;
+
+	if (a->pad != 0 || a->pad2 != 0)
+		return (-EINVAL);
+	if ((so = drm_syncobj_find(file, a->syncobj)) == NULL)
+		return (-ENOENT);
+	t = kmem_zalloc(2 * sizeof (*t), KM_SLEEP);
+
+	/* SELF_PUT: the callback drops the last reference to f. */
+	if ((f = cdrmnull_fence_pair(dev, file, so, a->syncobj, &g)) != NULL) {
+		t[0].put_fence = B_TRUE;
+		if (dma_fence_add_callback(f, &t[0].cb, cdrmnull_cbt_func) ==
+		    0) {
+			/* f's reference is the callback's now. */
+			dma_fence_signal(g);
+			if (t[0].ran == 1)
+				passed |= CDRMNULL_FENCE_T_SELF_PUT;
+		} else {
+			dma_fence_put(f);
+		}
+		dma_fence_put(g);
+		drm_syncobj_replace_fence(so, NULL);
+	}
+
+	/* REMOVE and SIGNALED, on one structure. */
+	bzero(t, 2 * sizeof (*t));
+	f = drm_illumos_fence_create(dev, dma_fence_context_alloc(1), 1);
+	if (!IS_ERR(f)) {
+		if (dma_fence_add_callback(f, &t[0].cb, cdrmnull_cbt_func) ==
+		    0 && dma_fence_remove_callback(f, &t[0].cb)) {
+			dma_fence_signal(f);
+			if (t[0].ran == 0)
+				passed |= CDRMNULL_FENCE_T_REMOVE;
+		}
+		if (dma_fence_add_callback(f, &t[1].cb, cdrmnull_cbt_func) ==
+		    -ENOENT && t[1].ran == 0)
+			passed |= CDRMNULL_FENCE_T_SIGNALED;
+		dma_fence_put(f);
+	}
+
+	/* RELEASED: f goes with its callback added. */
+	bzero(t, 2 * sizeof (*t));
+	if ((f = cdrmnull_fence_pair(dev, file, so, a->syncobj, &g)) != NULL) {
+		if (dma_fence_add_callback(f, &t[0].cb, cdrmnull_cbt_func) ==
+		    0) {
+			dma_fence_put(f);
+			dma_fence_signal(g);
+			if (t[0].ran == 0)
+				passed |= CDRMNULL_FENCE_T_RELEASED;
+		} else {
+			dma_fence_put(f);
+		}
+		dma_fence_put(g);
+		drm_syncobj_replace_fence(so, NULL);
+	}
+
+	/* QUEUED: the first callback releases f; the second never runs. */
+	bzero(t, 2 * sizeof (*t));
+	if ((f = cdrmnull_fence_pair(dev, file, so, a->syncobj, &g)) != NULL) {
+		t[0].put_fence = B_TRUE;
+		if (dma_fence_add_callback(f, &t[0].cb, cdrmnull_cbt_func) ==
+		    0 && dma_fence_add_callback(f, &t[1].cb,
+		    cdrmnull_cbt_func) == 0) {
+			dma_fence_signal(g);
+			if (t[0].ran == 1 && t[1].ran == 0)
+				passed |= CDRMNULL_FENCE_T_QUEUED;
+		} else {
+			dma_fence_put(f);
+		}
+		dma_fence_put(g);
+		drm_syncobj_replace_fence(so, NULL);
+	}
+
+	kmem_free(t, 2 * sizeof (*t));
+	drm_syncobj_put(so);
+	a->passed = passed;
+	return (0);
 }
 
 /*
@@ -1007,6 +1144,8 @@ static const struct drm_ioctl_desc cdrmnull_ioctls[] = {
 	    DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(CDRMNULL_PRIME_SELFTEST,
 	    cdrmnull_ioctl_prime_selftest, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(CDRMNULL_FENCE_SELFTEST,
+	    cdrmnull_ioctl_fence_selftest, DRM_RENDER_ALLOW),
 };
 
 /* --- the DRM driver ------------------------------------------------------- */
@@ -1234,11 +1373,32 @@ fail:
 	return (DDI_FAILURE);
 }
 
+/*
+ * The unregistration test: while detach unregisters the device, periodic
+ * handlers on other threads, one at thread level and one at soft
+ * interrupt level, keep calling a facade function that uses the
+ * registered device (drm_illumos_fence_context_alloc(), any context).
+ * They must neither fail nor touch a freed device: misc/drm_core takes
+ * the device out of its tables and waits for every such call before it
+ * frees it.
+ */
+static void
+cdrmnull_unregister_race(void *arg)
+{
+	struct cdrmnull *cn = arg;
+	int i;
+
+	for (i = 0; i < 4096; i++)
+		(void) drm_illumos_fence_context_alloc(&cn->drm, 1);
+	atomic_add_64(&cn->race_calls, 4096);
+}
+
 static int
 cdrmnull_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 {
 	struct cdrmnull **slot;
 	struct cdrmnull *cn;
+	ddi_periodic_t p0, p1;
 	int instance, r;
 
 	if (cmd != DDI_DETACH)
@@ -1251,7 +1411,20 @@ cdrmnull_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	 * Refused (-EBUSY) while files are open or objects, fences or sync
 	 * objects remain; the device is then still registered and working.
 	 */
-	if ((r = drm_dev_unregister(&cn->drm)) != 0) {
+	cn->race_calls = 0;
+	p0 = ddi_periodic_add(cdrmnull_unregister_race, cn, 1000000,
+	    DDI_IPL_0);
+	p1 = ddi_periodic_add(cdrmnull_unregister_race, cn, 1000000,
+	    DDI_IPL_1);
+	/* Let both run a few times before and during the unregistration. */
+	delay(drv_usectohz(5000));
+	r = drm_dev_unregister(&cn->drm);
+	delay(drv_usectohz(5000));
+	ddi_periodic_delete(p0);
+	ddi_periodic_delete(p1);
+	dev_err(dip, CE_NOTE, "!unregister (%d) raced %llu facade calls", r,
+	    (unsigned long long)cn->race_calls);
+	if (r != 0) {
 		dev_err(dip, CE_NOTE, "!detach refused (%d)", r);
 		return (DDI_FAILURE);
 	}
@@ -1295,7 +1468,7 @@ _init(void)
 {
 	int r;
 
-	/* misc/drm must be the facade this driver was compiled against. */
+	/* misc/drm_core must be the facade this driver was compiled against. */
 	if ((r = drm_facade_check(CDRMNULL_NAME)) != 0)
 		return (r);
 	if ((r = ddi_soft_state_init(&cdrmnull_state,

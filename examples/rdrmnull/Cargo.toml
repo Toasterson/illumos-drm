@@ -14,8 +14,8 @@ crate-type = ["staticlib"]
 # global-alloc-sleep: the driver's own boxes and vectors (KM_SLEEP, thread
 # context only).
 ddi = { workspace = true, features = ["panic-handler", "global-alloc-sleep"] }
-# The DRM core is the module misc/drm; the driver uses it through the
-# facade (drm-facade-sys brings -N misc/drm).
+# The DRM core is the module misc/drm_core; the driver uses it through the
+# facade (drm-facade-sys brings -N misc/drm_core).
 drm-facade.workspace = true
 drm-uapi.workspace = true
 

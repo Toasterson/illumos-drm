@@ -32,7 +32,7 @@
 //!   `drm_dma_errno_test.c` record the errno userland gets).
 //! * `"root-node"`: the drill that reproduced the 2026-09-28 root-node
 //!   panic. It needed the core to allocate DMA handles against a node the
-//!   driver does not own; since R5a the core is the module `misc/drm`,
+//!   driver does not own; since R5a the core is the module `misc/drm_core`,
 //!   whose facade takes DMA attributes only for the driver's own node
 //!   (`drm_dev_illumos_set_dma_attr`), so the drill is gone and the mode is
 //!   refused at attach. illumos-ddi makes the panic impossible by type
@@ -88,8 +88,8 @@
 //! [`drm_facade::Driver`], register a [`drm_facade::Device`] as the
 //! instance, point `cb_ops` at the core (`drm_facade::CB_OPS`) and map
 //! minor numbers with [`drm_facade::instance_of_minor`]. The core itself
-//! is the module `misc/drm`, which every DRM driver links against
-//! (`-N misc/drm`); the driver calls nothing of it but the facade's C
+//! is the module `misc/drm_core`, which every DRM driver links against
+//! (`-N misc/drm_core`); the driver calls nothing of it but the facade's C
 //! functions, through `drm-facade`.
 #![no_std]
 
@@ -117,7 +117,7 @@ use drm_uapi::ioc;
 
 ddi::module! {
     driver: RDrmNull,
-    cb_ops: drm_facade::CB_OPS.get(),
+    cb_ops: unsafe drm_facade::CB_OPS.get(),
 }
 
 /// The `ddi::Driver` of the module.
@@ -786,7 +786,7 @@ impl Driver for RDrmNull {
     type Instance = Device<NullDriver>;
     const LINKINFO: &'static CStr = c"Rust DRM null driver r5a";
 
-    /// Refuses to load on a `misc/drm` with another facade version or
+    /// Refuses to load on a `misc/drm_core` with another facade version or
     /// other structure sizes than this driver was built against.
     fn load(_ctx: &Sleepable) -> Result<(), Errno> {
         drm_facade::check_facade("rdrmnull")

@@ -7,7 +7,7 @@
 # Builds the cdrmnull kernel module on illumos: compiles cdrmnull.c with
 # gcc and the illumos-gate's kernel flags (usr/src/Makefile.master,
 # uts/Makefile.uts, uts/intel/Makefile.intel, as tools/cw translates them
-# for gcc), then links it as a kernel module that depends on misc/drm and
+# for gcc), then links it as a kernel module that depends on misc/drm_core and
 # whose every undefined symbol is declared by a mapfile (-z defs).
 #
 #   drivers/cdrmnull/build.sh
@@ -24,7 +24,7 @@
 #   OUT          where cdrmnull.o and the module cdrmnull go [.]
 #
 # The module is linked with
-#   ld -ztype=kmod -N misc/drm -z defs -M ddi.mapfile \
+#   ld -ztype=kmod -N misc/drm_core -z defs -M ddi.mapfile \
 #       -M include/drm/drm_facade.mapfile -M private.mapfile
 # private.mapfile declares devmap_umem_remap, the one symbol outside the
 # DDI, and the soft interrupt functions of the DDI that the gate's
@@ -117,9 +117,9 @@ echo "\$ $CC $CFLAGS $CPPFLAGS -c $HERE/cdrmnull.c -o $OUT/cdrmnull.o"
 # shellcheck disable=SC2086 # word splitting of the flag lists
 "$CC" $CFLAGS $CPPFLAGS -c "$HERE/cdrmnull.c" -o "$OUT/cdrmnull.o"
 
-echo "\$ $LD -ztype=kmod -N misc/drm -z defs -M $DDI_MAPFILE" \
+echo "\$ $LD -ztype=kmod -N misc/drm_core -z defs -M $DDI_MAPFILE" \
     "-M $FACADE_MAPFILE -M $PRIVATE_MAPFILE -o $OUT/cdrmnull $OUT/cdrmnull.o"
-"$LD" -ztype=kmod -N misc/drm -z defs -M "$DDI_MAPFILE" \
+"$LD" -ztype=kmod -N misc/drm_core -z defs -M "$DDI_MAPFILE" \
     -M "$FACADE_MAPFILE" -M "$PRIVATE_MAPFILE" \
     -o "$OUT/cdrmnull" "$OUT/cdrmnull.o"
 

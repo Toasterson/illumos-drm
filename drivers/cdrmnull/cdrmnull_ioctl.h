@@ -42,6 +42,7 @@ extern "C" {
 #define	DRM_CDRMNULL_FENCE		0x05
 #define	DRM_CDRMNULL_BO_WAIT		0x06
 #define	DRM_CDRMNULL_PRIME_SELFTEST	0x07
+#define	DRM_CDRMNULL_FENCE_SELFTEST	0x08
 
 /*
  * CREATE_MOVABLE: a test object with two backings of the same size, the
@@ -159,6 +160,35 @@ struct cdrmnull_prime_selftest {
 #define	CDRMNULL_PRIME_IMPORT		(1u << 0)
 #define	CDRMNULL_PRIME_EXPORT		(1u << 1)
 
+/*
+ * FENCE_SELFTEST: drives the facade's fence callbacks from a driver.
+ * syncobj in (a sync object of the caller's file, used to get a second
+ * structure for one core fence), passed out (the CDRMNULL_FENCE_T_* bits
+ * of the checks that passed); pad must be 0. Render nodes may call it.
+ *
+ * SELF_PUT	a callback drops the last reference to its own structure
+ *		while the fence signals through another structure.
+ * REMOVE	a callback removed before the fence signals never runs.
+ * SIGNALED	adding a callback to a signalled fence fails with ENOENT.
+ * RELEASED	a callback still added when its structure is released never
+ *		runs.
+ * QUEUED	a callback queued behind one that releases the structure
+ *		never runs.
+ */
+struct cdrmnull_fence_selftest {
+	__u32 syncobj;
+	__u32 passed;
+	__u32 pad;
+	__u32 pad2;
+};
+
+#define	CDRMNULL_FENCE_T_SELF_PUT	(1u << 0)
+#define	CDRMNULL_FENCE_T_REMOVE		(1u << 1)
+#define	CDRMNULL_FENCE_T_SIGNALED	(1u << 2)
+#define	CDRMNULL_FENCE_T_RELEASED	(1u << 3)
+#define	CDRMNULL_FENCE_T_QUEUED		(1u << 4)
+#define	CDRMNULL_FENCE_T_ALL		0x1fu
+
 #define	DRM_IOCTL_CDRMNULL_CREATE_MOVABLE \
 	DRM_IOWR((DRM_COMMAND_BASE + DRM_CDRMNULL_CREATE_MOVABLE), \
 	    struct cdrmnull_create_movable)
@@ -177,6 +207,9 @@ struct cdrmnull_prime_selftest {
 #define	DRM_IOCTL_CDRMNULL_PRIME_SELFTEST \
 	DRM_IOWR((DRM_COMMAND_BASE + DRM_CDRMNULL_PRIME_SELFTEST), \
 	    struct cdrmnull_prime_selftest)
+#define	DRM_IOCTL_CDRMNULL_FENCE_SELFTEST \
+	DRM_IOWR((DRM_COMMAND_BASE + DRM_CDRMNULL_FENCE_SELFTEST), \
+	    struct cdrmnull_fence_selftest)
 
 /* The names the rdrmnull tests use, with this driver's prefix. */
 #define	CDRMNULL_IOCTL_CREATE_MOVABLE	DRM_IOCTL_CDRMNULL_CREATE_MOVABLE
@@ -186,6 +219,7 @@ struct cdrmnull_prime_selftest {
 #define	CDRMNULL_IOCTL_FENCE		DRM_IOCTL_CDRMNULL_FENCE
 #define	CDRMNULL_IOCTL_BO_WAIT		DRM_IOCTL_CDRMNULL_BO_WAIT
 #define	CDRMNULL_IOCTL_PRIME_SELFTEST	DRM_IOCTL_CDRMNULL_PRIME_SELFTEST
+#define	CDRMNULL_IOCTL_FENCE_SELFTEST	DRM_IOCTL_CDRMNULL_FENCE_SELFTEST
 
 #ifdef	__cplusplus
 }

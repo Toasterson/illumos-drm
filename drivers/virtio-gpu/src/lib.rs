@@ -5,7 +5,7 @@
 //! A DRM driver for the virtio GPU device (virtio 1.2, section 5.7; PCI
 //! `1af4:1050`), the milestone R4 of the illumos DRM core.
 //!
-//! Since milestone R5a the DRM core is the kernel module `misc/drm`, and
+//! Since milestone R5a the DRM core is the kernel module `misc/drm_core`, and
 //! the driver uses it only through the facade (`drm-facade`): it
 //! registers a [`drm_facade::Device`] with its DMA attributes, mode
 //! configuration and bus ID, points its `cb_ops` at the core, and makes
@@ -75,7 +75,7 @@ use crate::object::{Create, DevRef};
 
 ddi::module! {
     driver: VirtioGpuModule,
-    cb_ops: drm_facade::CB_OPS.get(),
+    cb_ops: unsafe drm_facade::CB_OPS.get(),
 }
 
 /// The kernel module.
@@ -309,7 +309,7 @@ impl Driver for VirtioGpuModule {
     type Instance = Device<VirtioGpu>;
     const LINKINFO: &'static CStr = c"virtio-gpu DRM driver (illumos-drm R5a)";
 
-    /// Refuses to load on a `misc/drm` with another facade version or
+    /// Refuses to load on a `misc/drm_core` with another facade version or
     /// other structure sizes than this driver was built against.
     fn load(_ctx: &Sleepable) -> Result<(), Errno> {
         drm_facade::check_facade("virtio_gpu")
