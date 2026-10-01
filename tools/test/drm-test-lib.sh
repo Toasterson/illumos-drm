@@ -96,11 +96,12 @@ dri_link() {
 }
 
 # rdrmnull_nodes: exports DRM_CARD, DRM_RENDER and DRM_INSTANCE for
-# rdrmnull@0 and, if it exists, DRM_CARD1 for rdrmnull@1. Fails unless the
+# the driver DRM_DRIVER (default rdrmnull) instance 0 and, if it exists,
+# DRM_CARD1 for its instance 1. Fails unless the
 # card and render numbers agree (card<N>, renderD<128+N>).
 rdrmnull_nodes() {
-	DRM_CARD=$(dri_link rdrmnull@0 card) || return 1
-	DRM_RENDER=$(dri_link rdrmnull@0 renderD) || return 1
+	DRM_CARD=$(dri_link "${DRM_DRIVER:-rdrmnull}@0" card) || return 1
+	DRM_RENDER=$(dri_link "${DRM_DRIVER:-rdrmnull}@0" renderD) || return 1
 	DRM_INSTANCE=0
 	n=${DRM_CARD##*card}
 	if [ "${DRM_RENDER##*renderD}" != $((128 + n)) ]; then
@@ -108,8 +109,8 @@ rdrmnull_nodes() {
 		return 1
 	fi
 	export DRM_CARD DRM_RENDER DRM_INSTANCE
-	if [ -d /devices/pseudo ] && ls /devices/pseudo | grep -q '^rdrmnull@1:card'; then
-		DRM_CARD1=$(dri_link rdrmnull@1 card) || return 1
+	if [ -d /devices/pseudo ] && ls /devices/pseudo | grep -q "^${DRM_DRIVER:-rdrmnull}@1:card"; then
+		DRM_CARD1=$(dri_link "${DRM_DRIVER:-rdrmnull}@1" card) || return 1
 		export DRM_CARD1
 	fi
 	echo "rdrmnull nodes: DRM_CARD=$DRM_CARD DRM_RENDER=$DRM_RENDER DRM_CARD1=${DRM_CARD1:-none}"
