@@ -84,6 +84,9 @@ boots after `drmadm select new` (25) and `select legacy` (8), `noload`,
 packaged drivers removed (75 checks, `nobody` opening the card nodes
 included). The second guest's `select-new` phase had found that the first
 `drmadm status` attached the drivers by following the `/dev/dri` links.
+A fourth guest at the final revision passed the first boot after the
+installation (25), a traced boot with the packaged rule (29), `noload`,
+G7's `select-new` (13) and `repair` (17) (`...-g10-run4-*`).
 
 R5a (`misc/drm_core` and the C facade): since 1 October 2026 the core is one
 kernel module, `misc/drm_core`, that exports a C interface (the headers in
