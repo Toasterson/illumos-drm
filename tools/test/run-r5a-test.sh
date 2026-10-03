@@ -13,6 +13,8 @@
 #      with `cargo xtask facade-check`), and it loads and unloads.
 #   A' The legacy guard: with gfx-drm's misc/drm loaded, misc/drm_core
 #      refuses to load (its _init's warning), and loads once it is gone.
+#      LEGACY_GUARD=skip skips it, for a system where drmadm(8) selected
+#      the new stack and the legacy misc/drm is excluded.
 #   B  The three drivers attached together: the device numbers, the R0 to
 #      R2 tests on cdrmnull and on rdrmnull, R3 on rdrmnull, R4 on
 #      virtio_gpu, drm_r5a_test (dma-bufs, sync files and cdrmnull's
@@ -265,7 +267,11 @@ echo "=== A: misc/drm_core never loads beside gfx-drm's misc/drm"
 # install together; the two cores must never be loaded at once, and
 # misc/drm_core's _init refuses while the legacy one is loaded.
 guard_re='drm_core: .*misc/drm.* is loaded'
-if [ -f /kernel/misc/amd64/drm ]; then
+if [ "${LEGACY_GUARD:-run}" = skip ]; then
+	# run-g7-test.sh tests both guards itself; with the new stack selected
+	# by drmadm(8) the legacy module is excluded and cannot load here.
+	echo "SKIP the legacy guard (LEGACY_GUARD=skip)"
+elif [ -f /kernel/misc/amd64/drm ]; then
 	if step modload /kernel/misc/amd64/drm; then
 		step sh -c 'modinfo | grep -E " drm | drm_core "'
 		n=$(grep -c "$guard_re" /var/adm/messages)

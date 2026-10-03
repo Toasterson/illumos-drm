@@ -72,7 +72,14 @@ state() {
 	find /devices -print | grep -v "^/devices/pseudo/clone@0:" | sort > "state-$1.devices"
 	# The links only: the directory's own line changes whenever a link
 	# comes and goes, and it may exist before the test (another driver).
-	ls -l /dev/dri 2>&1 | grep -v '^total' > "state-$1.dri"
+	# An empty /dev/dri and none are the same: devfsadm -C removes the
+	# directory with its last link once SUNW_drm_link's removal rule
+	# matches the links (gfx-drm drm-coexist).
+	if [ -d /dev/dri ]; then
+		ls -l /dev/dri | grep -v '^total' > "state-$1.dri"
+	else
+		: > "state-$1.dri"
+	fi
 	echo "::vmem" | mdb -k 2>&1 | awk 'NR == 1 || /umem_np|rdrmnull/' > "state-$1.vmem"
 	echo "\$ state $1"
 	cat "state-$1.etc"
