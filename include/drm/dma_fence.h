@@ -96,7 +96,9 @@ typedef void (*dma_fence_func_t)(struct dma_fence *fence,
 
 /*
  * A callback, embedded in the caller's structure. `node` belongs to the
- * core while the callback is added.
+ * core while the callback is added; once it is off the core's list (run,
+ * removed, refused, or its fence's structure released) `node` is empty
+ * (list_empty() is true), as on Linux.
  */
 struct dma_fence_cb {
 	struct list_head node;

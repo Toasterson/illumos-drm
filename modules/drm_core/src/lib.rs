@@ -122,7 +122,7 @@ mod kernel {
         match unsafe { &*FENCES.0.get() } {
             Some(d) => d,
             // Unreachable while the module is installed.
-            None => unsafe { sys::panic(c"drm: facade called while the module is not installed".as_ptr()) },
+            None => unsafe { sys::panic(c"drm_core: facade called while the module is not installed".as_ptr()) },
         }
     }
 
@@ -177,7 +177,7 @@ mod kernel {
         let taken = drm_core::numbers_taken();
         if taken != 0 {
             // SAFETY: a constant format with one int argument.
-            unsafe { sys::cmn_err(sys::CE_WARN, c"drm: %d DRM devices still registered".as_ptr(), taken) };
+            unsafe { sys::cmn_err(sys::CE_WARN, c"drm_core: %d DRM devices still registered".as_ptr(), taken) };
             return sys::errno::EBUSY;
         }
         // The stub is the module's own fence; it goes first and comes back
@@ -194,7 +194,7 @@ mod kernel {
             let fences = live.first().copied().unwrap_or(0);
             // SAFETY: a constant format with one long argument.
             unsafe {
-                sys::cmn_err(sys::CE_WARN, c"drm: %ld fences of drivers' structures still alive".as_ptr(), fences)
+                sys::cmn_err(sys::CE_WARN, c"drm_core: %ld fences of drivers' structures still alive".as_ptr(), fences)
             };
             return sys::errno::EBUSY;
         }

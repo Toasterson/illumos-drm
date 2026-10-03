@@ -119,7 +119,7 @@ pub unsafe extern "C" fn dma_resv_add_fence(obj: *mut f::dma_resv, fence: *mut f
         unsafe {
             ddi::sys::cmn_err(
                 ddi::sys::CE_WARN,
-                c"drm: dma_resv_add_fence failed (%d); waiting for the fence instead".as_ptr(),
+                c"drm_core: dma_resv_add_fence failed (%d); waiting for the fence instead".as_ptr(),
                 e.get(),
             )
         };

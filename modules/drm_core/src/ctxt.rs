@@ -64,7 +64,7 @@ fn table() -> &'static KMutex<KVec<Frame>> {
     match unsafe { &*FRAMES.0.get() } {
         Some(t) => t,
         // SAFETY: a constant message; unreachable while installed.
-        None => unsafe { sys::panic(c"drm: ioctl table used while not installed".as_ptr()) },
+        None => unsafe { sys::panic(c"drm_core: ioctl table used while not installed".as_ptr()) },
     }
 }
 

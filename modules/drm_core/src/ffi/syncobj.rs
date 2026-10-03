@@ -83,7 +83,9 @@ pub unsafe extern "C" fn drm_syncobj_add_point(
     let (Some(s), Some(fc)) = (unsafe { syncobj(obj) }, unsafe { super::fence::core_fence(fence) }) else { return };
     if let Err(e) = s.add_point(fc, point, &ctx) {
         // SAFETY: a constant format with one int argument.
-        unsafe { ddi::sys::cmn_err(ddi::sys::CE_WARN, c"drm: drm_syncobj_add_point failed (%d)".as_ptr(), e.get()) };
+        unsafe {
+            ddi::sys::cmn_err(ddi::sys::CE_WARN, c"drm_core: drm_syncobj_add_point failed (%d)".as_ptr(), e.get())
+        };
     }
 }
 

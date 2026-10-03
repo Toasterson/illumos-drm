@@ -95,6 +95,20 @@ unsafe impl Send for CbState {}
 const _: () = assert!(core::mem::size_of::<FenceCb<CCb>>() == core::mem::size_of::<*mut f::list_head>());
 const _: () = assert!(core::mem::align_of::<FenceCb<CCb>>() <= core::mem::align_of::<*mut f::list_head>());
 
+/// Leaves a callback's `node` empty (pointing at itself), as Linux does
+/// once a callback is off the list, so that `list_empty(&cb->node)` holds.
+///
+/// # Safety
+/// `cb` is a callback structure the caller may write (off the list).
+unsafe fn reinit_node(cb: *mut f::dma_fence_cb) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let n = ptr::addr_of_mut!((*cb).node);
+        (*n).next = n;
+        (*n).prev = n;
+    }
+}
+
 /// The handle slot of a callback structure.
 fn slot(cb: *mut f::dma_fence_cb) -> *mut *mut f::list_head {
     // SAFETY: only computes the field's address.
@@ -189,7 +203,16 @@ impl FenceCallback for CCb {
                 return None;
             }
             // SAFETY: the structure is live, so is a listed callback.
-            let h = if st.unlink(self.cb) { unsafe { take_handle(self.cb) } } else { None };
+            let h = if st.unlink(self.cb) {
+                // SAFETY: as above; off the list now.
+                unsafe {
+                    let h = take_handle(self.cb);
+                    reinit_node(self.cb);
+                    h
+                }
+            } else {
+                None
+            };
             st.running = self.cb;
             st.runner = me;
             Some(h)
@@ -240,6 +263,8 @@ impl Drop for FenceCore {
             if let Some(h) = unsafe { take_handle(cur) } {
                 self.fence.remove_callback_nowait(&h);
             }
+            // SAFETY: as above; off the list.
+            unsafe { reinit_node(cur) };
             cur = next;
         }
         // A callback function running on another thread uses the
@@ -454,7 +479,7 @@ pub unsafe extern "C" fn dma_fence_init(
             unsafe { (*fence).error = neg(Errno::ENOMEM) };
             flags_or(fence, SIGNALED);
             // SAFETY: a constant message.
-            unsafe { sys::cmn_err(sys::CE_WARN, c"drm: dma_fence_init: no memory; fence signalled".as_ptr()) };
+            unsafe { sys::cmn_err(sys::CE_WARN, c"drm_core: dma_fence_init: no memory; fence signalled".as_ptr()) };
         }
     }
 }
@@ -649,7 +674,12 @@ pub unsafe extern "C" fn dma_fence_add_callback(
             0
         }
         Err(e) => {
-            c.list.st.with(|st| st.unlink(cb));
+            c.list.st.with(|st| {
+                if st.unlink(cb) {
+                    // SAFETY: the caller's callback, off the list.
+                    unsafe { reinit_node(cb) };
+                }
+            });
             drop(h);
             match e {
                 AddError::Signaled => neg(Errno::ENOENT),
@@ -667,7 +697,16 @@ pub unsafe extern "C" fn dma_fence_remove_callback(fence: *mut f::dma_fence, cb:
     let Some(c) = (unsafe { core_of(fence) }) else { return false };
     let found = c.list.st.with(|st| {
         // SAFETY: a listed callback is live.
-        if st.unlink(cb) { Some(unsafe { take_handle(cb) }) } else { None }
+        if st.unlink(cb) {
+            // SAFETY: as above; off the list now.
+            unsafe {
+                let h = take_handle(cb);
+                reinit_node(cb);
+                Some(h)
+            }
+        } else {
+            None
+        }
     });
     match found {
         Some(Some(h)) => c.fence.remove_callback(&h, &ctx),
