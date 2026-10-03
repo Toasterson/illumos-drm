@@ -254,12 +254,16 @@ impl Driver for CDriver {
         Ok(r)
     }
 
-    fn before_detach(&self, _ctx: &Sleepable) {
+    fn before_detach(&self, ctx: &Sleepable) {
         let core = self.core();
         if let Some(cb) = core.table.illumos_before_detach {
             // SAFETY: the driver's callback with its device.
             unsafe { cb(core.ddev()) };
         }
+        // Releases of fence structures parked in interrupt context (the
+        // driver's last signals and puts) hold core fences of this device:
+        // run them before the detach counts the device's fences.
+        crate::module_fences().barrier(ctx);
     }
 
     fn before_teardown(&self, _ctx: &Sleepable) {
