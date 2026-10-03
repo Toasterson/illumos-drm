@@ -74,7 +74,7 @@ drm_core_remove() {
 # (feature "kernel"); a driver may carry drm-core's value helpers (modes,
 # dumb layouts, kmem) but none of these. Rust's v0 mangling writes a
 # name's length before it: the pattern is built from the names.
-CORE_STATEFUL="gem fence fence_dev resv slots syncobj syncobj_ioctl prime ioctl device state anon_fd minor objects idmap dmaerr caps sync_file uaccess wwmutex driver"
+CORE_STATEFUL="gem fence fence_dev resv slots syncobj syncobj_ioctl prime ioctl device state anon_fd minor objects idmap dmaerr caps sync_file uaccess wwmutex driver cfence managed"
 core_symbols() {
 	# Its own variable names: callers loop over $m.
 	_cs_re=
