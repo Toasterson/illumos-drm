@@ -239,6 +239,37 @@ were tested on the host and linked on illumos, and wait for the next
 guest run, as does `cargo xtask kernel-check` with `misc/drm_minor`
 loaded (R5a's guest runs covered both, on `misc/drm_core`).
 
+G8 (a re-import no longer detaches a buffer; see *Driver hooks per file
+and object (G8)*), 3 October 2026, on a fresh guest of `golden-20260930`
+(illumos `7e802e88a3`, libdrm 2.4.134) with `-device virtio-gpu-gl-pci`:
+at commit `c2ea15b`, `tools/test/run-g8-test.sh` passed with
+`drm_g8_test` at 143 checks and none failed: on `cdrmnull`, `rdrmnull`
+and `virtio_gpu`, a file that imports its own buffer twice gets its own
+handle and the `gem` kstat's handles, attachments, objects, memory and
+open-hook calls do not move; a second file's double import adds one
+handle, one attachment and one open; `GEM_OPEN` and `MODE_GETFB` add a
+second handle and no attachment; each other driver's double import makes
+one import object. On `virtio_gpu` (virgl), after the server file and a
+client file each imported a 1024x768 texture twice, the server's virgl
+clear and a `TRANSFER_TO_HOST` round trip through its first handle read
+back exactly, the texture shown with `SETCRTC` and flushed with
+`DIRTYFB` (`RESOURCE_FLUSH`) appeared in a host screendump, and the
+client's drawing and its close left the server's context intact; QEMU
+logged nothing. With the archives of the base `2306e85` and the same
+test, 53 checks failed: the server's clear and transfers read back the
+old contents, the display stayed red, and virglrenderer logged "Illegal
+resource". `run-r5a-test.sh` (R0 to R4, G6, R5a, three reattach orders,
+R1 with two `cdrmnull` devices) passed with 167 checks, among them
+`drm_r1_test`'s second handle by `GEM_OPEN`. After a `pkg update` to
+osnet 23298 (illumos `2cafbda106`) and G3's Mesa 25.3.6, G3's two-process
+reproducer `tools/test/dmabuf_import_test.c` passed in all three modes
+(import twice, once, draw first) and failed with the base's archives
+exactly as G3 saw it (the importer's drawing into the twice-imported
+buffer lost). Xorg's DRI3 path itself (`dri3_probe` of G4) could not be
+run: OpenIndiana's xorg-server 1.19.7 needs `EGL_MESA_drm_image` for
+glamor, which Mesa removed in 25.2. Logs:
+`logs/hephaistos/illumos-drm/20261003-g8-*` in the workspace.
+
 ## What is in the repository
 
 `crates/drm-uapi` is the DRM userland interface as Rust types: the
