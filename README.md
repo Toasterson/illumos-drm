@@ -29,7 +29,7 @@ kernel module, `misc/drm_core`, that exports a C interface (the headers in
 `-N misc/drm_core`: `rdrmnull` and `virtio_gpu` through the safe Rust crate
 `drm-facade`, and `cdrmnull`, a C port of `rdrmnull`, directly. See
 *R5a* under *Decisions* for the design. On 3 October 2026, at commit
-`08ca41e` (illumos-ddi `10bdfba`), `tools/test/run-r5a-test.sh` passed on a
+`b040324` (illumos-ddi `10bdfba`), `tools/test/run-r5a-test.sh` passed on a
 fresh guest of `golden-20260930` (illumos `7e802e88a3`, libdrm 2.4.134)
 with 167 checks and no failure. `misc/drm_core` exports exactly the 102
 symbols of `drm_core.mapfile` and loads and unloads alone; gcc's view of
@@ -48,13 +48,16 @@ per object per file, cross-driver fences, `cdrmnull`'s
 `PRIME_SELFTEST` and `FENCE_SELFTEST`), four times: once, and after
 unloading the drivers in three orders and attaching them again, while
 `misc/drm_core` refused to unload as long as any driver depended on it.
-Each of `cdrmnull`'s four detaches raced 250,000 to 330,000 facade calls
+Each of `cdrmnull`'s four detaches raced 330,000 to 600,000 facade calls
 from a task queue thread and a soft interrupt, 5,900 to 73,000 of them
 while `drm_dev_unregister()` ran, without a failure. `mdb -k` printed the
 facade structures from the module's CTF and `cdrmnull`'s live
 `drm_device`. `run-g6-test.sh` and `run-r1-test.sh` with two `cdrmnull`
 devices passed inside the run, and `/etc` and `/devices` were as before.
-With `misc/drm_core` loaded, `cargo xtask kernel-check` verified
+At `08ca41e`, whose kernel code differs from `b040324` only in message
+prefixes and in leaving finished callbacks' `node` empty, the same suite
+passed (167 checks), and with `misc/drm_core` loaded `cargo xtask
+kernel-check` verified
 `drm-facade-sys` against the module's CTF (38 sizes, 233 offsets, 99
 symbols) and the private tier's new `modctl` layout and symbols. The
 packages `driver/graphics/drm-core` and `driver/graphics/cdrmnull`,
