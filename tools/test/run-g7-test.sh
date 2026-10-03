@@ -30,6 +30,8 @@
 #   after-legacy   the new modules are excluded, the legacy core loads,
 #                  devfsadm -C removes the new stack's stale /dev/dri links
 #                  and libdrm lists no device.
+#   i915n          with a stand-in i915n registered (add_drv -n), drmadm
+#                  moves the aliases from i915 to i915n and back.
 #   select-root    drmadm -R on a mounted clone of the boot environment.
 #
 # Then "drmadm select new", a reboot, "pkg uninstall virtio-gpu cdrmnull"
@@ -339,6 +341,8 @@ phase_guards() {
 	devices 2 "while the new stack is attached"
 	unload_all || exit 1
 	echo
+	# The races come last: their warnings can fill the kernel's message
+	# buffer (64 KB), whose dropped lines would upset the counts above.
 	echo "--- $RACES concurrent loads of both cores"
 	# misc/drm_core (16 MB with its debug information) takes longer to
 	# load than misc/drm, so the second load starts after a delay that
@@ -501,6 +505,33 @@ phase_after_legacy() {
 	devices 0 "with the legacy stack selected"
 }
 
+phase_i915n() {
+	echo "=== i915n: the aliases move to an installed i915n and back"
+	# A stand-in i915n: registered with add_drv -n (nothing is loaded),
+	# with an empty module file; the guest has no Intel GPU to bind.
+	unload_all || exit 1
+	cur=$(sed -n 's/^\* drmadm-selected: //p' "$FRAG")
+	n915=$(i915_aliases)
+	echo "selected: $cur; i915 has $n915 aliases"
+	step touch /kernel/drv/amd64/i915n || exit 1
+	step add_drv -n i915n || exit 1
+	step "$DRMADM" select new | tee drmadm-select-i915n.out
+	m=$(awk '$1 == "i915n"' /etc/driver_aliases | wc -l | tr -d ' ')
+	[ "$(i915_aliases)" -eq 0 ] && [ "$m" -eq "$n915" ] &&
+	    pass "select new moved the $n915 aliases from i915 to i915n" ||
+	    bad "select new left $(i915_aliases) aliases on i915 and gave $m to i915n"
+	step "$DRMADM" status
+	step "$DRMADM" select legacy | tee drmadm-select-i915n-back.out
+	m=$(awk '$1 == "i915n"' /etc/driver_aliases | wc -l | tr -d ' ')
+	[ "$(i915_aliases)" -eq "$n915" ] && [ "$m" -eq 0 ] &&
+	    pass "select legacy moved them back from i915n to i915" ||
+	    bad "select legacy left $m aliases on i915n and gave $(i915_aliases) to i915"
+	step rem_drv -n i915n
+	step rm -f /kernel/drv/amd64/i915n
+	[ "$cur" = new ] && step "$DRMADM" select new
+	step "$DRMADM" status
+}
+
 phase_select_root() {
 	echo "=== select-root: drmadm -R on a mounted boot environment"
 	cur=$(sed -n 's/^\* drmadm-selected: //p' "$FRAG")
@@ -533,7 +564,8 @@ after-new) phase_after_new ;;
 select-legacy) phase_select_legacy ;;
 after-legacy) phase_after_legacy ;;
 select-root) phase_select_root ;;
-*) echo "usage: run-g7-test.sh baseline|install|guards|select-new|after-new|select-legacy|after-legacy|select-root" >&2
+i915n) phase_i915n ;;
+*) echo "usage: run-g7-test.sh baseline|install|guards|select-new|after-new|select-legacy|after-legacy|i915n|select-root" >&2
    exit 2 ;;
 esac
 echo

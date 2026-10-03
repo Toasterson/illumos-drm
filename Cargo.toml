@@ -46,8 +46,8 @@ drm-facade-sys = { path = "crates/drm-facade-sys" }
 # after a failed _init does not count). Move
 # the pin to the merge commit on illumos-ddi main once those branches are
 # merged.
-ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "983751f3c88d40771dddc0494ca970466d46e892" }
-ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "983751f3c88d40771dddc0494ca970466d46e892", default-features = false }
+ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "6e65077fb18ae0a86daee6a43af8b361da9e59ff" }
+ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "6e65077fb18ae0a86daee6a43af8b361da9e59ff", default-features = false }
 serde_json = "1"
 
 # Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug

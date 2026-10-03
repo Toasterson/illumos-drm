@@ -20,8 +20,8 @@
 # No package of this repository binds an Intel GPU at installation: the
 # Intel driver (reserved name i915n) is delivered without aliases, and
 # drmadm moves the aliases of the legacy i915 to it when the new stack is
-# selected (IPS refuses a driver action whose alias another driver action
-# claims).
+# selected (add_drv refuses an alias another driver has, and IPS then
+# leaves the driver unregistered).
 #
 set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drmadm@0.0.1,5.11-2026.0.0.0
 set name=pkg.summary value="Select the DRM driver stack (drmadm)"

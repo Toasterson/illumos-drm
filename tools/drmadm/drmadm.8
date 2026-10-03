@@ -27,7 +27,7 @@ the stack of the package
 the core module
 .Sy misc/drm
 and the Intel driver
-.Xr i915 4D .
+.Xr i915 7D .
 .It Cm new
 the illumos-drm stack: the core module
 .Sy misc/drm_core
@@ -77,29 +77,6 @@ to it.
 does the following and prints each change:
 .Bl -enum
 .It
-It moves the Intel GPU aliases to the driver of the selected stack with
-.Xr update_drv 8
-.Fl n ,
-which edits
-.Pa /etc/driver_aliases
-without attaching a driver.
-The aliases are those the installed
-.Sy driver/graphics/drm
-declares for
-.Sy i915 ,
-those bound to
-.Sy i915
-or
-.Sy i915n ,
-and those
-.Nm
-recorded before.
-When the driver of the selected stack is not installed, the aliases stay
-unbound, and an Intel GPU falls back to the generic VGA console driver,
-.Xr vgatext 4D .
-Aliases of these devices bound to any other driver are left alone and
-reported.
-.It
 It writes the fragment
 .Pa /etc/system.d/driver:graphics:drmadm ,
 which records the selection and the alias set and excludes the modules of
@@ -123,6 +100,32 @@ and
 A driver of the new stack that is not in this list is still kept from
 loading by the exclusion of
 .Sy misc/drm_core .
+The fragment is written first, so that a failure in the next step loses
+no alias.
+.It
+It moves the Intel GPU aliases to the driver of the selected stack with
+.Xr update_drv 8
+.Fl n ,
+which edits
+.Pa /etc/driver_aliases
+without attaching a driver, and checks the result; if a move fails, it
+gives the aliases back and restores the previous fragment.
+The aliases are those the installed
+.Sy driver/graphics/drm
+declares for
+.Sy i915 ,
+those bound to
+.Sy i915
+or
+.Sy i915n ,
+and those
+.Nm
+recorded before.
+When the driver of the selected stack is not installed, the aliases stay
+unbound, and an Intel GPU falls back to the generic VGA console driver,
+.Sy vgatext .
+Aliases of these devices bound to any other driver are left alone and
+reported.
 .It
 It runs
 .Nm bootadm Cm update-archive ,
@@ -130,6 +133,11 @@ since the kernel reads both files from the boot archive.
 .El
 .Pp
 The selection takes effect at the next boot.
+After that boot, run
+.Nm devfsadm Fl C
+once: it removes the
+.Pa /dev/dri
+links of the devices of the stack that is no longer loaded.
 .Nm Cm select
 refuses while any module of either stack is loaded: stop what uses them
 (the display manager and Xorg), unload the drivers and then the core with
@@ -148,7 +156,9 @@ modules of both stacks, how many Intel GPU aliases are bound to
 .Sy i915
 and to
 .Sy i915n
-and how many are unbound, and every
+and how many are unbound, the number of
+.Pa /dev/dri
+links, and every
 .Sy exclude
 line of
 .Pa /etc/system
@@ -194,6 +204,8 @@ The exit status is 2 for a usage error.
 # modunload -i <i915 id>; modunload -i <drm id>
 # drmadm select new
 # reboot
+\&...
+# devfsadm -C
 .Ed
 .Ss Example 2 Recovering from a selection that does not boot to a display
 Boot the previous boot environment, or boot single user and remove the
@@ -218,9 +230,8 @@ changed directly:
 .Sy Uncommitted
 .Sh SEE ALSO
 .Xr pkg 1 ,
-.Xr i915 4D ,
-.Xr vgatext 4D ,
 .Xr system 5 ,
+.Xr i915 7D ,
 .Xr beadm 8 ,
 .Xr bootadm 8 ,
 .Xr devfsadm 8 ,

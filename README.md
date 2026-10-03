@@ -1287,7 +1287,11 @@ memory and busy before its own `_init` runs the check, `mod_busy` changes
 under `mod_lock`, `mod_installed` is set before the module is released,
 and each check's `mutex_enter` (a locked instruction) orders the earlier
 stores before its reads, so at least one of them sees the other and
-refuses (both may refuse; a retry then loads one).
+refuses (both may refuse; a retry then loads one). This rests on both
+checks and the framework's busy and release steps taking the same
+`mod_lock`: a check that takes the lock after the other core's check
+released it sees every store the other core made before its check, on any
+architecture.
 
 **drmadm(8) selects the stack for boot.** `tools/drmadm/drmadm`, a shell
 script in the package `driver/graphics/drmadm` (required by
@@ -1303,18 +1307,7 @@ drmadm -R /mnt select legacy    # in a mounted boot environment
 `select` refuses while any module of either stack is loaded and while
 another `drmadm` holds its lock (`/etc/system.d/.drmadm.lock`), then:
 
-1. moves the Intel GPU aliases to the driver of the selected stack: `i915`
-   for the legacy stack, `i915n` for the new one. `i915n` is the name
-   reserved for this stack's Intel driver (work item G5); until it exists,
-   `select new` takes the aliases from `i915` and leaves them unbound, says
-   so, and an Intel GPU falls back to `vgatext` (the GPU's `pciclass,0300`
-   compatible name). The set moved is the aliases the installed
-   `driver/graphics/drm` declares for `i915` (`pkg contents -m`), those
-   bound to `i915` or `i915n`, and those recorded in the fragment by an
-   earlier selection; `select legacy` gives `i915` exactly its package's
-   aliases when that package is installed. Aliases of the set that are bound
-   to any other driver are reported and left alone.
-2. writes `/etc/system.d/driver:graphics:drmadm` (named after the package,
+1. writes `/etc/system.d/driver:graphics:drmadm` (named after the package,
    as `system(5)` recommends) with the selection, its time, the alias set
    and `exclude:` lines for the other stack's modules: `misc/drm`,
    `drv/i915`, `drv/radeon` when the new stack is selected, `misc/drm_core`,
@@ -1325,7 +1318,25 @@ another `drmadm` holds its lock (`/etc/system.d/.drmadm.lock`), then:
    `mod_filename` and `mod_modname` (`os/modctl.c`), and only the bare name
    matches `modload /kernel/misc/amd64/drm`. Excluding the core alone would
    suffice, since every driver needs it; the drivers are listed so that
-   their loads at boot fail on their own exclusion.
+   their loads at boot fail on their own exclusion. The fragment is
+   written first: it records the alias set, so a failure in the next step
+   loses no alias.
+2. moves the Intel GPU aliases to the driver of the selected stack: `i915`
+   for the legacy stack, `i915n` for the new one. `i915n` is the name
+   reserved for this stack's Intel driver (work item G5); until it exists,
+   `select new` takes the aliases from `i915` and leaves them unbound, says
+   so, and an Intel GPU falls back to `vgatext` (the GPU's `pciclass,0300`
+   compatible name). The set moved is the aliases the installed
+   `driver/graphics/drm` declares for `i915` (`pkg contents -m`), those
+   bound to `i915` or `i915n`, and those recorded in the fragment by an
+   earlier selection; `select legacy` gives `i915` exactly its package's
+   aliases when that package is installed. Aliases of the set that are bound
+   to any other driver are reported and left alone. `update_drv -d -i`
+   takes one alias per call (given a list, it matches no line of
+   `driver_aliases` and still exits 0, because `delete_entry` in
+   `drvsubr.c` compares the whole argument), so drmadm removes them one by
+   one and reads the file back; `-a` takes the list. If a move fails,
+   drmadm gives the aliases back and restores the previous fragment.
 3. runs `bootadm update-archive`: the kernel reads `/etc/driver_aliases`
    and `/etc/system.d/.self-assembly` (which `bootadm` assembles from the
    fragments; `/etc/system.d` exists since illumos 2018) from the boot
@@ -1346,10 +1357,11 @@ edits the file, which matches a selection for the next boot. Two IPS
 consequences: while the new stack is selected, `pkg verify
 driver/graphics/drm` reports the `i915` aliases as missing, and `pkg fix`
 would give them back (run `drmadm select new` again); and a package of
-this stack must not declare a legacy alias in its driver action, because
-IPS refuses to install a driver action whose alias another installed
-driver action claims (`pkg5`'s `driver.py`). `i915n`'s package will
-therefore deliver its driver action without aliases, and no package of
+this stack must not declare a legacy alias in its driver action:
+`add_drv` refuses an alias that another driver has, and IPS's driver
+action (`pkg5`'s `driver.py`) reports that and leaves the driver
+unregistered while the package installs. `i915n`'s package will therefore
+deliver its driver action without aliases, and no package of
 this repository binds an Intel GPU at installation (`virtio_gpu` binds only
 `pci1af4,1050`, `cdrmnull` and `rdrmnull` are pseudo devices).
 
@@ -1364,8 +1376,9 @@ longer loaded pointing at minor nodes that no longer exist. `devfsadm -C`
 removes dangling links only through the link modules' removal rules, and
 `SUNW_drm_link`'s rule (`^dri/[a-z]D?[0-9]+$`) matched none of `card0`,
 `controlD64` or `renderD128`; gfx-drm's branch `drm-coexist` fixes it
-(`^dri/[a-z]+D?[0-9]+$`), so after a switch `devfsadm -C` cleans
-`/dev/dri`. libdrm 2.4.134 enumerates `/dev/dri`, takes a link's node only
+(`^dri/[a-z]+D?[0-9]+$`), so after the first boot with the new selection
+`devfsadm -C` cleans `/dev/dri`; `drmadm select` says so, and the manual
+page and `docs/x230.md` include the step. libdrm 2.4.134 enumerates `/dev/dri`, takes a link's node only
 if `stat(2)` reaches it and libdevinfo shows a `ddi_display:drm` minor with
 its device number, so it skips stale links (a node of an excluded driver
 cannot attach) and lists only the devices of the stack that is attached.

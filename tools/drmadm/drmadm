@@ -14,14 +14,15 @@
 #   drmadm [-R root] select legacy|new
 #
 # A selection does three things and takes effect at the next boot:
-#   1. moves the Intel GPU PCI aliases between i915 (legacy) and i915n
+#   1. writes /etc/system.d/driver:graphics:drmadm with exclude: lines for
+#      the modules of the other stack, and records there the alias set it
+#      manages (first, so that a failure loses no alias);
+#   2. moves the Intel GPU PCI aliases between i915 (legacy) and i915n
 #      (the name reserved for the illumos-drm Intel driver) with
 #      update_drv -n, which edits /etc/driver_aliases without attaching
-#      anything; without an installed i915n the GPU is left unbound and
-#      falls back to the generic VGA console driver;
-#   2. writes /etc/system.d/driver:graphics:drmadm with exclude: lines for
-#      the modules of the other stack, and records there the alias set it
-#      manages;
+#      anything, and undoes both steps if that fails; without an
+#      installed i915n the GPU is left unbound and falls back to the
+#      generic VGA console driver;
 #   3. runs bootadm update-archive, since both files are read from the
 #      boot archive.
 # It refuses while any module of either stack is loaded, and while another
@@ -173,9 +174,10 @@ excludes() {
 		    /^[*#]/ { next }
 		    {
 			line = $0
-			if (tolower(line) !~ /^[ \t]*exclude[ \t]*:/)
+			# The kernel knows "exclude" and "EXCLUDE" only.
+			if (line !~ /^[ \t]*(exclude|EXCLUDE)[ \t]*:/)
 				next
-			sub(/^[ \t]*[eE][xX][cC][lL][uU][dD][eE][ \t]*:[ \t]*/, "", line)
+			sub(/^[ \t]*(exclude|EXCLUDE)[ \t]*:[ \t]*/, "", line)
 			sub(/[ \t].*$/, "", line)
 			name = line
 			sub(/^.*\//, "", name)
@@ -217,6 +219,43 @@ quoted() {
 		q="$q \"$a\""
 	done
 	echo "${q# }"
+}
+
+# udrv ARGS: update_drv -n (files only) on the root.
+udrv() {
+	if live; then
+		update_drv -n "$@"
+	else
+		update_drv -n -b "$ROOT" "$@"
+	fi
+}
+
+# show LIST: LIST indented, folded to lines of about 72 columns.
+show() {
+	words "$1" | fold -s -w 72 | sed 's/^/    /'
+}
+
+# rollback MESSAGE: undoes a select that failed while moving aliases: gives
+# the removed aliases back to $from, takes the added ones from $to,
+# restores the previous fragment and exits.
+rollback() {
+	echo "$PROG: $1; undoing the selection" >&2
+	for a in $(minus "$(aliases_of "$to")" "$bound_to"); do
+		udrv -d -i "$a" "$to" >/dev/null 2>&1
+	done
+	back=$(minus "$bound_from" "$(aliases_of "$from")")
+	[ -n "$back" ] && udrv -a -i "$(quoted "$back")" "$from" >/dev/null 2>&1
+	if [ -f "$prev" ]; then
+		mv -f "$prev" "$frag"
+	else
+		rm -f "$frag"
+	fi
+	left=$(minus "$bound_from" "$(aliases_of "$from")")
+	if [ -n "$left" ]; then
+		echo "$PROG: could not give these aliases back to $from: $(words "$left")" >&2
+		echo "$PROG: $frag lists every alias drmadm manages; run drmadm select again" >&2
+	fi
+	exit 1
 }
 
 boot_time() {
@@ -304,6 +343,10 @@ do_status() {
 	[ -n "$man" ] && echo "  ($LEGACY_PKG declares $(count "$man") aliases for $LEGACY_DRIVER)"
 
 	echo
+	n=$(ls "$(r dev/dri)" 2>/dev/null | wc -l | tr -d ' ')
+	echo "/dev/dri links: $n (after a switch, devfsadm -C removes those of the other stack)"
+
+	echo
 	echo "Excludes of DRM modules (read at boot):"
 	ex=$(excludes)
 	if [ -z "$ex" ]; then
@@ -355,10 +398,13 @@ do_select() {
 	trap 'unlock; exit 1' HUP INT TERM
 
 	changed=0
-	bopt=
-	live || bopt="-b $ROOT"
+	frag=$(r "$FRAGMENT")
+	prev=$(r etc/system.d/.drmadm.prev)
+	tmp=$(r "etc/system.d/.drmadm.$$")
 
-	# 1. The Intel GPU aliases.
+	# What changes. The alias set drmadm manages: the aliases the legacy
+	# package declares for i915, those bound to either Intel driver, and
+	# those an earlier selection recorded.
 	man=$(manifest_aliases)
 	bound_to=$(aliases_of "$to")
 	bound_from=$(aliases_of "$from")
@@ -378,33 +424,17 @@ do_select() {
 		esac
 	done
 	add=$(minus "$ok" "$bound_to")
-
-	if [ -n "$bound_from" ]; then
-		echo "Removing $(count "$bound_from") aliases from $from:"
-		echo "  update_drv -n $bopt -d -i '...' $from"
-		# shellcheck disable=SC2086 # $bopt is empty or two words
-		update_drv -n $bopt -d -i "$(quoted "$bound_from")" "$from" ||
-		    die "update_drv -d failed; $(r etc/driver_aliases) is unchanged or partly changed, run drmadm status"
-		changed=1
+	if [ -n "$add" ] && ! installed "$to"; then
+		unbound=$add
+		add=""
+	else
+		unbound=""
 	fi
-	if [ -n "$add" ]; then
-		if installed "$to"; then
-			echo "Adding $(count "$add") aliases to $to:"
-			echo "  update_drv -n $bopt -a -i '...' $to"
-			# shellcheck disable=SC2086 # $bopt is empty or two words
-			update_drv -n $bopt -a -i "$(quoted "$add")" "$to" ||
-			    die "update_drv -a failed; run drmadm status"
-			changed=1
-		else
-			echo "$to is not installed: the $(count "$add") Intel GPU aliases stay unbound;"
-			echo "  an Intel GPU falls back to the generic display driver (vgatext)."
-		fi
-	fi
-	[ -n "$conflict" ] && echo "Left alone, bound to other drivers:$conflict"
 
-	# 2. The fragment with the excludes of the other stack.
-	frag=$(r "$FRAGMENT")
-	tmp=$(r "etc/system.d/.drmadm.$$")
+	# 1. The fragment, first: it records the alias set, so a failure in
+	# the alias moves below loses no alias. Rewritten (with a new time)
+	# when its content changes or aliases move; the previous one is kept
+	# until the moves succeed.
 	{
 		echo "* /$FRAGMENT: written by drmadm(8); do not edit."
 		echo "* The $target DRM stack is selected: the modules of the other stack"
@@ -422,15 +452,44 @@ do_select() {
 		done
 	} > "$tmp" || die "cannot write $tmp"
 	chmod 644 "$tmp"
-	# Compare without the time line: an unchanged selection keeps the file.
-	if [ -f "$frag" ] && [ "$(grep -v '^\* drmadm-time:' "$frag")" = "$(grep -v '^\* drmadm-time:' "$tmp")" ]; then
+	rm -f "$prev"
+	if [ -f "$frag" ] && [ -z "$bound_from" ] && [ -z "$add" ] &&
+	    [ "$(grep -v '^\* drmadm-time:' "$frag")" = "$(grep -v '^\* drmadm-time:' "$tmp")" ]; then
 		rm -f "$tmp"
 		echo "$frag is unchanged ($target)."
 	else
+		[ -f "$frag" ] && { cp -p "$frag" "$prev" || die "cannot save $frag"; }
 		mv -f "$tmp" "$frag" || die "cannot replace $frag"
-		echo "Wrote $frag: excludes $(names "$other_modules" | tr '\n' ' ')"
+		echo "Wrote $frag: selects $target, excludes $(names "$other_modules" | tr '\n' ' ')"
 		changed=1
 	fi
+
+	# 2. The Intel GPU aliases, with update_drv -n: the files only, for the
+	# next boot. -d takes one alias at a time: with a list it matches
+	# nothing and still exits 0, so the result is read back.
+	if [ -n "$bound_from" ]; then
+		echo "Removing $(count "$bound_from") aliases from $from (update_drv -n -d -i ALIAS $from):"
+		show "$bound_from"
+		for a in $bound_from; do
+			udrv -d -i "$a" "$from" >/dev/null 2>&1
+		done
+		left=$(aliases_of "$from")
+		[ -z "$left" ] || rollback "update_drv -d left $(count "$left") aliases on $from: $(words "$left")"
+	fi
+	if [ -n "$add" ]; then
+		echo "Adding $(count "$add") aliases to $to (update_drv -n -a -i '\"ALIAS\" ...' $to):"
+		show "$add"
+		udrv -a -i "$(quoted "$add")" "$to" || rollback "update_drv -a failed"
+		missing=$(minus "$add" "$(aliases_of "$to")")
+		[ -z "$missing" ] || rollback "update_drv -a did not bind $(count "$missing") aliases to $to"
+	fi
+	if [ -n "$unbound" ]; then
+		echo "$to is not installed: these $(count "$unbound") Intel GPU aliases stay unbound, and"
+		echo "an Intel GPU falls back to the generic VGA console driver (vgatext):"
+		show "$unbound"
+	fi
+	[ -n "$conflict" ] && echo "Left alone, bound to other drivers:$conflict"
+	rm -f "$prev"
 
 	# Excludes elsewhere that would keep the selected stack from loading.
 	own=$(names "$other_modules" | tr '\n' ' ')
@@ -446,13 +505,14 @@ do_select() {
 	# 3. The boot archive.
 	if [ $changed = 1 ]; then
 		if live; then
-			echo "  bootadm update-archive"
-			bootadm update-archive || die "bootadm update-archive failed"
+			echo "Updating the boot archive (bootadm update-archive)."
+			bootadm update-archive || die "bootadm update-archive failed; run it before rebooting"
 		else
-			echo "  bootadm update-archive -R $ROOT"
-			bootadm update-archive -R "$ROOT" || die "bootadm update-archive -R $ROOT failed"
+			echo "Updating the boot archive (bootadm update-archive -R $ROOT)."
+			bootadm update-archive -R "$ROOT" || die "bootadm update-archive -R $ROOT failed; run it before booting it"
 		fi
-		echo "The $target stack is selected from the next boot."
+		echo "The $target stack is selected from the next boot. After that boot,"
+		echo "devfsadm -C removes the /dev/dri links of the other stack's devices."
 	else
 		echo "Nothing changed: the $target stack was selected already."
 	fi
@@ -466,6 +526,10 @@ while getopts R: opt; do
 	esac
 done
 shift $((OPTIND - 1))
+case $ROOT in
+/*) ;;
+*) die "-R needs an absolute path, not $ROOT" ;;
+esac
 [ -d "$ROOT" ] || die "root $ROOT is not a directory"
 
 case "${1:-}" in
