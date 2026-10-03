@@ -28,7 +28,8 @@
 #              /etc/logindevperm rule for /dev/dri leaves the new stack's
 #              drivers out; every /dev/dri node of a new-stack driver is
 #              0666 root sys, as /etc/minor_perm says, for the devices in
-#              EXPECT (default "virtio_gpu cdrmnull"; one instance each);
+#              EXPECT (default "virtio_gpu cdrmnull", one instance each;
+#              empty with the legacy stack selected);
 #              nobody opens every card and render node read-write; after
 #              a restart of console-login (what a console logout does)
 #              ttymon read /etc/logindevperm and changed no DRM node; and
@@ -89,7 +90,7 @@ info() { echo "INFO $*"; }
 SVC=svc:/system/graphics/drm-perms:default
 CONSOLE=svc:/system/console-login:default
 NEW_DRIVERS="i915n virtio_gpu cdrmnull rdrmnull"
-EXPECT=${EXPECT:-virtio_gpu cdrmnull}
+EXPECT=${EXPECT-virtio_gpu cdrmnull}
 DRMADM=${DRMADM:-/usr/sbin/drmadm}
 
 new_driver() {
