@@ -56,7 +56,7 @@ step uname -a
 if [ "${SKIP_R5A:-0}" != 1 ]; then
 	echo
 	echo "=== A: run-r5a-test.sh"
-	step ./run-r5a-test.sh > run-r5a-test.out 2>&1
+	step sh ./run-r5a-test.sh > run-r5a-test.out 2>&1
 	grep -E '^FAIL|^checks passed|run-r5a-test:' run-r5a-test.out
 	if grep -q 'run-r5a-test: PASS' run-r5a-test.out; then
 		pass "run-r5a-test.sh ($(grep '^checks passed' run-r5a-test.out))"
@@ -184,7 +184,7 @@ drm_core_remove || fail=1
 if [ "${SKIP_G8:-0}" != 1 ]; then
 	echo
 	echo "=== C: run-g8-test.sh kernel"
-	step ./run-g8-test.sh kernel > run-g8-test.out 2>&1
+	step sh ./run-g8-test.sh kernel > run-g8-test.out 2>&1
 	grep -E '^FAIL|^checks passed|run-g8-test' run-g8-test.out | tail -5
 	if grep -q 'run-g8-test kernel: PASS' run-g8-test.out; then
 		pass "run-g8-test.sh kernel ($(grep '^checks passed' run-g8-test.out))"
