@@ -1,0 +1,480 @@
+#!/bin/sh
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# drmadm: shows and selects which DRM stack binds the GPU, the legacy
+# stack of gfx-drm (misc/drm and i915, package driver/graphics/drm) or
+# the illumos-drm stack (misc/drm_core and its drivers). Both stacks can be
+# installed together; their cores refuse to load while the other one is
+# loaded, and the selection decides which one the system loads at boot.
+# See drmadm(8) (tools/drmadm/drmadm.8).
+#
+#   drmadm [-R root] status
+#   drmadm [-R root] select legacy|new
+#
+# A selection does three things and takes effect at the next boot:
+#   1. moves the Intel GPU PCI aliases between i915 (legacy) and i915n
+#      (the name reserved for the illumos-drm Intel driver) with
+#      update_drv -n, which edits /etc/driver_aliases without attaching
+#      anything; without an installed i915n the GPU is left unbound and
+#      falls back to the generic VGA console driver;
+#   2. writes /etc/system.d/driver:graphics:drmadm with exclude: lines for
+#      the modules of the other stack, and records there the alias set it
+#      manages;
+#   3. runs bootadm update-archive, since both files are read from the
+#      boot archive.
+# It refuses while any module of either stack is loaded, and while another
+# drmadm holds its lock.
+
+PATH=/usr/bin:/usr/sbin:/sbin
+export PATH
+LC_ALL=C
+export LC_ALL
+
+PROG=drmadm
+ROOT=/
+
+# The fragment's name follows system(5): the delivering package's name
+# with '/' replaced by ':'. drmadm writes it; no package delivers it.
+FRAGMENT=etc/system.d/driver:graphics:drmadm
+LOCK=etc/system.d/.drmadm.lock
+
+LEGACY_PKG=driver/graphics/drm
+LEGACY_DRIVER=i915
+NEW_DRIVER=i915n
+# class/name of each stack's kernel modules. Every driver of a stack
+# depends on its core (misc/drm or misc/drm_core), so the cores alone
+# decide whether a stack is loaded; the drivers are listed so that their
+# excluded loads fail quietly at boot instead of on the missing core.
+LEGACY_MODULES="misc/drm drv/i915 drv/radeon"
+NEW_MODULES="misc/drm_core drv/i915n drv/virtio_gpu drv/cdrmnull drv/rdrmnull"
+LEGACY_PKGS="driver/graphics/drm driver/graphics/agpgart"
+NEW_PKGS="driver/graphics/drm-core driver/graphics/virtio-gpu driver/graphics/cdrmnull"
+SHARED_PKGS="driver/graphics/drm-devlink driver/graphics/drmadm x11/library/libdrm"
+
+usage() {
+	cat >&2 <<EOT
+Usage: $PROG [-R root] status
+       $PROG [-R root] select legacy|new
+EOT
+	exit 2
+}
+
+die() {
+	echo "$PROG: $*" >&2
+	exit 1
+}
+
+# r PATH: PATH (relative to /) under the root.
+r() {
+	if [ "$ROOT" = / ]; then
+		echo "/$1"
+	else
+		echo "${ROOT%/}/$1"
+	fi
+}
+
+live() {
+	[ "$ROOT" = / ]
+}
+
+pkgcmd() {
+	if live; then
+		pkg "$@"
+	else
+		pkg -R "$ROOT" "$@"
+	fi
+}
+
+# names MODULES: the module names (no class) of a list of class/name.
+names() {
+	for m in $1; do
+		echo "${m#*/}"
+	done
+}
+
+# aliases_of DRIVER: the aliases bound to DRIVER in driver_aliases, one
+# per line, without quotes, sorted.
+aliases_of() {
+	awk -v d="$1" '
+	    /^[ \t]*#/ { next }
+	    $1 == d { a = $2; gsub(/"/, "", a); if (a != "") print a }
+	' "$(r etc/driver_aliases)" | sort -u
+}
+
+# driver_of ALIAS: the driver ALIAS is bound to, if any.
+driver_of() {
+	awk -v x="$1" '
+	    /^[ \t]*#/ { next }
+	    { a = $2; gsub(/"/, "", a); if (a == x) { print $1; exit } }
+	' "$(r etc/driver_aliases)"
+}
+
+# installed DRIVER: whether DRIVER has a major number (add_drv was run).
+installed() {
+	awk -v d="$1" '$1 == d { f = 1 } END { exit !f }' "$(r etc/name_to_major)"
+}
+
+# manifest_aliases: the aliases of the i915 driver action of the installed
+# driver/graphics/drm package, the set the legacy stack binds when
+# installed (empty if the package is not installed).
+manifest_aliases() {
+	pkgcmd contents -m "$LEGACY_PKG" 2>/dev/null | awk -v d="$LEGACY_DRIVER" '
+	    $1 == "driver" {
+		ours = 0
+		for (i = 2; i <= NF; i++)
+			if ($i == "name=" d)
+				ours = 1
+		if (!ours)
+			next
+		for (i = 2; i <= NF; i++)
+			if ($i ~ /^alias=/) {
+				a = substr($i, 7)
+				gsub(/"/, "", a)
+				print a
+			}
+	    }' | sort -u
+}
+
+# recorded KEY: the values of "* drmadm-KEY: value" lines of the fragment.
+recorded() {
+	f=$(r "$FRAGMENT")
+	[ -f "$f" ] || return 0
+	sed -n "s/^\\* drmadm-$1: //p" "$f"
+}
+
+# loaded_modules: "id name" of every loaded module of either stack.
+loaded_modules() {
+	live || return 0
+	all=$(names "$LEGACY_MODULES $NEW_MODULES" | tr '\n' ' ')
+	modinfo | awk -v all="$all" '
+	    BEGIN { n = split(all, m, " "); for (i = 1; i <= n; i++) want[m[i]] = 1 }
+	    NR > 1 && ($6 in want) { print $1, $6 }'
+}
+
+# stack_of NAME: legacy or new.
+stack_of() {
+	for m in $(names "$LEGACY_MODULES"); do
+		[ "$m" = "$1" ] && { echo legacy; return; }
+	done
+	echo new
+}
+
+# excludes: "file:line: value" for every exclude: line in /etc/system and
+# the /etc/system.d fragments (dot files are not part of the boot
+# configuration) that names a module of either stack.
+excludes() {
+	all=$(names "$LEGACY_MODULES $NEW_MODULES" | tr '\n' ' ')
+	for f in "$(r etc/system)" "$(r etc/system.d)"/*; do
+		[ -f "$f" ] || continue
+		awk -v all="$all" -v f="$f" '
+		    BEGIN { n = split(all, m, " "); for (i = 1; i <= n; i++) want[m[i]] = 1 }
+		    /^[*#]/ { next }
+		    {
+			line = $0
+			if (tolower(line) !~ /^[ \t]*exclude[ \t]*:/)
+				next
+			sub(/^[ \t]*[eE][xX][cC][lL][uU][dD][eE][ \t]*:[ \t]*/, "", line)
+			sub(/[ \t].*$/, "", line)
+			name = line
+			sub(/^.*\//, "", name)
+			if (name in want)
+				print f ":" NR ": " line
+		    }' "$f"
+	done
+}
+
+# words LIST: LIST (whitespace separated) as one space-separated line.
+# Aliases and module names contain no glob characters.
+words() {
+	# shellcheck disable=SC2086 # splitting is the point
+	echo $1
+}
+
+# count LIST: the number of words in LIST.
+count() {
+	# shellcheck disable=SC2086 # splitting is the point
+	set -- $1
+	echo $#
+}
+
+# minus A B: the words of A that are not in B, one per line.
+minus() {
+	for a in $1; do
+		found=no
+		for b in $2; do
+			[ "$a" = "$b" ] && { found=yes; break; }
+		done
+		[ $found = no ] && echo "$a"
+	done
+}
+
+# quoted LIST: update_drv's -i argument, "a" "b" ...
+quoted() {
+	q=
+	for a in $1; do
+		q="$q \"$a\""
+	done
+	echo "${q# }"
+}
+
+boot_time() {
+	kstat -p unix:0:system_misc:boot_time 2>/dev/null | awk '{ print $2 }'
+}
+
+do_status() {
+	frag=$(r "$FRAGMENT")
+	sel=$(recorded selected)
+	at=$(recorded time)
+	echo "Root: $ROOT"
+	if [ -z "$sel" ]; then
+		echo "Selected stack: none (no $frag; nothing is excluded by drmadm)"
+	else
+		when="since the last boot"
+		if live; then
+			bt=$(boot_time)
+			if [ -n "$at" ] && [ -n "$bt" ] && [ "$at" -ge "$bt" ]; then
+				when="from the next boot (selected after this boot)"
+			fi
+		else
+			when="in that root"
+		fi
+		echo "Selected stack: $sel, $when"
+	fi
+
+	echo
+	echo "Packages:"
+	# shellcheck disable=SC2086 # lists of package names
+	list=$(pkgcmd list -H $LEGACY_PKGS $NEW_PKGS $SHARED_PKGS 2>/dev/null |
+	    awk '{ print $1, $2 }')
+	for p in $LEGACY_PKGS $NEW_PKGS $SHARED_PKGS; do
+		case " $LEGACY_PKGS " in
+		*" $p "*) k=legacy ;;
+		*) case " $NEW_PKGS " in
+		   *" $p "*) k=new ;;
+		   *) k=shared ;;
+		   esac ;;
+		esac
+		v=$(echo "$list" | awk -v p="$p" '$1 == p { print $2 }')
+		printf '  %-7s %-30s %s\n' "$k" "$p" "${v:-not installed}"
+	done
+
+	echo
+	echo "Loaded DRM modules:"
+	if live; then
+		lm=$(loaded_modules)
+		if [ -z "$lm" ]; then
+			echo "  none"
+		else
+			echo "$lm" | while read -r id name; do
+				printf '  %-7s %-12s id %s\n' "$(stack_of "$name")" "$name" "$id"
+			done
+		fi
+	else
+		echo "  (not the running system)"
+	fi
+
+	echo
+	echo "Intel GPU aliases ($(r etc/driver_aliases)):"
+	man=$(manifest_aliases)
+	for d in "$LEGACY_DRIVER" "$NEW_DRIVER"; do
+		n=$(count "$(aliases_of "$d")")
+		if installed "$d"; then
+			s=""
+		else
+			s=" (driver not installed)"
+		fi
+		printf '  %-7s %s aliases%s\n' "$d" "$n" "$s"
+	done
+	all=$(words "$man $(aliases_of "$LEGACY_DRIVER") $(aliases_of "$NEW_DRIVER") $(recorded alias)" |
+	    tr ' ' '\n' | sort -u)
+	unbound=0
+	other=""
+	for a in $all; do
+		d=$(driver_of "$a")
+		case "$d" in
+		"") unbound=$((unbound + 1)) ;;
+		"$LEGACY_DRIVER" | "$NEW_DRIVER") ;;
+		*) other="$other $a($d)" ;;
+		esac
+	done
+	printf '  %-7s %s of the %s aliases drmadm manages\n' unbound "$unbound" "$(count "$all")"
+	[ -n "$other" ] && echo "  bound to other drivers:$other"
+	[ -n "$man" ] && echo "  ($LEGACY_PKG declares $(count "$man") aliases for $LEGACY_DRIVER)"
+
+	echo
+	echo "Excludes of DRM modules (read at boot):"
+	ex=$(excludes)
+	if [ -z "$ex" ]; then
+		echo "  none"
+	else
+		echo "$ex" | sed 's/^/  /'
+	fi
+	return 0
+}
+
+unlock() {
+	rmdir "$(r "$LOCK")" 2>/dev/null
+}
+
+do_select() {
+	target=$1
+	case $target in
+	legacy)
+		to=$LEGACY_DRIVER from=$NEW_DRIVER
+		other_modules=$NEW_MODULES ;;
+	new)
+		to=$NEW_DRIVER from=$LEGACY_DRIVER
+		other_modules=$LEGACY_MODULES ;;
+	*)
+		usage ;;
+	esac
+
+	[ -d "$(r etc/system.d)" ] || die "$(r etc/system.d) does not exist (illumos before 2018 has no /etc/system.d)"
+	[ -f "$(r etc/driver_aliases)" ] || die "$(r etc/driver_aliases) does not exist"
+
+	if live; then
+		lm=$(loaded_modules)
+		if [ -n "$lm" ]; then
+			echo "$PROG: DRM modules are loaded; select needs both stacks unloaded:" >&2
+			echo "$lm" | while read -r id name; do
+				echo "  $(stack_of "$name") $name (id $id)" >&2
+			done
+			echo "Stop what uses them (the display manager, Xorg), unload the drivers" >&2
+			echo "and then the core with modunload -i ID, or select from another boot" >&2
+			echo "environment with -R (see drmadm(8))." >&2
+			exit 1
+		fi
+	fi
+
+	if ! mkdir "$(r "$LOCK")" 2>/dev/null; then
+		die "another drmadm is running (lock $(r "$LOCK")); remove it if none is"
+	fi
+	trap unlock EXIT
+	trap 'unlock; exit 1' HUP INT TERM
+
+	changed=0
+	bopt=
+	live || bopt="-b $ROOT"
+
+	# 1. The Intel GPU aliases.
+	man=$(manifest_aliases)
+	bound_to=$(aliases_of "$to")
+	bound_from=$(aliases_of "$from")
+	all=$(words "$man $bound_to $bound_from $(recorded alias)" | tr ' ' '\n' | sort -u)
+	if [ "$target" = legacy ] && [ -n "$man" ]; then
+		want=$man
+	else
+		want=$all
+	fi
+	conflict=""
+	ok=""
+	for a in $want; do
+		d=$(driver_of "$a")
+		case "$d" in
+		"" | "$to" | "$from") ok="$ok $a" ;;
+		*) conflict="$conflict $a($d)" ;;
+		esac
+	done
+	add=$(minus "$ok" "$bound_to")
+
+	if [ -n "$bound_from" ]; then
+		echo "Removing $(count "$bound_from") aliases from $from:"
+		echo "  update_drv -n $bopt -d -i '...' $from"
+		# shellcheck disable=SC2086 # $bopt is empty or two words
+		update_drv -n $bopt -d -i "$(quoted "$bound_from")" "$from" ||
+		    die "update_drv -d failed; $(r etc/driver_aliases) is unchanged or partly changed, run drmadm status"
+		changed=1
+	fi
+	if [ -n "$add" ]; then
+		if installed "$to"; then
+			echo "Adding $(count "$add") aliases to $to:"
+			echo "  update_drv -n $bopt -a -i '...' $to"
+			# shellcheck disable=SC2086 # $bopt is empty or two words
+			update_drv -n $bopt -a -i "$(quoted "$add")" "$to" ||
+			    die "update_drv -a failed; run drmadm status"
+			changed=1
+		else
+			echo "$to is not installed: the $(count "$add") Intel GPU aliases stay unbound;"
+			echo "  an Intel GPU falls back to the generic display driver (vgatext)."
+		fi
+	fi
+	[ -n "$conflict" ] && echo "Left alone, bound to other drivers:$conflict"
+
+	# 2. The fragment with the excludes of the other stack.
+	frag=$(r "$FRAGMENT")
+	tmp=$(r "etc/system.d/.drmadm.$$")
+	{
+		echo "* /$FRAGMENT: written by drmadm(8); do not edit."
+		echo "* The $target DRM stack is selected: the modules of the other stack"
+		echo "* are excluded from loading. To change it, run drmadm select."
+		echo "* To undo by hand, remove this file, run bootadm update-archive and"
+		echo "* give the Intel GPU aliases below back to i915 (update_drv -a -i)."
+		echo "* drmadm-selected: $target"
+		echo "* drmadm-time: $(date +%s)"
+		for a in $all; do
+			echo "* drmadm-alias: $a"
+		done
+		for m in $other_modules; do
+			echo "exclude: $m"
+			echo "exclude: ${m#*/}"
+		done
+	} > "$tmp" || die "cannot write $tmp"
+	chmod 644 "$tmp"
+	# Compare without the time line: an unchanged selection keeps the file.
+	if [ -f "$frag" ] && [ "$(grep -v '^\* drmadm-time:' "$frag")" = "$(grep -v '^\* drmadm-time:' "$tmp")" ]; then
+		rm -f "$tmp"
+		echo "$frag is unchanged ($target)."
+	else
+		mv -f "$tmp" "$frag" || die "cannot replace $frag"
+		echo "Wrote $frag: excludes $(names "$other_modules" | tr '\n' ' ')"
+		changed=1
+	fi
+
+	# Excludes elsewhere that would keep the selected stack from loading.
+	own=$(names "$other_modules" | tr '\n' ' ')
+	excludes | grep -v "^$frag:" | while IFS= read -r line; do
+		n=${line##*/}
+		n=${n##*: }
+		case " $own " in
+		*" $n "*) ;;
+		*) echo "Warning: $line excludes a module of the $target stack; drmadm does not edit it." ;;
+		esac
+	done
+
+	# 3. The boot archive.
+	if [ $changed = 1 ]; then
+		if live; then
+			echo "  bootadm update-archive"
+			bootadm update-archive || die "bootadm update-archive failed"
+		else
+			echo "  bootadm update-archive -R $ROOT"
+			bootadm update-archive -R "$ROOT" || die "bootadm update-archive -R $ROOT failed"
+		fi
+		echo "The $target stack is selected from the next boot."
+	else
+		echo "Nothing changed: the $target stack was selected already."
+	fi
+	return 0
+}
+
+while getopts R: opt; do
+	case $opt in
+	R) ROOT=$OPTARG ;;
+	*) usage ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ -d "$ROOT" ] || die "root $ROOT is not a directory"
+
+case "${1:-}" in
+status)
+	[ $# -eq 1 ] || usage
+	do_status ;;
+select)
+	[ $# -eq 2 ] || usage
+	do_select "$2" ;;
+*)
+	usage ;;
+esac
