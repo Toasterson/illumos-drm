@@ -14,8 +14,13 @@
 # package that delivers misc/drm_core (modules/drm_core).
 #
 # The driver action binds the module to the modern virtio-gpu PCI function
-# (1af4:1050) and gives the card and render nodes mode 0666, as other DRM
-# drivers on OpenIndiana have. The devlink attribute makes devfsadm create
+# (1af4:1050) and gives the card and render nodes "* 0666 root sys": any
+# process may open a render node, and the DRM core decides which file of
+# the card node is the DRM master. ttymon's /etc/logindevperm rule for
+# /dev/dri would set them to 0600 root root at every boot; the service
+# drm-perms of driver/graphics/drmadm (required through drm-core) keeps
+# them at these permissions (README, "Device node permissions"). The
+# devlink attribute makes devfsadm create
 # /dev/dri/card<N> and /dev/dri/renderD<128+N> where the SUNW_drm_link
 # module of driver/graphics/drm is not installed (see devlink.tab).
 #

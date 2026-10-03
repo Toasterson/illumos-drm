@@ -12,6 +12,7 @@
 #
 #   drmadm [-R root] status
 #   drmadm [-R root] select legacy|new
+#   drmadm [-R root] perms
 #
 # A selection does three things and takes effect at the next boot:
 #   1. writes /etc/system.d/driver:graphics:drmadm with exclude: lines for
@@ -27,6 +28,25 @@
 #      boot archive.
 # It refuses while any module of either stack is loaded, and while another
 # drmadm holds its lock.
+#
+# "drmadm perms" keeps the device nodes of the new stack's drivers at their
+# /etc/minor_perm permissions (0666 root sys as packaged). ttymon(8) runs
+# di_devperm_logout() when it opens the console, at every boot and after
+# every console logout, and login(1) runs di_devperm_login() at a console
+# login: both apply the /etc/logindevperm rule "/dev/dri/*", which sets
+# every /dev/dri node to 0600 and to root's (or the console user's) owner
+# and group. A chown or chmod of a devfs node is kept in a shadow node on
+# the root file system and wins over minor_perm from then on, also after
+# a reboot, a module reload or rem_drv (without -C). drmadm perms
+#   1. restricts each /etc/logindevperm rule for /dev/dri that names no
+#      driver to the legacy stack's drivers (driver=i915,radeon), so the
+#      console-user assignment stays as it was for them and leaves the new
+#      stack's nodes alone;
+#   2. resets every /dev/dri node of a new-stack driver whose owner, group
+#      or mode differs from its /etc/minor_perm entry to that entry
+#      (running system only).
+# The service svc:/system/graphics/drm-perms runs it at every boot before
+# console-login (packaging/drm-perms.xml).
 
 PATH=/usr/bin:/usr/sbin:/sbin
 export PATH
@@ -54,10 +74,26 @@ LEGACY_PKGS="driver/graphics/drm driver/graphics/agpgart"
 NEW_PKGS="driver/graphics/drm-core driver/graphics/virtio-gpu driver/graphics/cdrmnull"
 SHARED_PKGS="driver/graphics/drm-devlink driver/graphics/drmadm x11/library/libdrm"
 
+LOGINDEVPERM=etc/logindevperm
+# drv_names MODULES: the names of the drv/ modules of a list of class/name,
+# the drivers of a stack, which create its /dev/dri nodes.
+drv_names() {
+	for m in $1; do
+		case $m in
+		drv/*) printf '%s ' "${m#drv/}" ;;
+		esac
+	done
+}
+LEGACY_DRIVERS=$(drv_names "$LEGACY_MODULES")
+NEW_DRIVERS=$(drv_names "$NEW_MODULES")
+# The marker of the rules drmadm perms restricted, in their comment.
+LDP_MARK="drmadm(8): legacy DRM drivers only"
+
 usage() {
 	cat >&2 <<EOT
 Usage: $PROG [-R root] status
        $PROG [-R root] select legacy|new
+       $PROG [-R root] perms
 EOT
 	exit 2
 }
@@ -267,6 +303,253 @@ boot_time() {
 	kstat -p unix:0:system_misc:boot_time 2>/dev/null | awk '{ print $2 }'
 }
 
+# ldp_rules: one line "LINE STATE RULE" for every /etc/logindevperm rule
+# that covers /dev/dri, as libdevinfo's logindevperm() reads the file:
+# the comment from the first '#' is dropped, the fields are the console,
+# the mode and a ':'-separated device list, and a rule whose remaining
+# text contains "driver" applies only to the drivers listed after its
+# "driver=". STATE is "all" (no driver list: every driver's nodes),
+# "new" (the list names a driver of the new stack) or "legacy".
+ldp_rules() {
+	f=$(under "$LOGINDEVPERM")
+	[ -f "$f" ] || return 0
+	awk -v new="$NEW_DRIVERS" '
+	    BEGIN { n = split(new, a, " "); for (i = 1; i <= n; i++) isnew[a[i]] = 1 }
+	    {
+		body = $0
+		if ((i = index(body, "#")) > 0)
+			body = substr(body, 1, i - 1)
+		if (split(body, w, /[ \t]+/) == 0)
+			next
+		k = 0
+		for (j = 1; j in w; j++)
+			if (w[j] != "")
+				t[++k] = w[j]
+		if (k < 3)
+			next
+		dri = 0
+		nd = split(t[3], dev, ":")
+		for (j = 1; j <= nd; j++)
+			if (dev[j] ~ /^\/dev\/dri(\/|$)/)
+				dri = 1
+		if (!dri)
+			next
+		state = "all"
+		if ((i = index(body, "driver")) > 0) {
+			state = "legacy"
+			list = substr(body, i)
+			sub(/^[^=]*=/, "", list)
+			nl = split(list, d, /[, \t]+/)
+			for (j = 1; j <= nl; j++)
+				if (d[j] in isnew)
+					state = "new"
+		}
+		print NR, state, $0
+	    }' "$f"
+}
+
+# ldp_restrict: gives every /etc/logindevperm rule for /dev/dri without a
+# driver list the list of the legacy stack's drivers; a rule that also
+# lists other devices is split in two, so that those keep applying to
+# every driver. Rules with a driver list are left as the administrator
+# wrote them. The file is replaced by rename(2), so a concurrent
+# login(1) or ttymon(8) reads the old or the new file, never a part.
+ldp_restrict() {
+	f=$(under "$LOGINDEVPERM")
+	if [ ! -f "$f" ]; then
+		echo "$f does not exist: no console-login rule to restrict."
+		return 0
+	fi
+	if [ -z "$(ldp_rules | awk '$2 == "all"')" ]; then
+		echo "$f: no /dev/dri rule applies to every driver."
+		ldp_admin
+		return 0
+	fi
+	tmp=$(under "etc/.logindevperm.drmadm.$$")
+	cp -p "$f" "$tmp" || die "cannot copy $f to $tmp"
+	drivers=$(words "$LEGACY_DRIVERS" | tr ' ' ',')
+	if ! awk -v drivers="$drivers" -v mark="$LDP_MARK" '
+	    {
+		body = $0
+		comment = ""
+		if ((i = index(body, "#")) > 0) {
+			comment = substr(body, i)
+			body = substr(body, 1, i - 1)
+		}
+		if (index(body, "driver") > 0 || split(body, w, /[ \t]+/) == 0) {
+			print
+			next
+		}
+		k = 0
+		for (j = 1; j in w; j++)
+			if (w[j] != "")
+				t[++k] = w[j]
+		if (k < 3) {
+			print
+			next
+		}
+		rest = ""
+		for (j = 4; j <= k; j++)
+			rest = rest "\t" t[j]
+		dri = ""
+		other = ""
+		nd = split(t[3], dev, ":")
+		for (j = 1; j <= nd; j++) {
+			if (dev[j] ~ /^\/dev\/dri(\/|$)/)
+				dri = dri (dri == "" ? "" : ":") dev[j]
+			else
+				other = other (other == "" ? "" : ":") dev[j]
+		}
+		if (dri == "") {
+			print
+			next
+		}
+		if (other != "")
+			print t[1] "\t" t[2] "\t" other rest (comment == "" ? "" : "\t" comment)
+		c = (comment == "" ? "# " mark : comment "; " mark)
+		print t[1] "\t" t[2] "\t" dri rest "\tdriver=" drivers "\t" c
+	    }' "$f" > "$tmp"; then
+		rm -f "$tmp"
+		die "cannot rewrite $f"
+	fi
+	mv -f "$tmp" "$f" || { rm -f "$tmp"; die "cannot replace $f"; }
+	echo "Restricted the /dev/dri rules of $f to the drivers $drivers:"
+	ldp_rules | sed 's/^/  line /'
+	ldp_admin
+}
+
+# ldp_admin: reports the /etc/logindevperm rules for /dev/dri whose driver
+# list names a driver of the new stack, which drmadm leaves as written.
+ldp_admin() {
+	ldp_rules | awk '$2 == "new"' | while read -r n state rule; do
+		echo "Left as written: $(under "$LOGINDEVPERM"):$n names a driver of the new stack:"
+		echo "  $rule"
+	done
+}
+
+# dri_nodes: one line "LINK DRIVER MINOR MODE OWNER GROUP WANT" for every
+# /dev/dri link of the running system whose node exists: the node's
+# driver (by its major number), minor name, mode (octal), owner and group,
+# and in WANT "MODE OWNER GROUP" of the /etc/minor_perm entry the kernel
+# would apply (dev_minorperm(): the first entry of the driver whose minor
+# name pattern matches, else its "*" entry), or "-" if there is none.
+dri_nodes() {
+	for l in /dev/dri/*; do
+		[ -h "$l" ] || continue
+		# shellcheck disable=SC2012 # the target of the link, as ls prints it
+		node=$(ls -l "$l" 2>/dev/null | sed -n 's/^.* -> //p')
+		info=$(ls -lL "$l" 2>/dev/null) || continue
+		echo "$l ${node##*:} $info"
+	done | awk -v n2m=/etc/name_to_major -v mperm=/etc/minor_perm '
+	    function glob(p) {
+		gsub(/[.+(){}^$|\\]/, "\\\\&", p)
+		gsub(/\*/, ".*", p)
+		gsub(/\?/, ".", p)
+		return "^" p "$"
+	    }
+	    function octal(s,  i, v) {
+		v = 0
+		for (i = 1; i <= length(s); i++)
+			v = v * 8 + substr(s, i, 1)
+		return sprintf("%04o", v)
+	    }
+	    function bits(s,  i, v) {
+		v = 0
+		for (i = 2; i <= 10; i++)
+			v = v * 2 + (substr(s, i, 1) != "-")
+		return sprintf("%04o", v)
+	    }
+	    BEGIN {
+		while ((getline line < n2m) > 0) {
+			split(line, a, /[ \t]+/)
+			drv[a[2]] = a[1]
+		}
+		while ((getline line < mperm) > 0) {
+			if (line ~ /^[ \t]*(#|$)/)
+				continue
+			split(line, a, /[ \t]+/)
+			d = a[1]
+			sub(/:.*/, "", d)
+			m = substr(a[1], length(d) + 2)
+			want = octal(a[2]) " " a[3] " " a[4]
+			if (m == "*") {
+				if (!(d in wild))
+					wild[d] = want
+			} else {
+				pat[d, ++np[d]] = glob(m)
+				val[d, np[d]] = want
+			}
+		}
+	    }
+	    {
+		# LINK MINOR MODE NLINK OWNER GROUP MAJOR,[ ]MINOR ...
+		split($7, mm, ",")
+		d = drv[mm[1]]
+		if (d == "")
+			d = "?"
+		want = "-"
+		for (i = 1; i <= np[d]; i++)
+			if ($2 ~ pat[d, i]) {
+				want = val[d, i]
+				break
+			}
+		if (want == "-" && (d in wild))
+			want = wild[d]
+		print $1, d, $2, bits($3), $5, $6, want
+	    }'
+}
+
+# new_driver NAME: whether NAME is a driver of the new stack.
+new_driver() {
+	case " $NEW_DRIVERS " in
+	*" $1 "*) return 0 ;;
+	esac
+	return 1
+}
+
+# repair_nodes: resets every /dev/dri node of a new-stack driver whose
+# owner, group or mode differs from its /etc/minor_perm entry to that
+# entry. chown(2) and chmod(2) of a devfs node store the result in its
+# shadow node, so the reset lasts, as the wrong values did.
+repair_nodes() {
+	rc=0
+	fixed=0
+	nodes=$(dri_nodes)
+	# A here-document, not a pipe: the loop runs in this shell and its
+	# counters survive it.
+	while read -r l d minor mode owner group wmode wowner wgroup; do
+		[ -n "$l" ] || continue
+		new_driver "$d" || continue
+		[ "$wmode" = "-" ] && {
+			echo "$l ($d $minor): no /etc/minor_perm entry, left at $mode $owner $group"
+			continue
+		}
+		[ "$mode $owner $group" = "$wmode $wowner $wgroup" ] && continue
+		if chown "$wowner:$wgroup" "$l" && chmod "$wmode" "$l"; then
+			echo "Reset $l ($d $minor) from $mode $owner $group to $wmode $wowner $wgroup (/etc/minor_perm)."
+			fixed=$((fixed + 1))
+		else
+			echo "$PROG: cannot reset $l to $wmode $wowner $wgroup" >&2
+			rc=1
+		fi
+	done <<EOT
+$nodes
+EOT
+	[ $fixed -eq 0 ] && [ $rc -eq 0 ] && echo "The /dev/dri nodes of the new stack's drivers have their /etc/minor_perm permissions."
+	return $rc
+}
+
+do_perms() {
+	ldp_restrict
+	if live; then
+		repair_nodes || exit 1
+	else
+		echo "Node permissions are reset on the running system only (the service"
+		echo "svc:/system/graphics/drm-perms does it when $ROOT boots)."
+	fi
+	return 0
+}
+
 do_status() {
 	frag=$(under "$FRAGMENT")
 	sel=$(recorded selected)
@@ -352,6 +635,34 @@ do_status() {
 	echo
 	n=$(ls "$(under dev/dri)" 2>/dev/null | wc -l | tr -d ' ')
 	echo "/dev/dri links: $n (after a switch, devfsadm -C removes those of the other stack)"
+
+	echo
+	echo "Device node permissions (see drmadm perms):"
+	rules=$(ldp_rules)
+	if [ -z "$rules" ]; then
+		echo "  $(under "$LOGINDEVPERM"): no rule for /dev/dri"
+	else
+		echo "$rules" | while read -r n state rule; do
+			case $state in
+			all) v="applies to every driver: run drmadm perms" ;;
+			new) v="applies to a driver of the new stack" ;;
+			*) v="applies to legacy drivers only" ;;
+			esac
+			echo "  $(under "$LOGINDEVPERM"):$n $v:"
+			echo "    $rule"
+		done
+	fi
+	if live; then
+		dri_nodes | while read -r l d minor mode owner group wmode wowner wgroup; do
+			w=""
+			if [ "$wmode" = "-" ]; then
+				w=" (no /etc/minor_perm entry)"
+			elif [ "$mode $owner $group" != "$wmode $wowner $wgroup" ]; then
+				w=" (/etc/minor_perm: $wmode $wowner $wgroup)"
+			fi
+			printf '  %-20s %-10s %s %s %s%s\n' "$l" "$d" "$mode" "$owner" "$group" "$w"
+		done
+	fi
 
 	echo
 	echo "Excludes of DRM modules (read at boot):"
@@ -551,6 +862,9 @@ status)
 select)
 	[ $# -eq 2 ] || usage
 	do_select "$2" ;;
+perms)
+	[ $# -eq 1 ] || usage
+	do_perms ;;
 *)
 	usage ;;
 esac
