@@ -168,6 +168,8 @@ struct TCb {
     order: *const Mutex<Vec<u32>>,
     /// Drops a reference to this fence from inside the function.
     put_fence: AtomicBool,
+    /// Drops a reference to another fence from inside the function.
+    put_other: core::sync::atomic::AtomicPtr<f::dma_fence>,
 }
 
 // SAFETY: the raw pointers are the test's, used under its rules.
@@ -184,6 +186,7 @@ impl TCb {
             error_seen: AtomicI32::new(0),
             order,
             put_fence: AtomicBool::new(false),
+            put_other: core::sync::atomic::AtomicPtr::new(ptr::null_mut()),
         })
     }
     fn raw(&mut self) -> *mut f::dma_fence_cb {
@@ -208,6 +211,12 @@ unsafe extern "C" fn tcb_func(fence: *mut f::dma_fence, cb: *mut f::dma_fence_cb
     if !t.order.is_null() {
         // SAFETY: the test's vector outlives the fence.
         unsafe { &*t.order }.lock().unwrap().push(t.id);
+    }
+    let other = t.put_other.swap(ptr::null_mut(), Ordering::SeqCst);
+    if !other.is_null() {
+        let d = *TEST_DOMAIN.get().unwrap() as *const FenceDomain;
+        // SAFETY: the test handed this reference to the callback.
+        unsafe { put(other, Ctx::Sleep(&sleep()), &*d) };
     }
     if t.put_fence.load(Ordering::SeqCst) {
         let d = *TEST_DOMAIN.get().unwrap() as *const FenceDomain;
@@ -634,33 +643,105 @@ unsafe impl Sync for P {}
 #[test]
 fn proxy_release_races_the_relay() {
     // The core fence signals on one thread while the last reference to a
-    // proxy whose relay is armed goes on another: the release waits for a
-    // running relay, a relay that finds the count at zero does nothing.
+    // proxy whose relay is armed goes on another. Three kinds of round:
+    //  0  the relay has started but not taken its reference when the
+    //     release runs: the release waits for it, the relay finds the
+    //     count at zero, and the callback runs once with -EDEADLK (from
+    //     the release);
+    //  1  the relay holds its reference when the owner drops the other:
+    //     the relay's put is the last (parked), and the callback runs once
+    //     from the relay without an error;
+    //  2  both start together with small spins of either side: the
+    //     callback runs once, with one of the two errors.
+    // The hooks count the paths; each forced one must be seen.
+    use super::hooks as h;
     let d = domain();
-    for i in 0..500 {
-        let core = Fence::new(&d, d.alloc_contexts(1), i, &sleep()).unwrap();
+    let (zero0, found0, last0) = (
+        h::RELAY_SAW_ZERO.load(Ordering::SeqCst),
+        h::RELEASE_FOUND_RUNNING.load(Ordering::SeqCst),
+        h::RELAY_LAST.load(Ordering::SeqCst),
+    );
+    let mut errors = [0u32; 2];
+    for i in 0..600u32 {
+        let mode = i % 3;
+        let core = Fence::new(&d, d.alloc_contexts(1), u64::from(i), &sleep()).unwrap();
         let p = proxy(core.clone(), &d);
         let mut a = TCb::new(1, ptr::null());
-        // SAFETY: a live proxy.
+        // SAFETY: a live proxy; arms its relay.
         unsafe { assert_eq!(add_callback(p, a.raw(), Some(tcb_func)), 0) };
-        let c2 = core.clone();
+        let entered = h::RELAY_ENTERED.load(Ordering::SeqCst);
+        let got = h::RELAY_GOT.load(Ordering::SeqCst);
+        let go = std::sync::Arc::new(AtomicBool::new(false));
+        match mode {
+            0 => {
+                h::SPIN_BEFORE_GET.store(2_000_000, Ordering::SeqCst);
+                h::SPIN_AFTER_GET.store(0, Ordering::SeqCst);
+            }
+            1 => {
+                h::SPIN_BEFORE_GET.store(0, Ordering::SeqCst);
+                h::SPIN_AFTER_GET.store(2_000_000, Ordering::SeqCst);
+            }
+            _ => {
+                h::SPIN_BEFORE_GET.store(i % 7 * 50, Ordering::SeqCst);
+                h::SPIN_AFTER_GET.store(i % 5 * 50, Ordering::SeqCst);
+            }
+        }
+        let (c2, go2) = (core.clone(), go.clone());
         let t = thread::spawn(move || {
-            for _ in 0..(i % 7) {
+            while !go2.load(Ordering::SeqCst) {
                 core::hint::spin_loop();
             }
             c2.signal(Ctx::Atomic(&atomic()));
             c2.put(Ctx::Atomic(&atomic()));
         });
-        let pp = P(p);
-        // SAFETY: the test's reference.
-        unsafe { put(pp.0, Ctx::Sleep(&sleep()), &d) };
-        t.join().unwrap();
-        let ran = a.ran.load(Ordering::SeqCst);
-        assert!(ran <= 1, "a callback runs at most once");
-        core.put(Ctx::Sleep(&sleep()));
+        go.store(true, Ordering::SeqCst);
+        match mode {
+            0 => {
+                // The relay runs and spins before its get.
+                while h::RELAY_ENTERED.load(Ordering::SeqCst) == entered {
+                    core::hint::spin_loop();
+                }
+            }
+            1 => {
+                // The relay holds its reference and spins.
+                while h::RELAY_GOT.load(Ordering::SeqCst) == got {
+                    core::hint::spin_loop();
+                }
+            }
+            _ => {
+                for _ in 0..(i % 11) * 30 {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+        // SAFETY: the test's reference, the last unless the relay holds one.
+        unsafe { put(p, Ctx::Sleep(&sleep()), &d) };
+        // The release of a proxy with an armed relay is parked: run it now,
+        // on this thread, while the relay may still run on the other.
         d.drain(&sleep());
+        t.join().unwrap();
+        d.drain(&sleep());
+        assert_eq!(a.ran.load(Ordering::SeqCst), 1, "round {i}: the callback runs exactly once");
+        let e = a.error_seen.load(Ordering::SeqCst);
+        match (mode, e) {
+            (0, x) => assert_eq!(x, -EDEADLK, "round {i}: released before the relay signalled"),
+            (1, x) => assert_eq!(x, 0, "round {i}: signalled by the relay"),
+            (_, 0) => errors[0] += 1,
+            (_, x) => {
+                assert_eq!(x, -EDEADLK);
+                errors[1] += 1;
+            }
+        }
+        core.put(Ctx::Sleep(&sleep()));
         drop(a);
     }
+    h::SPIN_BEFORE_GET.store(0, Ordering::SeqCst);
+    h::SPIN_AFTER_GET.store(0, Ordering::SeqCst);
+    d.drain(&sleep());
+    assert!(h::RELAY_SAW_ZERO.load(Ordering::SeqCst) > zero0, "a relay found the count at zero");
+    assert!(h::RELEASE_FOUND_RUNNING.load(Ordering::SeqCst) > found0, "a release waited for a running relay");
+    assert!(h::RELAY_LAST.load(Ordering::SeqCst) > last0, "a relay dropped the last reference");
+    std::println!("free race rounds: {} signalled by the relay, {} released first", errors[0], errors[1]);
     assert_eq!(d.stats.live()[0], 0);
 }
 
@@ -732,4 +813,39 @@ fn signal_races_add_remove_and_put() {
         d.drain(&sleep());
         assert_eq!(c.released.load(Ordering::SeqCst), 1);
     }
+}
+
+#[test]
+fn a_sibling_proxys_callback_drops_the_last_reference() {
+    // Two proxies of one core fence, relays armed in the order p2, p1. The
+    // core runs p2's relay first; a callback on p2 drops p1's last
+    // reference while p1's relay is still queued on the same thread. The
+    // release is parked (it would otherwise wait for that relay for ever);
+    // p1's relay then finds the count at zero, and p1's callback runs from
+    // the release with -EDEADLK.
+    let leaked: &'static KArc<FenceDomain> = Box::leak(Box::new(domain()));
+    let _ = TEST_DOMAIN.set(KArc::as_ptr(leaked).as_ptr() as usize);
+    let d = unsafe { &*(*TEST_DOMAIN.get().unwrap() as *const FenceDomain) };
+    let core = Fence::new(leaked, leaked.alloc_contexts(1), 1, &sleep()).unwrap();
+    let p1 = proxy(core.clone(), leaked);
+    let p2 = proxy(core.clone(), leaked);
+    let mut c1 = TCb::new(1, ptr::null());
+    let mut c2 = TCb::new(2, ptr::null());
+    c2.put_other.store(p1, Ordering::SeqCst);
+    // SAFETY: live proxies; p1's reference goes to c2.
+    unsafe {
+        assert_eq!(add_callback(p2, c2.raw(), Some(tcb_func)), 0);
+        assert_eq!(add_callback(p1, c1.raw(), Some(tcb_func)), 0);
+    }
+    let c = core.clone();
+    let t = thread::spawn(move || c.signal(Ctx::Sleep(&sleep())));
+    assert!(t.join().unwrap(), "the signal returns");
+    assert_eq!(c2.ran.load(Ordering::SeqCst), 1);
+    d.drain(&sleep());
+    assert_eq!(c1.ran.load(Ordering::SeqCst), 1, "p1's callback ran once");
+    assert_eq!(c1.error_seen.load(Ordering::SeqCst), -EDEADLK, "from p1's release");
+    // SAFETY: the test's reference to p2.
+    unsafe { put(p2, Ctx::Sleep(&sleep()), d) };
+    d.drain(&sleep());
+    core.put(Ctx::Sleep(&sleep()));
 }

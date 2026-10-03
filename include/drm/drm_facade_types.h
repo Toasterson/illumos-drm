@@ -29,6 +29,7 @@
 #include <sys/stddef.h>
 #include <sys/time.h>
 #include <sys/debug.h>
+#include <sys/atomic.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -144,6 +145,42 @@ typedef unsigned int gfp_t;
 #define	GFP_KERNEL		(__GFP_DIRECT_RECLAIM)
 #define	GFP_NOWAIT		0u
 #define	GFP_ATOMIC		0u
+#endif
+
+/*
+ * Linux's kref accessors on the facade's struct kref (the counts of
+ * drm_gem_object and dma_fence, which are the objects' own): read the
+ * count, take a reference from one held, take one unless the count is
+ * zero (the object is being freed; it never comes back). A reference
+ * taken here is dropped with the object's put function
+ * (drm_gem_object_put(), dma_fence_put()); there is no kref_put().
+ */
+#ifndef	_DRM_FACADE_KREF
+#define	_DRM_FACADE_KREF
+static inline unsigned int
+kref_read(const struct kref *kref)
+{
+	return ((unsigned int)*(const volatile int *)&kref->refcount.refs.counter);
+}
+
+static inline void
+kref_get(struct kref *kref)
+{
+	atomic_inc_32((volatile uint32_t *)&kref->refcount.refs.counter);
+}
+
+static inline int
+kref_get_unless_zero(struct kref *kref)
+{
+	volatile uint32_t *c = (volatile uint32_t *)&kref->refcount.refs.counter;
+	uint32_t o;
+
+	do {
+		if ((o = *c) == 0)
+			return (0);
+	} while (atomic_cas_32(c, o, o + 1) != o);
+	return (1);
+}
 #endif
 
 struct drm_device;

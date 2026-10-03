@@ -44,9 +44,10 @@ pub(crate) fn wait_result(r: Result<(), Errno>, timeout: i64, deadline: Option<i
 }
 
 /// The core fence of a structure (enabling signalling and adding the
-/// bridge of a driver's fence), or the module's signalled stub for an
-/// initialised structure without one (a `dma_fence_init` that found no
-/// memory); `None` for NULL or a structure that was never initialised.
+/// bridge of a driver's fence); for an initialised structure without one
+/// (a `dma_fence_init` that found no memory) a new signalled core fence
+/// with its error, or the module's stub if there is no memory for that
+/// either; `None` for NULL or a structure that was never initialised.
 ///
 /// # Safety
 /// `fence` is NULL or a structure with a reference the caller holds; the
@@ -56,7 +57,23 @@ pub(crate) unsafe fn core_fence(fence: *mut f::dma_fence) -> Option<Fence> {
     unsafe {
         match cfence::core_fence(fence) {
             Some(c) => Some(c),
-            None if cfence::is_initialised(fence) => crate::kernel_stub(),
+            None if cfence::is_initialised(fence) => {
+                // dma_fence_init signalled it for lack of memory: a
+                // signalled core fence with its error, or else the stub.
+                let e = (*fence).error;
+                match Fence::try_new(crate::module_fences(), (*fence).context, (*fence).seqno) {
+                    Ok(f) => {
+                        if let Some(e) = Errno::new(-e).filter(|_| e < 0) {
+                            f.set_error(e);
+                        }
+                        // SAFETY: signalling never blocks.
+                        let a = ddi::Atomic::assume();
+                        f.signal(drm_core::defer::Ctx::Atomic(&a));
+                        Some(f)
+                    }
+                    Err(_) => crate::kernel_stub(),
+                }
+            }
             None => None,
         }
     }

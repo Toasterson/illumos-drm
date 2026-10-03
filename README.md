@@ -1338,9 +1338,12 @@ driver and threads (`crates/drm-core/src/cfence/tests.rs`: 13 tests).
 `GemRef` counts in it (handles, names, mappings, dma-bufs, the driver's
 references), the core's allocation holds the object with one reference
 of its own until the count reaches zero, and the count never comes back
-from zero (`drm_core::refcount`). Drivers can therefore read it and take
-a reference with `kref_get_unless_zero()` from lists that hold none (i915's
-shrinker and RCU lookups) and drop it with `drm_gem_object_put()`.
+from zero (`drm_core::refcount`). Drivers can therefore read it
+(`kref_read()`) and take a reference with `kref_get_unless_zero()` (both
+in `drm_facade_types.h`) from lists of their own that hold none (i915's
+shrinker lists), as long as the list's lock keeps the memory valid, and
+drop it with `drm_gem_object_put()`. The core frees objects with no RCU
+grace period, so i915's lockless RCU lookups must become locked lookups.
 `drm_illumos_gem_for_each_handle(file, fn, arg)` replaces walking
 `drm_file.object_idr` under `table_lock`: it calls `fn` for every handle
 and object of the file, in handle order, until `fn` returns non-zero,
@@ -1349,13 +1352,14 @@ under the handle table's lock, so no handle comes or goes during the walk
 and lookups from `fn` work; `fn` must not create or close handles of the
 file. `drm_gem_object_lookup()` finds one handle's object with a
 reference (Linux's lockless `idr_find()` under RCU has no counterpart).
-The Rust drivers get `drm_facade::gem::for_each_handle`.
+No Rust driver walks handles yet, so `drm-facade` has no wrapper for it.
 
 **R5b: managed resources.** `drm_managed.h` provides
 `drmm_add_action()`, `drmm_add_action_or_reset()`,
 `drmm_release_action()`, `drmm_kmalloc()`, `drmm_kzalloc()`,
 `drmm_kmalloc_array()`, `drmm_kcalloc()`, `drmm_kstrdup()` and
-`drmm_kfree()` over `drm_core::managed`: nodes on
+`drmm_kfree()` over `drm_core::managed` (`drmm_kmalloc(dev, 0, ...)`
+returns NULL, where Linux returns a non-NULL zero-size pointer): nodes on
 `drm_device.managed.resources` under `managed.lock`, released newest
 first when the device's last reference goes (`drm_dev_put()`), after
 `drm_dev_unregister()` and the driver's `release` callback and before the

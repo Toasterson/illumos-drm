@@ -218,6 +218,9 @@ pub struct FenceDomain {
     deferred: DeferList<FenceInner>,
     /// Releases of C fence structures parked in interrupt context.
     raw: RawDeferList,
+    /// Held by a drain while it runs parked releases, so that
+    /// [`FenceDomain::barrier`] waits for one in progress.
+    drain_lock: KMutex<()>,
     drain_scheduled: AtomicBool,
     /// The counters.
     pub stats: SyncStats,
@@ -289,6 +292,7 @@ impl FenceDomain {
                 pri,
                 deferred: DeferList::new(),
                 raw: RawDeferList::new(),
+                drain_lock: KMutex::new(()),
                 drain_scheduled: AtomicBool::new(false),
                 stats: SyncStats::default(),
                 kstat,
@@ -306,6 +310,7 @@ impl FenceDomain {
                 pri: None,
                 deferred: DeferList::new(),
                 raw: RawDeferList::new(),
+                drain_lock: KMutex::new(()),
                 drain_scheduled: AtomicBool::new(false),
                 stats: SyncStats::default(),
             },
@@ -363,8 +368,9 @@ impl FenceDomain {
                 d.drain(ctx);
             };
             if self.tq.try_dispatch(task).is_err() {
-                // No memory for the task now; the next thread-context
-                // entry point or the detach drains.
+                // No memory for the task now: the next push dispatches
+                // again, and a barrier, the detach or (for a device's
+                // domain) its next thread-context entry point drains.
                 self.drain_scheduled.store(false, Ordering::Release);
             }
         }
@@ -377,6 +383,10 @@ impl FenceDomain {
         if self.deferred.is_empty() && self.raw.is_empty() {
             return;
         }
+        // One drain at a time: a barrier must not return while another
+        // drain still runs a release it took off the list. A release
+        // never drains (it may park, which only pushes).
+        let _one = self.drain_lock.lock();
         // A raw release drops core fences (parking them here when they
         // were deferred themselves), and destroying a fence never parks a
         // raw release, so raw first, then the fences, until both are empty.
@@ -415,12 +425,17 @@ impl FenceDomain {
         }
     }
 
-    /// Waits for a drain task that runs now, then drains what is parked:
+    /// Waits for a drain task that runs now, then drains what is parked,
+    /// after any drain in progress on another thread (the drain lock):
     /// once this returns, every release parked before the call has run.
-    /// Thread context.
+    /// Thread context, not from a fence release (which runs inside a
+    /// drain).
     #[cfg(not(test))]
     pub fn barrier(&self, ctx: &Sleepable) {
         self.tq.wait(ctx);
+        // Taken even when nothing is parked: a drain elsewhere may still
+        // run what it took off the list.
+        drop(self.drain_lock.lock());
         self.drain(ctx);
     }
 

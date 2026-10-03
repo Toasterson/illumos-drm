@@ -1819,20 +1819,6 @@ cdrmnull_walk_one(uint32_t handle, struct drm_gem_object *obj, void *arg)
 	return (0);
 }
 
-/* Linux's kref_get_unless_zero() on the object's count. */
-static boolean_t
-cdrmnull_kref_get_unless_zero(struct kref *k)
-{
-	volatile uint_t *c = (volatile uint_t *)&k->refcount.refs.counter;
-	uint_t o;
-
-	do {
-		if ((o = *c) == 0)
-			return (B_FALSE);
-	} while (atomic_cas_uint(c, o, o + 1) != o);
-	return (B_TRUE);
-}
-
 static int
 cdrmnull_ioctl_handles(struct drm_device *dev, void *data,
     struct drm_file *file)
@@ -1856,16 +1842,14 @@ cdrmnull_ioctl_handles(struct drm_device *dev, void *data,
 		if ((obj = drm_gem_object_lookup(file, a->refs_handle)) == NULL)
 			return (-ENOENT);
 		/* The handle's reference and this lookup's are counted. */
-		before = (uint32_t)obj->refcount.refcount.refs.counter;
+		before = kref_read(&obj->refcount);
 		a->refs = before - 1;
-		if (cdrmnull_kref_get_unless_zero(&obj->refcount)) {
-			uint32_t during = (uint32_t)
-			    obj->refcount.refcount.refs.counter;
+		if (kref_get_unless_zero(&obj->refcount)) {
+			uint32_t during = kref_read(&obj->refcount);
 
 			drm_gem_object_put(obj);
 			a->kref_ok = (during == before + 1 &&
-			    (uint32_t)obj->refcount.refcount.refs.counter ==
-			    before) ? 1 : 0;
+			    kref_read(&obj->refcount) == before) ? 1 : 0;
 		}
 		drm_gem_object_put(obj);
 	}

@@ -257,9 +257,14 @@ extern struct dma_fence *dma_fence_get(struct dma_fence *fence);
  * the list of an unsignalled fence run with -EDEADLK as the error (with a
  * warning, as on Linux), the core's state goes, an inline lock is
  * destroyed and ops->release is called. That happens at once in thread
- * context; from an interrupt handler, or from a thread that holds the
- * fence's lock (a callback that drops the last reference), the release
- * is queued for the core's task queue. The core cannot tell a
+ * context; from an interrupt handler, from a thread that holds the
+ * fence's lock (a callback of this fence that drops its last reference),
+ * and for a structure the core made for one of its fences whose
+ * signalling was enabled (its release waits for the core's callback on
+ * that fence, which may be queued behind the caller on the caller's own
+ * thread: a callback of another structure of the same core fence dropping
+ * this one's last reference), the release is queued for the core's task
+ * queue. The core cannot tell a
  * timeout(9F) handler, quiesce(9E) or a thread holding a spin lock from a
  * thread that may block: there, use drm_illumos_fence_put_deferred()
  * (drm_illumos.h), which always queues.

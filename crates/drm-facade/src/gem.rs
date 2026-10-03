@@ -633,42 +633,6 @@ impl GemAny {
     }
 }
 
-/// The trampoline of [`for_each_handle`].
-unsafe extern "C" fn walk_one<F: FnMut(u32, &GemAny) -> core::ops::ControlFlow<()>>(
-    handle: u32,
-    obj: *mut sys::drm_gem_object,
-    arg: *mut c_void,
-) -> c_int {
-    // SAFETY: arg is the closure for_each_handle passed, live during the
-    // walk; obj is a live object the walk holds.
-    let (f, obj) = unsafe { (&mut *(arg as *mut F), NonNull::new_unchecked(obj)) };
-    // A reference for the callback's view, dropped right after: the
-    // file's handle holds the object, so this is never the last.
-    // SAFETY: a live object.
-    unsafe { sys::drm_gem_object_get(obj.as_ptr()) };
-    let view = GemAny { p: obj };
-    match f(handle, &view) {
-        core::ops::ControlFlow::Continue(()) => 0,
-        core::ops::ControlFlow::Break(()) => 1,
-    }
-}
-
-/// Calls `f` for every handle of `file` and its object, in handle order,
-/// until it breaks (`drm_illumos_gem_for_each_handle`): no handle of the
-/// file comes or goes during the walk, so `f` must not create or close
-/// handles of `file` (it may look them up). Returns whether `f` broke the
-/// walk. Thread context, as the token proves.
-pub fn for_each_handle<F: FnMut(u32, &GemAny) -> core::ops::ControlFlow<()>>(
-    file: &File,
-    mut f: F,
-    _ctx: &ddi::Sleepable,
-) -> Result<bool, Errno> {
-    // SAFETY: a live file; the closure outlives the call.
-    let r =
-        unsafe { sys::drm_illumos_gem_for_each_handle(file.raw(), Some(walk_one::<F>), ptr::addr_of_mut!(f).cast()) };
-    if r < 0 { Err(Errno::new(-r).unwrap_or(Errno::EINVAL)) } else { Ok(r != 0) }
-}
-
 fn add_fence_raw(obj: *mut sys::drm_gem_object, fence: &Fence, usage: Usage) -> Result<(), Errno> {
     // SAFETY: a live object (the caller's reference) and its reservation.
     unsafe {

@@ -125,9 +125,13 @@ struct drm_gem_object_funcs {
  *		counts every reference, the driver's (drm_gem_object_init(),
  *		drm_gem_object_get(), drm_gem_object_lookup()) and the core's
  *		(handles, names, user mappings, dma-bufs). A driver may read
- *		it (kref_read()) and take a reference from a list that holds
- *		none with kref_get_unless_zero(), as Linux drivers do; once
- *		it is zero it stays zero and the object is being freed. Every
+ *		it (kref_read()) and take a reference with
+ *		kref_get_unless_zero() from a list of its own that holds
+ *		none, as long as that list's lock keeps the memory valid
+ *		(the driver removes the object from the list, under its
+ *		lock, in funcs->free); once the count is zero it stays zero
+ *		and the object is being freed. The core frees with no RCU
+ *		grace period, so a lockless (RCU) lookup is not safe. Every
  *		reference is dropped with drm_gem_object_put().
  *	dev, vma_node, size, import_attach (non-NULL for an object made by
  *	drm_gem_prime_import() of another device's dma-buf), resv (points

@@ -868,6 +868,12 @@ pub struct GemInner<O: GemObject> {
     obj: O,
 }
 
+impl<O: GemObject> crate::refcount::ExtCounted for GemInner<O> {
+    fn ext_count(&self) -> Option<&AtomicU32> {
+        self.obj.ext_count()
+    }
+}
+
 impl<O: GemObject> Deferrable for GemInner<O> {
     fn defer_link(&self) -> &defer::DeferLink {
         &self.common.link
@@ -962,26 +968,11 @@ impl<O: GemObject> GemRef<O> {
         }
     }
 
-    /// Drops one reference of `arc`: the core's count, or the object's own
-    /// ([`GemObject::ext_count`]), whose last reference releases the
-    /// allocation's. Returns the object when it was the last.
+    /// Drops one reference of `arc` ([`crate::refcount::release`]: the
+    /// core's count, or the object's own, whose last reference releases the
+    /// allocation's). Returns the object when it was the last.
     fn release(arc: KArc<GemInner<O>>) -> Option<KArcLast<GemInner<O>>> {
-        let Some(c) = arc.obj.ext_count() else { return KArc::release(arc) };
-        match crate::refcount::dec(c) {
-            // The allocation's own reference, the only one the core
-            // counted.
-            crate::refcount::Dec::Last => KArc::release(arc),
-            crate::refcount::Dec::Alive => {
-                core::mem::forget(arc);
-                None
-            }
-            crate::refcount::Dec::Underflow => {
-                // A reference dropped twice (a driver's extra put): leave
-                // the object alone rather than free it under its users.
-                core::mem::forget(arc);
-                None
-            }
-        }
+        crate::refcount::release(arc)
     }
 
     /// A new reference to the object at `p` unless its count is zero (it
@@ -992,13 +983,7 @@ impl<O: GemObject> GemRef<O> {
     /// (the offset table's lock, which its destructor takes first).
     unsafe fn upgrade(p: NonNull<GemInner<O>>) -> Option<GemRef<O>> {
         // SAFETY: the caller's contract.
-        let inner = unsafe { p.as_ref() };
-        match inner.obj.ext_count() {
-            // SAFETY: as above; the reference taken is the object's own.
-            Some(c) => crate::refcount::inc_not_zero(c).then(|| GemRef::from_arc(unsafe { KArc::from_raw(p) })),
-            // SAFETY: as above.
-            None => unsafe { KArc::upgrade(p) }.map(GemRef::from_arc),
-        }
+        unsafe { crate::refcount::upgrade(p) }.map(GemRef::from_arc)
     }
 
     /// Drops the reference in the context `ctx`: [`GemRef::put`] or
@@ -1085,15 +1070,7 @@ impl<O: GemObject> GemRef<O> {
 
 impl<O: GemObject> Clone for GemRef<O> {
     fn clone(&self) -> GemRef<O> {
-        match self.arc.obj.ext_count() {
-            Some(c) => {
-                crate::refcount::inc(c);
-                // SAFETY: the allocation stays while the object's count is
-                // not zero, and this reference is one of that count.
-                GemRef::from_arc(unsafe { KArc::from_raw(KArc::as_ptr(&self.arc)) })
-            }
-            None => GemRef::from_arc(KArc::clone(&self.arc)),
-        }
+        GemRef::from_arc(crate::refcount::clone_ref(&self.arc))
     }
 }
 

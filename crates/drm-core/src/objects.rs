@@ -275,9 +275,12 @@ impl<R: ObjRef, B: IdAlloc> Locked<'_, R, B> {
     /// references after releasing the guard (the core drops no reference
     /// with a lock held). `ENOMEM` if the list cannot be allocated.
     pub fn snapshot(&self, ctx: &Sleepable) -> Result<crate::kvec::KVec<(u32, R)>, Errno> {
-        let h = self.table.handles.lock();
+        // The hook lock fixes the length, so the list is allocated (which
+        // may sleep) before the handle table's lock, which lookups take.
+        let n = self.table.handles.lock().len();
         let mut out = crate::kvec::KVec::new();
-        out.reserve(h.len(), ctx)?;
+        out.reserve(n, ctx)?;
+        let h = self.table.handles.lock();
         for (n, r) in h.iter() {
             if out.try_push((n, r.clone_ref())).is_err() {
                 return Err(Errno::ENOMEM);

@@ -54,15 +54,21 @@
 //!
 //! The last [`put`] releases the structure: callbacks still on the list of
 //! an unsignalled fence run with `-EDEADLK` (Linux's rule, with a
-//! warning), the tail state goes (a relay is removed, which may wait), an
-//! inline lock is destroyed, and `ops->release` frees the driver's memory.
-//! That needs thread context and must not run under the fence's own lock.
-//! So the last reference is released at once only in thread context by a
-//! thread that does not hold the lock; in interrupt context, from a
-//! callback, and from the bridge and relay it is parked through the tail's
-//! [`RawDefer`] node on the module domain's list and released by its task
-//! queue ([`FenceDomain::defer_raw`]). This also removes R5a's last spin: a
-//! release never waits for a callback on the processor it interrupted.
+//! warning), the tail state goes (a relay is removed, which waits for a
+//! relay that runs), an inline lock is destroyed, and `ops->release` frees
+//! the driver's memory. That needs thread context and must not run under
+//! the fence's own lock, nor on a thread whose own signalling still has the
+//! relay queued. So the last reference is released at once only in thread
+//! context, by a thread that does not hold the lock, and only for a
+//! structure without an armed relay; in interrupt context, from a callback
+//! of the fence, from the bridge and the relay, and for every proxy whose
+//! relay is armed (a callback on another proxy of the same core fence may
+//! drop its last reference while this proxy's relay is queued behind it on
+//! the same thread) it is parked through the tail's [`RawDefer`] node on
+//! the module domain's list and released by its task queue
+//! ([`FenceDomain::defer_raw`]). This also removes R5a's last spin: a
+//! release never waits for a callback on the processor or thread it
+//! interrupted.
 //!
 //! The logic is tested on the host with mock ops and real threads
 //! (`tests` below); the kernel module's `dma_fence_*` functions are thin
@@ -486,12 +492,52 @@ unsafe impl Send for Relay {}
 // SAFETY: as above.
 unsafe impl Sync for Relay {}
 
+/// Test hooks of the relay: spins before and after it takes its reference
+/// (to make the races of `proxy_release_races_the_relay` happen), and
+/// counters of the paths the relay and the release took.
+#[cfg(test)]
+pub(crate) mod hooks {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    /// Spins of the relay before it takes its reference.
+    pub static SPIN_BEFORE_GET: AtomicU32 = AtomicU32::new(0);
+    /// Spins of the relay after it took its reference.
+    pub static SPIN_AFTER_GET: AtomicU32 = AtomicU32::new(0);
+    /// The relay started running.
+    pub static RELAY_ENTERED: AtomicU32 = AtomicU32::new(0);
+    /// The relay took its reference.
+    pub static RELAY_GOT: AtomicU32 = AtomicU32::new(0);
+    /// The relay found the count at zero (a release in progress).
+    pub static RELAY_SAW_ZERO: AtomicU32 = AtomicU32::new(0);
+    /// The relay's put was the structure's last reference.
+    pub static RELAY_LAST: AtomicU32 = AtomicU32::new(0);
+    /// A release removed an armed relay that had started but not finished
+    /// when it looked (it waited for it).
+    pub static RELEASE_FOUND_RUNNING: AtomicU32 = AtomicU32::new(0);
+    pub fn spin(n: &AtomicU32) {
+        for _ in 0..n.load(Ordering::Relaxed) {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 impl FenceCallback for Relay {
     fn signaled(&self, core_fence: &Fence, _ctx: Ctx<'_>) -> Option<Fence> {
         let c = self.c;
+        #[cfg(test)]
+        {
+            hooks::RELAY_ENTERED.fetch_add(1, Ordering::SeqCst);
+            hooks::spin(&hooks::SPIN_BEFORE_GET);
+        }
         // A structure being released is left alone.
         if !get_unless_zero(c) {
+            #[cfg(test)]
+            hooks::RELAY_SAW_ZERO.fetch_add(1, Ordering::SeqCst);
             return None;
+        }
+        #[cfg(test)]
+        {
+            hooks::RELAY_GOT.fetch_add(1, Ordering::SeqCst);
+            hooks::spin(&hooks::SPIN_AFTER_GET);
         }
         if flags(c).load(Ordering::Acquire) & SIGNALED == 0 {
             let ts = core_fence.timestamp().unwrap_or_else(ksync::now);
@@ -507,6 +553,10 @@ impl FenceCallback for Relay {
             }
         }
         // Never released here: the release waits for this run to end.
+        #[cfg(test)]
+        if refs(c).load(Ordering::Acquire) == 1 {
+            hooks::RELAY_LAST.fetch_add(1, Ordering::SeqCst);
+        }
         // SAFETY: the reference taken above.
         unsafe { put_deferred(c, None) };
         None
@@ -613,12 +663,24 @@ pub unsafe fn put(fence: *mut f::dma_fence, ctx: Ctx<'_>, domain: &FenceDomain) 
     if fence.is_null() || !drop_ref(fence) {
         return;
     }
+    // SAFETY: the last reference; the lock is initialised.
+    let inline = matches!(ctx, Ctx::Sleep(_)) && !unsafe { lk::owned(lock_of(fence)) } && !relay_armed(fence);
     match ctx {
-        // SAFETY: the last reference; the lock is initialised.
-        Ctx::Sleep(s) if !unsafe { lk::owned(lock_of(fence)) } => unsafe { release(fence, s) },
+        // SAFETY: the last reference.
+        Ctx::Sleep(s) if inline => unsafe { release(fence, s) },
         // SAFETY: the last reference.
         _ => unsafe { defer(fence, domain) },
     }
+}
+
+/// Whether `fence` is a proxy whose relay is armed. Its release must wait
+/// for a relay that runs, which may be queued behind the caller on the
+/// caller's own thread (a callback on another structure of the same core
+/// fence dropping this one's last reference), so such a release always
+/// goes to the task queue.
+fn relay_armed(fence: *mut f::dma_fence) -> bool {
+    // SAFETY: the caller owns the structure (its count is zero).
+    unsafe { core_of(fence) }.is_some_and(|c| c.relayed.load(Ordering::Acquire))
 }
 
 /// Drops a reference and parks the release if it was the last; any
@@ -691,9 +753,17 @@ pub unsafe fn release(fence: *mut f::dma_fence, ctx: &Sleepable) {
             if let (Some(r), Some(cf)) = (&core.relay, core.fence())
                 && core.relayed.load(Ordering::Acquire)
             {
-                // Waits for a relay that runs now on another thread (never
-                // this one: the relay does not release).
-                cf.remove_callback(r, ctx);
+                // Waits for a relay that runs now on another thread: the
+                // release of a proxy with an armed relay runs only on the
+                // task queue (see put), and the relay never releases.
+                #[cfg(test)]
+                let before = r.has_run();
+                let removed = cf.remove_callback(r, ctx);
+                #[cfg(test)]
+                if !removed && !before {
+                    hooks::RELEASE_FOUND_RUNNING.fetch_add(1, Ordering::SeqCst);
+                }
+                let _ = removed;
             }
             if let Some(f) = (*core.fence.get()).take() {
                 f.put(Ctx::Sleep(ctx));

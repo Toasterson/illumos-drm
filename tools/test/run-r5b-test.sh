@@ -56,6 +56,8 @@ step uname -a
 if [ "${SKIP_R5A:-0}" != 1 ]; then
 	echo
 	echo "=== A: run-r5a-test.sh"
+	good0=$(grep -c 'cdrmnull[0-9]*: drmm: released 2,4,3,1 (reverse order)' /var/adm/messages)
+	wrong0=$(grep -c 'cdrmnull[0-9]*: drmm: .*WRONG ORDER' /var/adm/messages)
 	step sh ./run-r5a-test.sh > run-r5a-test.out 2>&1
 	grep -E '^FAIL|^checks passed|run-r5a-test:' run-r5a-test.out
 	if grep -q 'run-r5a-test: PASS' run-r5a-test.out; then
@@ -65,8 +67,8 @@ if [ "${SKIP_R5A:-0}" != 1 ]; then
 	fi
 	# Every detach of cdrmnull in that run released its managed
 	# resources in reverse order.
-	good=$(grep -c 'cdrmnull[0-9]*: drmm: released 2,4,3,1 (reverse order)' /var/adm/messages)
-	wrong=$(grep -c 'cdrmnull[0-9]*: drmm: .*WRONG ORDER' /var/adm/messages)
+	good=$(( $(grep -c 'cdrmnull[0-9]*: drmm: released 2,4,3,1 (reverse order)' /var/adm/messages) - good0 ))
+	wrong=$(( $(grep -c 'cdrmnull[0-9]*: drmm: .*WRONG ORDER' /var/adm/messages) - wrong0 ))
 	if [ "$good" -gt 0 ] && [ "$wrong" -eq 0 ]; then
 		pass "managed resources released in reverse order at $good detaches of cdrmnull"
 	else
