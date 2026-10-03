@@ -254,6 +254,7 @@ struct cdrmnull {
 	boolean_t softint_added;
 	uint_t softint_pri;
 	uint64_t tl_context;
+	uint64_t tl_context2;	/* CDRMNULL_FENCE_CONTEXT2's */
 	uint64_t tl_seqno;
 	/* Fences waiting for their time; at the soft interrupt's priority. */
 	kmutex_t tl_lock;
@@ -493,7 +494,7 @@ static const struct dma_fence_ops cdrmnull_fence_ops = {
  * on with cdrmnull_tl_arm()). NULL if the core had no memory for it.
  */
 static struct cdrmnull_tlf *
-cdrmnull_tl_new(struct cdrmnull *cn, uint64_t *seqnop)
+cdrmnull_tl_new_ctx(struct cdrmnull *cn, uint64_t *seqnop, boolean_t second)
 {
 	struct cdrmnull_tlf *f;
 	uint64_t seqno;
@@ -504,7 +505,7 @@ cdrmnull_tl_new(struct cdrmnull *cn, uint64_t *seqnop)
 	mutex_exit(&cn->lock);
 	atomic_inc_64(&cdrmnull_tl_live);
 	dma_fence_init(&f->base, &cdrmnull_fence_ops, &cn->tl_fence_lock,
-	    cn->tl_context, seqno);
+	    second ? cn->tl_context2 : cn->tl_context, seqno);
 	if (dma_fence_is_signaled(&f->base)) {
 		/*
 		 * The core had no memory for the fence and handed it back
@@ -517,6 +518,12 @@ cdrmnull_tl_new(struct cdrmnull *cn, uint64_t *seqnop)
 	if (seqnop != NULL)
 		*seqnop = seqno;
 	return (f);
+}
+
+static struct cdrmnull_tlf *
+cdrmnull_tl_new(struct cdrmnull *cn, uint64_t *seqnop)
+{
+	return (cdrmnull_tl_new_ctx(cn, seqnop, B_FALSE));
 }
 
 /*
@@ -981,7 +988,8 @@ cdrmnull_ioctl_fence(struct drm_device *dev, void *data, struct drm_file *file)
 		}
 	}
 
-	if ((f = cdrmnull_tl_new(cn, &seqno)) == NULL) {
+	if ((f = cdrmnull_tl_new_ctx(cn, &seqno,
+	    (a->flags & CDRMNULL_FENCE_CONTEXT2) != 0)) == NULL) {
 		if (bo != NULL)
 			drm_gem_object_put(bo);
 		if (chain != NULL)
@@ -2250,7 +2258,8 @@ cdrmnull_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	list_create(&cn->tl_due, sizeof (struct cdrmnull_tlf),
 	    offsetof(struct cdrmnull_tlf, link));
 	cn->tl_ready = B_TRUE;
-	cn->tl_context = dma_fence_context_alloc(1);
+	cn->tl_context = dma_fence_context_alloc(2);
+	cn->tl_context2 = cn->tl_context + 1;
 
 	/* The core's locks that a signal from the soft interrupt takes. */
 	if ((r = drm_dev_illumos_set_fence_priority(&cn->drm,

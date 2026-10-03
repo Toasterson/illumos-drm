@@ -124,9 +124,15 @@ struct cdrmnull_fence {
 #define	CDRMNULL_FENCE_BO_WRITE		(1u << 1)
 #define	CDRMNULL_FENCE_BO_READ		(1u << 2)
 #define	CDRMNULL_FENCE_SYNC_FILE	(1u << 3)
+/*
+ * cdrmnull only (R5b): the fence's context is the timeline's second one,
+ * so that two fences can make an array when merged (fences of one context
+ * merge into the later one).
+ */
+#define	CDRMNULL_FENCE_CONTEXT2		(1u << 4)
 #define	CDRMNULL_FENCE_FLAGS		(CDRMNULL_FENCE_SYNCOBJ | \
 	CDRMNULL_FENCE_BO_WRITE | CDRMNULL_FENCE_BO_READ | \
-	CDRMNULL_FENCE_SYNC_FILE)
+	CDRMNULL_FENCE_SYNC_FILE | CDRMNULL_FENCE_CONTEXT2)
 
 /*
  * BO_WAIT: waits for the reservation of the buffer handle: with

@@ -249,11 +249,15 @@ test_core_structures(int fd)
 	    "interrupt signals the driver's fence");
 	(void) printf("    waited %" PRId64 " ms\n", dt);
 
-	/* An array: two fences as sync files, merged. */
+	/*
+	 * An array: two fences of the timeline's two contexts as sync files,
+	 * merged (fences of one context would merge into the later one).
+	 */
 	t0 = now_ms();
 	check(fence(fd, 40, CDRMNULL_FENCE_SYNC_FILE, 0, 0, 0, &a) == 0 &&
-	    fence(fd, 90, CDRMNULL_FENCE_SYNC_FILE, 0, 0, 0, &b) == 0,
-	    "two timeline fences (40, 90 ms) as sync files");
+	    fence(fd, 90, CDRMNULL_FENCE_SYNC_FILE | CDRMNULL_FENCE_CONTEXT2, 0,
+	    0, 0, &b) == 0,
+	    "two timeline fences (40, 90 ms; two contexts) as sync files");
 	(void) memset(&m, 0, sizeof (m));
 	(void) strlcpy(m.name, "r5b-merge", sizeof (m.name));
 	m.fd2 = b;
@@ -272,10 +276,13 @@ test_core_structures(int fd)
 	(void) memset(fi, 0, sizeof (fi));
 	info.num_fences = 2;
 	info.sync_fence_info = (uint64_t)(uintptr_t)fi;
-	check(xioctl(m.fence, SYNC_IOC_FILE_INFO, &info) == 0 &&
-	    info.num_fences == 2 && info.status == 1 && fi[0].status == 1 &&
-	    fi[1].status == 1, "FILE_INFO of the array: two members, "
-	    "signalled");
+	r = xioctl(m.fence, SYNC_IOC_FILE_INFO, &info);
+	(void) printf("    FILE_INFO: %d, %u fences, status %d (%d, %d), "
+	    "drivers \"%s\" \"%s\"\n", r, info.num_fences, info.status,
+	    fi[0].status, fi[1].status, fi[0].driver_name, fi[1].driver_name);
+	check(r == 0 && info.num_fences == 2 && info.status == 1 &&
+	    fi[0].status == 1 && fi[1].status == 1, "FILE_INFO of the array: "
+	    "two members, signalled");
 	(void) close(m.fence);
 	(void) close(a);
 	(void) close(b);
