@@ -64,6 +64,27 @@ that both guards counted a core left in memory by a failed dependency
 `_init` (fixed in both, illumos-ddi `g7-module-busy`), that `update_drv -d`
 with a list of aliases removes nothing, and that `r` is a ksh93 alias.
 
+G10 (device node permissions): the packaged drivers' nodes were
+`0600 root root` after a boot because console-login's ttymon applies the
+`/etc/logindevperm` rule `/dev/dri/*` and devfs keeps the result (see
+*Packaging*). On 3 October 2026, on three fresh guests of
+`golden-20260930` with the G7 packages, an anonymous DTrace of the first
+boot after the installation showed ttymon as the only process that
+changed the nodes; the new `run-g10-test.sh coldboot` failed 19 checks on
+those packages. With the fix (`drmadm perms` and the service
+`svc:/system/graphics/drm-perms`) every phase passed on the last guest
+(`logs/hephaistos/illumos-drm/20261003-g10-run3-*`): a boot with the
+packaged rule traced by anonymous DTrace (drm-perms replaced the file
+1.3 s before ttymon read it; ttymon changed no DRM node; 29 checks), the
+boots after `drmadm select new` (25) and `select legacy` (8), `noload`,
+`minorperm`, `rewrite` (20 concurrent runs), `driver-filter`, `repair`
+(the fault reproduced and repaired, 17) and `upgrade` (15); G7's
+`select-new`, `after-new`, `select-legacy`, `after-legacy`, `i915n`,
+`select-root` and `rollback` phases; and `run-r5a-test.sh` with the
+packaged drivers removed (75 checks, `nobody` opening the card nodes
+included). The second guest's `select-new` phase had found that the first
+`drmadm status` attached the drivers by following the `/dev/dri` links.
+
 R5a (`misc/drm_core` and the C facade): since 1 October 2026 the core is one
 kernel module, `misc/drm_core`, that exports a C interface (the headers in
 `include/drm`), and every driver is linked against it with
