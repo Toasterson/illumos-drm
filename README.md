@@ -1566,7 +1566,12 @@ right after the package is installed or updated (`restart_fmri` of
    old one in place, a later `*` the earlier one), and `dev_minorperm()`
    takes the first matching pattern, else `*`; of two different matching
    patterns the later one wins. The nodes of a new-stack driver that an
-   `/etc/logindevperm` rule names are left alone.
+   `/etc/logindevperm` rule names are left alone, and so are the nodes of
+   drivers that are not loaded: drmadm finds a link's driver in
+   `/etc/path_to_inst` and follows the link only if the driver is loaded,
+   because a lookup in `/devices` attaches the driver (and a loaded DRM
+   module makes `drmadm select` refuse; the first version did this from
+   `drmadm status`, which G7's `select-new` phase caught).
 
 The alternatives were weaker. Per-minor `perms` or `clone_perms` in the
 driver actions change nothing: `minor_perm` was right. A service that runs
@@ -1610,7 +1615,9 @@ replaced it, that every new-stack node is `0666 root sys` and opens for
 checks the rewrite on scratch roots (split rules, left rules, owner and
 mode, idempotence, 20 concurrent runs, the line-length refusal);
 `minorperm` checks drmadm's choice of `minor_perm` entry against the
-kernel's; `upgrade` checks that installing the package repairs nodes left
+kernel's; `noload` that `drmadm status` and `drmadm perms` load no DRM
+module; `repair` reproduces the fault (packaged rule, console-login
+restart) and checks that drm-perms repairs it; `upgrade` checks that installing the package repairs nodes left
 at `0600 root root` without a reboot.
 
 ## Building

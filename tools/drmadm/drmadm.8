@@ -230,7 +230,12 @@ driver that match the minor name the later in the file, else the
 entry.
 The nodes of a driver that a rule of
 .Pa /etc/logindevperm
-names are left alone.
+names are left alone, and so are those of drivers that are not loaded:
+.Nm
+finds a node's driver in
+.Pa /etc/path_to_inst
+and does not look the node up otherwise, since a lookup would load the
+driver.
 .El
 .Pp
 The service
@@ -283,7 +288,7 @@ rules for
 .Pa /dev/dri
 and, on the running system, the mode, owner and group of each
 .Pa /dev/dri
-node with its
+node of a loaded driver with its
 .Pa /etc/minor_perm
 entry where they differ, and every
 .Sy exclude

@@ -505,23 +505,37 @@ ldp_report() {
 }
 
 # dri_nodes: one line "LINK DRIVER MINOR MODE OWNER GROUP WANT" for every
-# /dev/dri link of the running system whose node exists: the node's
-# driver (by its major number), minor name, mode (octal), owner and group,
-# and in WANT "MODE OWNER GROUP" of the /etc/minor_perm entry the kernel
-# applies, or "-" if there is none. The kernel's list of a driver's
-# entries (add_minorperm()) is built in file order: a "*" entry replaces
-# the earlier one, an entry whose pattern is already listed replaces it in
+# /dev/dri link of the running system whose driver is loaded: the node's
+# driver, minor name, mode (octal), owner and group, and in WANT
+# "MODE OWNER GROUP" of the /etc/minor_perm entry the kernel applies, or
+# "-" if there is none. The driver comes from /etc/path_to_inst by the
+# link's device path, and a link is followed (stat) only if its driver is
+# loaded: a lookup in /devices attaches a driver that is not, and loading
+# a DRM driver would make drmadm select refuse, or load a core beside the
+# other one's stack. The kernel's list of a driver's entries
+# (add_minorperm()) is built in file order: a "*" entry replaces the
+# earlier one, an entry whose pattern is already listed replaces it in
 # place, any other is inserted at the head; dev_minorperm() takes the
 # first entry of the list whose pattern matches, else the "*" entry. So of
 # two different matching patterns the later wins.
 dri_nodes() {
+	loaded=" $(modinfo | awk 'NR > 1 { print $6 }' | tr '\n' ' ') "
 	for l in /dev/dri/*; do
 		[ -h "$l" ] || continue
 		# shellcheck disable=SC2012 # the target of the link, as ls prints it
 		node=$(ls -l "$l" 2>/dev/null | sed -n 's/^.* -> //p')
+		# ../../devices/pci@0,0/pci1af4,1100@10:card0 -> /pci@0,0/pci1af4,1100@10
+		path=$(echo "$node" | sed -n 's|^.*/devices\(/[^:]*\):.*$|\1|p')
+		[ -n "$path" ] || continue
+		d=$(awk -v p="\"$path\"" '$1 == p { gsub(/"/, "", $3); print $3; exit }' /etc/path_to_inst)
+		[ -n "$d" ] || continue
+		case $loaded in
+		*" $d "*) ;;
+		*) continue ;;
+		esac
 		info=$(ls -lL "$l" 2>/dev/null) || continue
-		echo "$l ${node##*:} $info"
-	done | awk -v n2m=/etc/name_to_major -v mperm=/etc/minor_perm '
+		echo "$l $d ${node##*:} $info"
+	done | awk -v mperm=/etc/minor_perm '
 	    function glob(p) {
 		gsub(/[.+(){}^$|\\]/, "\\\\&", p)
 		gsub(/\*/, ".*", p)
@@ -541,10 +555,6 @@ dri_nodes() {
 		return sprintf("%04o", v)
 	    }
 	    BEGIN {
-		while ((getline line < n2m) > 0) {
-			split(line, a, /[ \t]+/)
-			drv[a[2]] = a[1]
-		}
 		while ((getline line < mperm) > 0) {
 			if (line ~ /^[ \t]*(#|$)/)
 				continue
@@ -576,20 +586,17 @@ dri_nodes() {
 		}
 	    }
 	    {
-		# LINK MINOR MODE NLINK OWNER GROUP MAJOR,[ ]MINOR ...
-		split($7, mm, ",")
-		d = drv[mm[1]]
-		if (d == "")
-			d = "?"
+		# LINK DRIVER MINOR MODE NLINK OWNER GROUP MAJOR,[ ]MINOR ...
+		d = $2
 		want = "-"
 		for (i = 1; i <= np[d]; i++)
-			if ($2 ~ pat[d, i]) {
+			if ($3 ~ pat[d, i]) {
 				want = val[d, i]
 				break
 			}
 		if (want == "-" && (d in wild))
 			want = wild[d]
-		print $1, d, $2, bits($3), $5, $6, want
+		print $1, d, $3, bits($4), $6, $7, want
 	    }'
 }
 
@@ -755,6 +762,8 @@ do_status() {
 		done
 	fi
 	if live; then
+		echo "  (the nodes of loaded drivers; drmadm does not look up the others,"
+		echo "  which would load them)"
 		dri_nodes | while read -r l d minor mode owner group wmode wowner wgroup; do
 			w=""
 			if [ "$wmode" = "-" ]; then

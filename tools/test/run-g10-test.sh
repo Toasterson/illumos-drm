@@ -48,6 +48,8 @@
 #              console-login restart reproduce the fault (ttymon sets the
 #              nodes to 0600 root root); a restart of drm-perms then
 #              restricts the rule and resets the nodes to 0666 root sys.
+#   noload     with every DRM module unloaded, drmadm status and drmadm
+#              perms load none (looking a /dev/dri node up would).
 #   driver-filter
 #              a temporary /etc/logindevperm rule restricted to cdrmnull
 #              (FILTER) sets cdrmnull's nodes to 0600 root root at a
@@ -428,9 +430,13 @@ phase_coldboot() {
 		grep -q "^  $l .* 0666 root sys\$" drmadm-status.out && listed=$((listed + 1)) ||
 		    bad "drmadm status does not list $l as 0666 root sys without a /etc/minor_perm difference"
 	done
-	[ $want -gt 0 ] && [ $listed -eq $want ] &&
-	    pass "drmadm status lists all $listed new-stack nodes at their /etc/minor_perm values" ||
-	    bad "drmadm status lists $listed of $want new-stack nodes at their /etc/minor_perm values"
+	if [ $want -eq 0 ]; then
+		info "no new-stack node to list in drmadm status"
+	elif [ $listed -eq $want ]; then
+		pass "drmadm status lists all $listed new-stack nodes at their /etc/minor_perm values"
+	else
+		bad "drmadm status lists $listed of $want new-stack nodes at their /etc/minor_perm values"
+	fi
 }
 
 phase_driver_filter() {
@@ -639,6 +645,31 @@ phase_repair() {
 	check_opens
 }
 
+phase_noload() {
+	echo "=== noload: drmadm status and perms load no DRM module"
+	# Following a /dev/dri link into /devices attaches its driver; drmadm
+	# must not, or drmadm select would refuse after drmadm status.
+	for m in cdrmnull rdrmnull virtio_gpu i915n drm_core; do
+		id=$(modinfo | awk -v m="$m" '$6 == m { print $1 }')
+		[ -n "$id" ] && step modunload -i "$id"
+	done
+	step ls -l /dev/dri
+	loaded_drm() {
+		modinfo | awk '$6 ~ /^(drm|drm_core|i915|i915n|radeon|virtio_gpu|cdrmnull|rdrmnull)$/ { print $6 }' |
+		    tr '\n' ' '
+	}
+	[ -z "$(loaded_drm)" ] || { bad "DRM modules stay loaded: $(loaded_drm)"; return 1; }
+	[ -n "$(ls /dev/dri 2>/dev/null)" ] || info "/dev/dri is empty: the check is weak"
+	step "$DRMADM" status
+	m=$(loaded_drm)
+	[ -z "$m" ] && pass "drmadm status loaded no DRM module" || bad "drmadm status loaded $m"
+	step "$DRMADM" perms
+	m=$(loaded_drm)
+	[ -z "$m" ] && pass "drmadm perms loaded no DRM module" || bad "drmadm perms loaded $m"
+	step devfsadm -i virtio_gpu
+	step devfsadm -i cdrmnull
+}
+
 phase_upgrade() {
 	echo "=== upgrade: the fixed drmadm package on a system with clobbered nodes"
 	: "${REPO:?set REPO to the file repository of the illumos-drm publisher}"
@@ -680,9 +711,10 @@ coldboot) phase_coldboot ;;
 rewrite) phase_rewrite ;;
 minorperm) phase_minorperm ;;
 repair) phase_repair ;;
+noload) phase_noload ;;
 driver-filter) phase_driver_filter ;;
 upgrade) phase_upgrade ;;
-*) echo "usage: run-g10-test.sh arm|coldboot|rewrite|minorperm|repair|driver-filter|upgrade" >&2
+*) echo "usage: run-g10-test.sh arm|coldboot|rewrite|minorperm|repair|noload|driver-filter|upgrade" >&2
    exit 2 ;;
 esac
 echo
