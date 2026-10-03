@@ -53,23 +53,29 @@ and the run after it passed (76 checks). Logs:
 `logs/hephaistos/illumos-drm/20261003-r5b-*` in the workspace.
 
 R5e (the Linux DRM helpers C drivers need; see *R5e* under *Decisions*):
-`misc/drm_helpers` carries Linux v7.2's `drm_mm` unmodified, on MIT
-reimplementations of the Linux interfaces it needs (`linuxkpi/`), and
-exports exactly the ten `drm_mm` functions i915's headless build imports.
-On 4 October 2026 it was built on illumos (gcc 14.3, the gate's kernel
-flags, `-z defs`) and tested on a fresh guest of `golden-20260930`
-(illumos `7e802e88a3`) with `tools/test/run-r5e-test.sh`: the module
-loaded and unloaded alone; the test driver `drm_helpers_test`, linked with
-`-N misc/drm_helpers` against the exported functions only, ran the 14
-`drm_mm` self-tests at attach for five seeds up to scale 50 (6,421,733
-checks in the largest run, none failed), `misc/drm_helpers` refused to
-unload under it and unloaded after `rem_drv`; an injected failing check was
-counted and logged with the attach still succeeding; `/etc` and
-`/devices/pseudo` were as before. `carried/host-test.sh` runs the same
-tests plus the host-only ones and the red-black and interval tree tests
-(24 tests, 839,569 checks) with clang under AddressSanitizer and
-UndefinedBehaviorSanitizer and with gcc on illumos; a seed gives the same
-counts on every compiler and in the kernel.
+`misc/drm_helpers` carries Linux v7.2's `drm_mm` unmodified and
+`drm_cache`'s `drm_clflush_virt_range` (one patch of conditionals), on MIT
+reimplementations of the Linux interfaces they need (`linuxkpi/`), and
+exports exactly the eleven functions of them i915's headless build imports.
+On 4 October 2026, at `b5670f9`, it was built on illumos (gcc 14.3, the
+gate's kernel flags, `-z defs`; 14 global symbols, as its scope mapfile)
+and tested on a fresh guest of `golden-20260930` (illumos `7e802e88a3`)
+with `tools/test/run-r5e-test.sh` (of `46366a7`, which changed only that
+script): 27 checks passed, none failed. The module loaded and unloaded
+alone; the test driver `drm_helpers_test`, linked with
+`-N misc/drm_helpers` against the exported functions only, ran the 16
+self-tests (14 `drm_mm`, 2 `drm_cache`) at attach for five seeds up to
+scale 50 (130,876 checks at scale 1, 6,464,544 at scale 50, none failed,
+8.7 s); `misc/drm_helpers` refused to unload under it and unloaded after
+`rem_drv`; an injected failing check was counted and logged with the attach
+still succeeding; `/etc` and `/devices/pseudo` were as before; and the
+package (`packaging/drm-helpers.p5m`, published, pkglint-clean, as a p5p)
+installed the tested module into a scratch boot environment, verified and
+uninstalled. `carried/host-test.sh` runs the same tests plus host-only and
+red-black/interval tree tests: 26 tests and 840,436 checks with gcc on
+illumos, 24 tests and 839,569 checks with clang under AddressSanitizer and
+UndefinedBehaviorSanitizer on arm64 (no `drm_cache` there); a seed gives
+the same `drm_mm` counts on every compiler and in the kernel.
 
 G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
 of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
