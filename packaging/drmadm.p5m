@@ -26,7 +26,7 @@
 set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drmadm@0.0.1,5.11-2026.0.0.0
 set name=pkg.summary value="Select the DRM driver stack (drmadm)"
 set name=pkg.description value="drmadm(8) shows which DRM driver stack is installed, loaded and selected, and selects the legacy stack (misc/drm, i915) or the illumos-drm stack (misc/drm_core and its drivers) for the next boot: it moves the Intel GPU aliases between the two Intel drivers and excludes the other stack's kernel modules."
-set name=info.classification value=org.opensolaris.category.2008:System/Administration and Configuration
+set name=info.classification value="org.opensolaris.category.2008:System/Administration and Configuration"
 set name=info.source-url value=https://code.aopc.cloud/illumos/illumos-drm
 set name=variant.arch value=i386
 set name=org.opensolaris.consolidation value=userland
