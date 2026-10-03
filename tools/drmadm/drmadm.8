@@ -190,17 +190,32 @@ undoes this for the new stack:
 .It
 It restricts each rule of
 .Pa /etc/logindevperm
-for
+with a device under
 .Pa /dev/dri
-that names no driver to the drivers of the legacy stack, by adding
-.Sy driver=i915,radeon
-and a comment; a rule that also lists other devices is split in two, and
-rules with a driver list are left as they are and reported if they name a
-driver of the new stack.
+and no driver list to the drivers of the legacy stack: the
+.Pa /dev/dri
+devices move to a rule of their own with
+.Sy driver=i915,radeon ,
+after a comment line that says so, and the other devices of the rule stay
+where they were.
 For the legacy drivers nothing changes; the nodes of the new stack's
 drivers are no longer given to the console user.
+Rules with a driver list are left as they are, and reported if they name
+a driver of the new stack; so are rules that reach
+.Pa /dev/dri
+only through a pattern, such as
+.Pa /dev/*/* ,
+which are reported as applying to every driver.
+If a rewritten rule would be longer than the 254 bytes per line that
+.Xr logindevperm 5
+is read with,
+.Nm
+changes nothing and fails.
 The file is replaced with
-.Xr rename 2 .
+.Xr rename 2 ;
+running
+.Nm Cm perms
+again changes nothing.
 .It
 On the running system, it resets every
 .Pa /dev/dri
@@ -209,6 +224,13 @@ node of a driver of the new stack
 whose owner, group or mode differs from its
 .Pa /etc/minor_perm
 entry to that entry, and reports each node it resets.
+The entry is the one the kernel applies: of two different patterns of the
+driver that match the minor name the later in the file, else the
+.Sy *
+entry.
+The nodes of a driver that a rule of
+.Pa /etc/logindevperm
+names are left alone.
 .El
 .Pp
 The service
@@ -235,6 +257,16 @@ or
 at the next boot.
 To keep the console-user assignment for these nodes, disable the service
 and remove the driver list from the rule.
+.Pp
+.Pa /etc/logindevperm
+is an editable file of the package
+.Sy SUNWcs :
+while it is edited, an update of that package does not replace it.
+To take the packaged version, run
+.Nm pkg Cm revert Pa /etc/logindevperm ;
+the next boot, or
+.Nm Cm perms ,
+restricts its rule again.
 .Ss Status
 .Nm Cm status
 prints the selected stack and whether it is in effect since the last boot

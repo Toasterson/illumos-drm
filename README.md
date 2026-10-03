@@ -1538,18 +1538,35 @@ failure of the service does not keep the console from starting), and
 right after the package is installed or updated (`restart_fmri` of
 `manifest-import`):
 
-1. It restricts each `/etc/logindevperm` rule for `/dev/dri` that names no
-   driver to the legacy drivers with the rule's documented driver list
-   (`logindevperm(5)`: "Drivers can also be specified to limit the
-   permission changes to minor nodes owned by the specified drivers"),
-   adding `driver=i915,radeon` and a comment; a rule that also lists other
-   devices is split. The console user keeps the legacy stack's nodes as
-   before; the new stack's nodes keep their `minor_perm` permissions.
-   The file is replaced by `rename(2)`, and a second run changes nothing.
+1. It restricts each `/etc/logindevperm` rule with a device under
+   `/dev/dri` and no driver list to the legacy drivers with the rule's
+   documented driver list (`logindevperm(5)`: "Drivers can also be
+   specified to limit the permission changes to minor nodes owned by the
+   specified drivers"): the `/dev/dri` devices move to a rule of their own
+   with `driver=i915,radeon`, after a comment line that says so; the other
+   devices of the rule stay where they were. The console user keeps the
+   legacy stack's nodes as before; the new stack's nodes keep their
+   `minor_perm` permissions. It reads the file as libdevinfo does (comment
+   from the first `#`, "driver" anywhere before it makes a driver list)
+   and refuses, leaving the file alone, if a rewritten rule would exceed
+   the 254 bytes libdevinfo reads per line (`fgets` into 256 bytes; the
+   rest of a longer line would be read as another rule). Rules with a
+   driver list are left as written (one that names a new-stack driver is
+   reported), and so are rules that reach `/dev/dri` only through a
+   pattern such as `/dev/*/*`, which it reports as applying to every
+   driver. The file is replaced by `rename(2)`, so ttymon and `login(1)`
+   read the old or the new file; concurrent runs write their own
+   temporary files from the same input and give the same result, and a
+   second run changes nothing.
 2. It resets every `/dev/dri` node of a new-stack driver whose owner, group
-   or mode differs from its `minor_perm` entry (the first entry whose minor
-   pattern matches, else the `*` entry, as `dev_minorperm()` chooses) to
-   that entry, which repairs nodes an earlier boot left at `0600 root root`.
+   or mode differs from its `minor_perm` entry to that entry, which repairs
+   nodes an earlier boot left at `0600 root root`. The entry is the one the
+   kernel applies: `add_minorperm()` builds a driver's list in file order,
+   inserting each new pattern at the head (a repeated pattern replaces the
+   old one in place, a later `*` the earlier one), and `dev_minorperm()`
+   takes the first matching pattern, else `*`; of two different matching
+   patterns the later one wins. The nodes of a new-stack driver that an
+   `/etc/logindevperm` rule names are left alone.
 
 The alternatives were weaker. Per-minor `perms` or `clone_perms` in the
 driver actions change nothing: `minor_perm` was right. A service that runs
@@ -1565,7 +1582,11 @@ or to the card nodes) would make the edit unnecessary.
 
 Consequences. `/etc/logindevperm` is an editable file of `SUNWcs`
 (`preserve=true`): IPS keeps the edit across updates, and `pkg verify`
-reports it only with `-v` ("editable file has been changed"). The
+reports it only with `-v` ("editable file has been changed"); the other
+side is that a later `SUNWcs` with a changed `/etc/logindevperm` does not
+install its version over the edited file. To take it, run
+`pkg revert /etc/logindevperm`; the next boot (or `drmadm perms`)
+restricts the new file's rule again. The
 restriction stays when `driver/graphics/drmadm` is removed, which is
 right for the legacy drivers; a DRM driver other than `i915` and `radeon`
 from elsewhere would no longer be given to the console user. The service
@@ -1573,7 +1594,24 @@ resets a new-stack node changed with `chmod` at the next boot: change the
 permissions with `update_drv -m` and `drmadm perms`. `drmadm status`
 shows the rules and every node with its `minor_perm` entry where they
 differ. `run-g10-test.sh driver-filter` checks that a driver list still
-reaches the nodes of the drivers it names.
+reaches the nodes of the drivers it names. (libdevinfo's
+`check_driver_match()` compares the driver list with a driver name it
+reads after `di_fini()` has freed the snapshot that holds it; it works,
+as the test shows, but it is a use after free in illumos-gate that this
+fix now depends on for the legacy drivers' rule.)
+
+The tests: `run-g10-test.sh arm` (optionally with `REVERT=1`, which
+restores the packaged `/etc/logindevperm` with `pkg revert` as on the
+first boot after an installation) arms anonymous DTrace for the next
+boot; `coldboot` then checks from the trace that console-login's ttymon
+changed no DRM node and read `/etc/logindevperm` only after drm-perms had
+replaced it, that every new-stack node is `0666 root sys` and opens for
+`nobody`, and that a console-login restart changes nothing; `rewrite`
+checks the rewrite on scratch roots (split rules, left rules, owner and
+mode, idempotence, 20 concurrent runs, the line-length refusal);
+`minorperm` checks drmadm's choice of `minor_perm` entry against the
+kernel's; `upgrade` checks that installing the package repairs nodes left
+at `0600 root root` without a reboot.
 
 ## Building
 
