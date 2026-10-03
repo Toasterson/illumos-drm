@@ -42,7 +42,7 @@ struct drm_file {
 	uint64_t client_id;
 	struct list_head lhead;
 	struct drm_minor *minor;
-	void *filp;
+	DRM_FACADE_FILE_T *filp;
 	void *driver_priv;
 	/* private: the core's state */
 	uint64_t __core[4];

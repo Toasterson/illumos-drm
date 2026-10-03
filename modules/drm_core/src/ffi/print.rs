@@ -84,11 +84,15 @@ pub unsafe extern "C" fn drm_illumos_vprintk(
 ///
 /// # Safety
 /// `p` is a live printer whose `arg` is NULL or a live device.
+///
+/// The node comes from the core's state, not from `drm_device.dev`: since
+/// facade 1.1 a compatibility layer may keep its own device there
+/// (`DRM_FACADE_DEVICE_T`).
 unsafe fn printer_dev(p: *mut f::drm_printer) -> *mut f::dev_info_t {
-    // SAFETY: the caller's contract.
+    // SAFETY: the caller's contract: arg is NULL or a live device.
     unsafe {
-        let d = (*p).arg as *mut f::drm_device;
-        if d.is_null() { ptr::null_mut() } else { (*d).dev }
+        let d = (*p).arg as *const f::drm_device;
+        crate::devcore::DevCore::of(d).map_or(ptr::null_mut(), |c| c.dip.as_raw() as *mut f::dev_info_t)
     }
 }
 

@@ -32,7 +32,7 @@ extern "C" {
  */
 struct dma_buf {
 	size_t size;
-	void *file;
+	DRM_FACADE_FILE_T *file;
 	struct list_head attachments;
 	const void *ops;
 	const char *exp_name;

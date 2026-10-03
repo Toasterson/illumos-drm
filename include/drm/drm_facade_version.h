@@ -21,8 +21,12 @@
  * public-layout base objects: Linux v7.2's fence flag numbering (the
  * signalled bit moved from 2 to 3), drm_device.managed and open_count,
  * fences and GEM reference counts that are the objects' state,
- * drm_printer, and the tails in the handshake. Expect a new major version
- * with the compatibility layer (R5c) and mode setting (R5i).
+ * drm_printer, and the tails in the handshake; 1.1 (R5c) the
+ * DRM_FACADE_DEVICE_T/DRM_FACADE_FILE_T hooks for the LinuxKPI layer (the
+ * core no longer reads drm_device.dev after drm_dev_alloc(); layouts
+ * unchanged) and the reservation functions the layer builds on
+ * (dma_resv_init/fini, dma_resv_get_fences, transactions in
+ * dma_resv_lock). Expect a new major version with mode setting (R5i).
  */
 
 #ifndef _DRM_FACADE_VERSION_H
@@ -35,7 +39,7 @@ extern "C" {
 #endif
 
 #define	DRM_FACADE_MAJOR	1
-#define	DRM_FACADE_MINOR	0
+#define	DRM_FACADE_MINOR	1
 
 /*
  * The structures whose sizes are part of the version, in the order of

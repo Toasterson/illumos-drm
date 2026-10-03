@@ -144,7 +144,7 @@ struct drm_gem_object {
 	struct kref refcount;
 	unsigned int handle_count;
 	struct drm_device *dev;
-	void *filp;
+	DRM_FACADE_FILE_T *filp;
 	struct drm_vma_offset_node vma_node;
 	size_t size;
 	int name;

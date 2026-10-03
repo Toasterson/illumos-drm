@@ -211,16 +211,17 @@ __drm_illumos_printk(dev_info_t *dev, const char *level, int category,
 }
 
 #define	drm_dev_printk(dev, level, fmt, ...) \
-	__drm_illumos_printk((dev), (level), -1, fmt, ##__VA_ARGS__)
+	__drm_illumos_printk(DRM_FACADE_DEVICE_DIP(dev), (level), -1, fmt, \
+	    ##__VA_ARGS__)
 #define	__drm_dev_dbg(desc, dev, cat, fmt, ...) \
-	__drm_illumos_printk((dev), KERN_DEBUG, (int)(cat), \
+	__drm_illumos_printk(DRM_FACADE_DEVICE_DIP(dev), KERN_DEBUG, (int)(cat), \
 	    "[drm:dbg] " fmt, ##__VA_ARGS__)
 #define	drm_dev_dbg(dev, cat, fmt, ...) do { \
 	if (drm_debug_enabled(cat)) \
 		__drm_dev_dbg(NULL, (dev), (cat), fmt, ##__VA_ARGS__); \
 	} while (0)
 
-static inline dev_info_t *
+static inline DRM_FACADE_DEVICE_T *
 __drm_to_dev(const struct drm_device *drm)
 {
 	return (drm != NULL ? drm->dev : NULL);

@@ -43,7 +43,7 @@ enum drm_minor_type {
 struct drm_minor {
 	int index;		/* the node's minor: N, or 128 + N */
 	int type;		/* enum drm_minor_type */
-	dev_info_t *kdev;	/* the node the minor node was created on */
+	DRM_FACADE_DEVICE_T *kdev;	/* the node the minor node was created on */
 	struct drm_device *dev;
 };
 
@@ -81,8 +81,8 @@ struct drm_vma_offset_manager;
 struct drm_device {
 	int if_version;
 	struct kref ref;
-	dev_info_t *dev;
-	dev_info_t *dma_dev;
+	DRM_FACADE_DEVICE_T *dev;
+	DRM_FACADE_DEVICE_T *dma_dev;
 	struct {
 		struct list_head resources;
 		void *final_kfree;
