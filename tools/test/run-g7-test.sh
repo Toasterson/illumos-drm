@@ -572,7 +572,7 @@ phase_after_recover() {
 overlap() {
 	first=$1 second=$2 re=$3
 	unload_all || return 1
-	dtrace -w -q -n "BEGIN { printf(\"armed\\n\"); }
+	dtrace -w -q -x switchrate=1000hz -n "BEGIN { printf(\"armed\\n\"); }
 	    fbt:genunix:modinstall:entry /stringof(args[0]->mod_modname) == \"$first\"/ {
 	    printf(\"chill %s\\n\", stringof(args[0]->mod_modname)); chill(400000000); }" \
 	    > dtrace-$first.out 2>&1 &
@@ -583,7 +583,10 @@ overlap() {
 	grep -q armed dtrace-$first.out || { bad "dtrace did not start"; kill $dpid; return 1; }
 	n=$(msgs "$re")
 	modload -p misc/$first & lpid=$!
-	sleep 0.15
+	# The second load starts once the chill holds the first (DTrace prints
+	# within a millisecond at this switch rate; the chill lasts 400 ms).
+	i=0
+	while ! grep -q "chill $first" dtrace-$first.out && [ $i -lt 100 ]; do sleep 0.01; i=$((i + 1)); done
 	if step modload -p misc/$second; then
 		bad "misc/$second loaded while misc/$first was busy before its _init"
 	else

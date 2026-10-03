@@ -23,6 +23,47 @@ driver `cdrmnull`) is done.
 
 Milestones R0, R1, R2, R3 and R4 work, and so does R5a.
 
+G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
+of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
+gfx-drm's `driver/graphics/drm` built with the reverse guard (gfx-drm
+branch `drm-coexist` on top of `libdrm-update`, with `drm-devlink` and
+libdrm 2.4.134) and this repository's `drm-core`, `drmadm`, `virtio-gpu`
+and `cdrmnull` installed into one boot environment, `tools/test/run-g7-test.sh`
+passed every phase (81 checks, no failure; logs
+`logs/hephaistos/illumos-drm/20261003-g7-run3-*` in the workspace; the
+phases up to `select-root` ran at commit `89ea95e`, `overlap`, `rollback`
+and the recovery at `3ba24f1` and the overlap's synchronisation of this
+branch's head). On
+OpenIndiana's own `driver/graphics/drm` the legacy `misc/drm` still loads
+beside `misc/drm_core` and the old link rule leaves a dangling
+`/dev/dri/card0`. With both guards each core refused while the other was
+loaded, also for an explicit-path `modload`, for dependent drivers
+(`i915`, `virtio_gpu`, `cdrmnull`) and while the other was held busy before
+its `_init` by a DTrace chill; a core left in memory by a refused dependency
+did not keep the other out; 100 concurrent loads ended with exactly one
+core loaded each time (51 legacy, 49 new). `drmadm select new` refused while
+a module was loaded and while its lock was held, moved the 110 `i915`
+aliases off (unbound: no `i915n` yet) and wrote the fragment; after the
+reboot `misc/drm`, `/kernel/misc/amd64/drm` and `drv/i915` were excluded
+(no guard ran) and libdrm listed the two new devices. `select legacy`
+gave `i915` its 110 aliases back (`pkg verify` clean again); after the
+reboot the new modules were excluded, the legacy core and `i915` loaded
+(no Intel GPU to attach to), `devfsadm -C` removed all four stale
+`/dev/dri` links and libdrm listed no device. The aliases moved to a
+stand-in `i915n` and back, `drmadm -R` changed only a mounted clone, a
+failing alias move was undone, and the hand recovery (fragment removed,
+reboot) left nothing excluded. With the new stack selected,
+`run-r5a-test.sh` (`LEGACY_GUARD=skip`) passed: R0 to R4, R5a's 81-check
+test after three unload orders, `run-g6-test.sh` and `run-r1-test.sh` for
+`cdrmnull`, nothing failed (75 checks; the run before it, right after the
+packaged `virtio_gpu` and `cdrmnull` were uninstalled, failed 16 checks
+of unprivileged opens of `cdrmnull`'s nodes, which the packaged driver had
+left with mode 0600, and a `/dev/dri` state check; see the open issue
+below). Nothing panicked. The first guest runs found
+that both guards counted a core left in memory by a failed dependency
+`_init` (fixed in both, illumos-ddi `g7-module-busy`), that `update_drv -d`
+with a list of aliases removes nothing, and that `r` is a ksh93 alias.
+
 R5a (`misc/drm_core` and the C facade): since 1 October 2026 the core is one
 kernel module, `misc/drm_core`, that exports a C interface (the headers in
 `include/drm`), and every driver is linked against it with
@@ -1397,10 +1438,30 @@ bootadm update-archive
 then reboot and run `drmadm select legacy` (the Intel aliases still belong
 to the driver of the removed selection). From another boot environment:
 `beadm mount <be> /mnt; drmadm -R /mnt select legacy; beadm umount <be>`.
-Before removing the new stack's packages, run `drmadm select legacy`: the
-fragment is not a packaged file, and a selection of the new stack would
-keep excluding the legacy modules. `docs/x230.md` is the operator note
-for the ThinkPad X230.
+For one boot, `boot -a` and the answer `/etc/system` to "Name of system
+file" skip every `/etc/system.d` fragment (`mod_askparams()` clears the
+self-assembly file), so nothing is excluded. Before removing the new
+stack's packages, run `drmadm select legacy`: the fragment is not a
+packaged file, and a selection of the new stack would keep excluding the
+legacy modules. A `pkg` operation that creates a boot environment copies
+the running one, so a selection made afterwards in the running one does
+not reach it (select after booting it, or with `-R`). `docs/x230.md` is the
+operator note for the ThinkPad X230.
+
+**Open issues.** The reverse guard and the link rule are in gfx-drm's
+branch `drm-coexist`, which must be merged and a `driver/graphics/drm`
+with it installed before a machine loads both stacks; OpenIndiana's
+current `misc/drm` loads beside `misc/drm_core`. The nodes of the packaged
+`virtio_gpu` and `cdrmnull`, attached at boot, are `0600 root root`
+although `minor_perm` says `0666 root sys`, so unprivileged processes
+cannot open them (seen on the G7 guest, as before for test drivers
+registered at boot: `notes/hosts.md`); `devfsadm -i` and a reload do not
+change them, `rem_drv -C` clears them; a packaging question beyond G7.
+`drmadm select` refuses while a DRM module is loaded, so on a machine
+whose display uses `i915` the display manager must stop first (or select
+with `-R`). The busy part of the guard rule is tested deterministically
+only with DTrace (`overlap`); the 100 concurrent loads never overlapped
+their `_init` calls.
 
 ## Building
 
