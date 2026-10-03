@@ -1331,7 +1331,7 @@ in an interrupt spinning on a callback it interrupted.
 handlers), and `drm_illumos_fence_barrier()` waits for every parked
 release, which a driver calls before its ops tables go (`cdrmnull`'s
 `_fini` and release). The logic is tested on the host with a mock
-driver and threads (`crates/drm-core/src/cfence/tests.rs`: 13 tests).
+driver and threads (`crates/drm-core/src/cfence/tests.rs`: 14 tests).
 
 **R5b: GEM reference counts and handle walks.** A facade object's
 `refcount` is its only reference count (`GemObject::ext_count`): every

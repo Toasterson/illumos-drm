@@ -122,7 +122,8 @@ extern struct dma_fence *drm_illumos_fence_create(struct drm_device *dev,
  *	ops->release included). A driver calls it in detach(9E) or _fini(9E)
  *	after dropping its fences, before its code and ops tables go away
  *	(the counterpart of Linux's rcu_barrier() in a module's exit). Thread
- *	context.
+ *	context, and not from a fence's ops->release or a fence callback
+ *	(they run inside the core's drain, which this waits for).
  */
 extern void drm_illumos_fence_put_deferred(struct dma_fence *fence);
 extern void drm_illumos_fence_barrier(void);

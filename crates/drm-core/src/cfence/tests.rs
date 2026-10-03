@@ -200,6 +200,15 @@ impl TCb {
 
 static TEST_DOMAIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
+/// Serialises the tests that arm relays: the relay hooks' counters and
+/// spins are global, so another test's relay must not end a forced
+/// round's wait early.
+static RELAY_TESTS: Mutex<()> = Mutex::new(());
+
+fn relay_tests() -> std::sync::MutexGuard<'static, ()> {
+    RELAY_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 unsafe extern "C" fn tcb_func(fence: *mut f::dma_fence, cb: *mut f::dma_fence_cb) {
     // SAFETY: cb is the first field of a TCb the test keeps.
     let t = unsafe { &*(cb as *const TCb) };
@@ -582,6 +591,7 @@ fn a_driver_signalling_by_hand_reaches_the_core() {
 
 #[test]
 fn a_proxy_follows_its_core_fence() {
+    let _serial = relay_tests();
     let d = domain();
     let core = Fence::new(&d, d.alloc_contexts(1), 3, &sleep()).unwrap();
     let p = proxy(core.clone(), &d);
@@ -642,6 +652,7 @@ unsafe impl Sync for P {}
 
 #[test]
 fn proxy_release_races_the_relay() {
+    let _serial = relay_tests();
     // The core fence signals on one thread while the last reference to a
     // proxy whose relay is armed goes on another. Three kinds of round:
     //  0  the relay has started but not taken its reference when the
@@ -747,6 +758,7 @@ fn proxy_release_races_the_relay() {
 
 #[test]
 fn signal_races_add_remove_and_put() {
+    let _serial = relay_tests();
     // One thread signals, one adds and removes callbacks, one takes and
     // drops references; every callback runs at most once, a removed one
     // never, and the fence is released exactly once, after all of them.
@@ -817,6 +829,7 @@ fn signal_races_add_remove_and_put() {
 
 #[test]
 fn a_sibling_proxys_callback_drops_the_last_reference() {
+    let _serial = relay_tests();
     // Two proxies of one core fence, relays armed in the order p2, p1. The
     // core runs p2's relay first; a callback on p2 drops p1's last
     // reference while p1's relay is still queued on the same thread. The
