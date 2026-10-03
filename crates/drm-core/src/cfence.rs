@@ -112,72 +112,7 @@ const EDEADLK: i32 = 45;
 
 // --- the lock ---------------------------------------------------------------
 
-/// The fence lock: `spinlock_t` is a `kmutex_t` on illumos.
-#[cfg(not(test))]
-mod lk {
-    use super::f;
-    use core::ptr;
-    use ddi::sys;
-
-    fn m(l: *mut f::spinlock_t) -> *mut sys::kmutex_t {
-        // SAFETY: only computes the field's address.
-        unsafe { ptr::addr_of_mut!((*l).rlock) as *mut sys::kmutex_t }
-    }
-    /// An adaptive mutex: interrupt threads of low-level interrupts may
-    /// take it.
-    pub(super) unsafe fn init(l: *mut f::spinlock_t) {
-        // SAFETY: the caller's lock, not yet in use.
-        unsafe { sys::mutex_init(m(l), ptr::null(), sys::kmutex_type_t::MUTEX_DRIVER, ptr::null_mut()) }
-    }
-    pub(super) unsafe fn destroy(l: *mut f::spinlock_t) {
-        // SAFETY: the caller's lock, no longer in use; thread context.
-        unsafe { sys::mutex_destroy(m(l)) }
-    }
-    pub(super) unsafe fn enter(l: *mut f::spinlock_t) {
-        // SAFETY: an initialised lock.
-        unsafe { sys::mutex_enter(m(l)) }
-    }
-    pub(super) unsafe fn exit(l: *mut f::spinlock_t) {
-        // SAFETY: held by the caller.
-        unsafe { sys::mutex_exit(m(l)) }
-    }
-    pub(super) unsafe fn owned(l: *mut f::spinlock_t) -> bool {
-        // SAFETY: an initialised lock.
-        unsafe { sys::mutex_owned(m(l)) != 0 }
-    }
-}
-
-/// Host stand-in: the `kmutex_t` word holds the owner's thread id.
-#[cfg(test)]
-mod lk {
-    extern crate std;
-    use super::{f, ksync};
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    fn w<'a>(l: *mut f::spinlock_t) -> &'a AtomicU64 {
-        // SAFETY: a kmutex_t is one pointer-aligned word.
-        unsafe { AtomicU64::from_ptr(core::ptr::addr_of_mut!((*l).rlock) as *mut u64) }
-    }
-    pub(super) unsafe fn init(l: *mut f::spinlock_t) {
-        w(l).store(0, Ordering::Release);
-    }
-    pub(super) unsafe fn destroy(l: *mut f::spinlock_t) {
-        assert_eq!(w(l).load(Ordering::Acquire), 0, "destroying a held fence lock");
-    }
-    pub(super) unsafe fn enter(l: *mut f::spinlock_t) {
-        let me = ksync::thread_id();
-        assert_ne!(w(l).load(Ordering::Acquire), me, "recursive fence lock");
-        while w(l).compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            std::thread::yield_now();
-        }
-    }
-    pub(super) unsafe fn exit(l: *mut f::spinlock_t) {
-        assert_eq!(w(l).swap(0, Ordering::Release), ksync::thread_id(), "fence lock not held");
-    }
-    pub(super) unsafe fn owned(l: *mut f::spinlock_t) -> bool {
-        w(l).load(Ordering::Acquire) == ksync::thread_id()
-    }
-}
+use crate::spinlock as lk;
 
 /// A warning: `cmn_err(CE_WARN)` in the kernel, a counter on the host.
 #[cfg(not(test))]

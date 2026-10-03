@@ -61,17 +61,40 @@ with open(f"{ROOT}/include/drm/drm_facade.mapfile", "w") as f:
     f.write("};\n")
 
 # Structures with their named fields, from the generated definitions.
-structs = []
+# Members of anonymous types are followed: a named member of an
+# anonymous structure type (drm_device.managed) as "managed.lock" in both
+# languages, an anonymous union or structure member (dma_fence's lock and
+# list unions) by its members' names in C and through bindgen's
+# __bindgen_anon_N in Rust. bindgen's own helper fields are left out.
+types = {}
 for m in re.finditer(r"#\[repr\(C[^\]]*\)\]\n(?:#\[derive[^\]]*\]\n)?pub (struct|union) (\w+) \{(.*?)\n\}", text, re.S):
     kind, name, body = m.groups()
-    fields = re.findall(r"^    (?:pub )?(\w+):", body, re.M)
-    if "_unused" in fields or "_address" in fields or "__bindgen" in name or name.startswith("_"):
+    fields = [(n, t.rstrip(",")) for n, t in re.findall(r"^    (?:pub )?(\w+):[ ]?([^\n]*)$", body, re.M)]
+    types[name] = (kind, fields)
+
+def expand(fields, cpre="", rpre=""):
+    out = []
+    for fl, ty in fields:
+        if fl == "bindgen_union_field" or fl.startswith("_bindgen"):
+            continue
+        anon = re.match(r"(?:__BindgenUnionField<)?(\w+__bindgen_ty_\d+)>?$", ty.strip())
+        if fl.startswith("__bindgen_anon"):
+            if anon and anon.group(1) in types:
+                out += expand(types[anon.group(1)][1], cpre, f"{rpre}{fl}.")
+            continue
+        out.append((cpre + fl, rpre + fl))
+        if anon and anon.group(1) in types:
+            out += expand(types[anon.group(1)][1], f"{cpre}{fl}.", f"{rpre}{fl}.")
+    return out
+
+structs = []
+for name, (kind, fields) in types.items():
+    names = [x for x, _ in fields]
+    if "_unused" in names or "_address" in names or "__bindgen" in name or name.startswith("_"):
         continue
     if kind == "union":
         continue
-    # bindgen's names for anonymous members have no C counterpart.
-    named = [x for x in fields if not x.startswith("__bindgen")]
-    structs.append((name, named))
+    structs.append((name, expand(fields)))
 
 KERNEL = {"kmutex_t"}
 structs = [(n, f) for (n, f) in structs if n not in KERNEL]
@@ -121,13 +144,14 @@ r.append("use drm_facade_sys as f;\n")
 r.append("/// Every structure size and named field offset, one line each.")
 r.append("pub fn lines() -> Vec<String> {")
 r.append("    vec![")
+KEYWORDS = ("type", "as", "ref", "mod", "fn", "priv", "box", "move", "match", "loop", "self", "use", "where", "impl", "dyn", "final", "override", "virtual", "abstract", "become", "do", "macro", "typeof", "unsized", "yield", "try", "async", "await", "gen")
 nsz = noff = 0
 for name, fields in structs:
     c.append(f'\tSZ("{name}", {ctype(name)});')
     r.append(f'        format!("size {name} {{}}", size_of::<f::{name}>()),')
     nsz += 1
-    for fl in fields:
-        cf = fl[:-1] if fl.endswith("_") and fl[:-1] in ("type", "as", "ref", "mod", "fn", "priv", "box", "move", "match", "loop", "self", "use", "where", "impl", "dyn", "final", "override", "virtual", "abstract", "become", "do", "macro", "typeof", "unsized", "yield", "try", "async", "await", "gen") else fl
+    for cf, fl in fields:
+        cf = ".".join(x[:-1] if x.endswith("_") and x[:-1] in KEYWORDS else x for x in cf.split("."))
         c.append(f'\tOFF("{name}", {ctype(name)}, {cf});')
         r.append(f'        format!("offset {name}.{cf} {{}}", offset_of!(f::{name}, {fl})),')
         noff += 1

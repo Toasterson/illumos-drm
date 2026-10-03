@@ -309,6 +309,7 @@ fn link_file(core: &DevCore, fp: *mut f::drm_file) {
         (*(*head).prev).next = node;
         (*head).prev = node;
         sys::mutex_exit(ptr::addr_of_mut!((*d).filelist_mutex.m) as *mut sys::kmutex_t);
+        sys::atomic_inc_32(ptr::addr_of_mut!((*d).open_count.counter) as *mut u32);
     }
 }
 
@@ -328,6 +329,7 @@ fn forget_file(core: &DevCore, file: CloneId) {
         (*(*node).prev).next = (*node).next;
         (*(*node).next).prev = (*node).prev;
         sys::mutex_exit(ptr::addr_of_mut!((*d).filelist_mutex.m) as *mut sys::kmutex_t);
+        sys::atomic_dec_32(ptr::addr_of_mut!((*d).open_count.counter) as *mut u32);
         (*fp.as_ptr()).__core[1] = 0;
         drop(Box::from_raw(fp.as_ptr()));
     }

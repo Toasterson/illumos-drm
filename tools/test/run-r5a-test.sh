@@ -214,22 +214,27 @@ echo "$(grep -c '^size ' facade-gcc.out) sizes, $(grep -c '^offset ' facade-gcc.
 step sh -c "kstat -p drm:0:sync | grep -E 'fences|syncobjs'"
 step sh -c 'echo "drm_facade_version::whatis" | mdb -k'
 # A driver built against another facade must refuse to load: the
-# facade_mismatch module runs drm_facade_check() in _init, built once
-# against a copy of the headers with major version 1 and once with a
-# larger struct drm_device.
-for v in major size; do
+# facade_mismatch module runs drm_facade_check() in _init, built against
+# a copy of the headers with another major version (9 before the real
+# one), with a larger struct drm_device, and with a struct drm_device of
+# the same size whose private tail is smaller (facade 1.0 records the
+# tails in the handshake).
+for v in major size tail; do
 	rm -rf mismatch-$v && mkdir -p mismatch-$v && cp -r include mismatch-$v/
 	case $v in
-	major) sed 's/^#define	DRM_FACADE_MAJOR	0$/#define	DRM_FACADE_MAJOR	1/' \
+	major) sed 's/^#define	DRM_FACADE_MAJOR	\([0-9]*\)$/#define	DRM_FACADE_MAJOR	9\1/' \
 	    include/drm/drm_facade_version.h > mismatch-$v/include/drm/drm_facade_version.h ;;
 	size) sed 's/uint64_t __core\[16\];/uint64_t __core[17];/' \
+	    include/drm/drm_device.h > mismatch-$v/include/drm/drm_device.h ;;
+	tail) sed 's/uint64_t __core\[16\];/uint64_t __pad; uint64_t __core[15];/' \
 	    include/drm/drm_device.h > mismatch-$v/include/drm/drm_device.h ;;
 	esac
 	cmp -s include/drm/drm_facade_version.h mismatch-$v/include/drm/drm_facade_version.h &&
 	    cmp -s include/drm/drm_device.h mismatch-$v/include/drm/drm_device.h && bad "mismatch-$v: no change"
 	case $v in
-	major) want="facade_mismatch: built for DRM facade 1\.[0-9]*, misc/drm_core provides 0\." ;;
+	major) want="facade_mismatch: built for DRM facade 9[0-9]*\.[0-9]*, misc/drm_core provides [0-9]*\." ;;
 	size) want="facade_mismatch: struct drm_device is [0-9]* bytes in misc/drm_core, [0-9]* in the driver" ;;
+	tail) want="facade_mismatch: the private tail of struct drm_device is 128 bytes in misc/drm_core, 120 in the driver" ;;
 	esac
 	n=$(grep -c "$want" /var/adm/messages)
 	if step gcc -m64 -std=gnu99 -O2 -D_KERNEL -ffreestanding -mcmodel=kernel -mno-red-zone \

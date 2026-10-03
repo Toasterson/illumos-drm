@@ -127,6 +127,25 @@ struct ww_mutex {
 };
 
 /* Forward declarations of the facade's structures. */
+/*
+ * Allocation flags (Linux's gfp_t) for the facade's allocating functions
+ * (drmm_kmalloc() and friends): __GFP_DIRECT_RECLAIM means the call may
+ * sleep (KM_SLEEP; GFP_KERNEL, thread context), its absence that it must
+ * not (KM_NOSLEEP; GFP_NOWAIT, GFP_ATOMIC, any context); __GFP_ZERO zeroes
+ * the memory. The values are the facade's, which a Linux compatibility
+ * layer must use too; other bits are ignored.
+ */
+#ifndef	_DRM_FACADE_GFP
+#define	_DRM_FACADE_GFP
+typedef unsigned int gfp_t;
+#define	__GFP_ZERO		0x100u
+#define	__GFP_NOWARN		0x200u
+#define	__GFP_DIRECT_RECLAIM	0x400u
+#define	GFP_KERNEL		(__GFP_DIRECT_RECLAIM)
+#define	GFP_NOWAIT		0u
+#define	GFP_ATOMIC		0u
+#endif
+
 struct drm_device;
 struct drm_driver;
 struct drm_file;

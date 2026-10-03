@@ -12,9 +12,9 @@
  * behind the opaque tail __core. This file is a reimplementation for
  * illumos, MIT-licensed.
  *
- * Not in facade version 0 (Linux fields left out): managed, accel, master,
- * huge_mnt, master_mutex, open_count, filelist_internal, clientlist_mutex,
- * clientlist, client_sysrq_list, vblank, vbl_lock, max_vblank_count,
+ * Not carried (Linux fields left out): accel, master, huge_mnt,
+ * master_mutex, filelist_internal, clientlist_mutex, clientlist,
+ * client_sysrq_list, vblank, vbl_lock, max_vblank_count,
  * vblank_event_list, mode_config (with the C mode-setting core, R5i),
  * object_name_lock, object_name_idr, vram_mm, fb_helper, gem_lru_mutex.
  */
@@ -63,9 +63,13 @@ struct drm_vma_offset_manager;
  * drm_dev_register() in attach(9E), and unregisters it with
  * drm_dev_unregister() in detach(9E).
  *
- * Which fields are maintained in facade version 0:
- *	if_version, ref, dev, dma_dev, driver, dev_private, primary, render,
- *	registered, driver_features, unplugged, unique, filelist_mutex,
+ * Which fields are maintained:
+ *	if_version, ref (the device's reference count: drm_dev_get(),
+ *	drm_dev_put()), dev, dma_dev, managed (the drmm_* resources of
+ *	drm_managed.h: a list of the core's nodes under managed.lock;
+ *	final_kfree is the driver's structure), driver, dev_private,
+ *	primary, render, registered, driver_features, unplugged, unique,
+ *	open_count (the open files of the device's nodes), filelist_mutex,
  *	filelist (every open file of the device, linked through
  *	drm_file.lhead; walk it holding filelist_mutex), num_crtcs,
  *	vma_offset_manager (non-NULL for a GEM driver, opaque),
@@ -79,6 +83,11 @@ struct drm_device {
 	struct kref ref;
 	dev_info_t *dev;
 	dev_info_t *dma_dev;
+	struct {
+		struct list_head resources;
+		void *final_kfree;
+		spinlock_t lock;
+	} managed;
 	const struct drm_driver *driver;
 	void *dev_private;
 	struct drm_minor *primary;
@@ -88,6 +97,7 @@ struct drm_device {
 	bool unplugged;
 	void *anon_inode;
 	char *unique;
+	atomic_t open_count;
 	struct lx_mutex filelist_mutex;
 	struct list_head filelist;
 	bool vblank_disable_immediate;
@@ -116,7 +126,8 @@ extern struct drm_device *drm_dev_alloc(const struct drm_driver *driver,
  * drm_dev_alloc() does. Returns the start of the structure or
  * ERR_PTR(-errno). The structure is freed by the core when the last
  * reference to the device is dropped (drm_dev_put()), after the driver's
- * release callback. The illumos counterpart of Linux's
+ * release callback and the device's managed resources (drm_managed.h).
+ * The illumos counterpart of Linux's
  * __devm_drm_dev_alloc(); illumos has no devres, so the driver drops its
  * reference itself after drm_dev_unregister().
  */

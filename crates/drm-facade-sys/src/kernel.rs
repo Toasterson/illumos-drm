@@ -32,6 +32,12 @@ pub type devmap_cookie_t = *mut c_void;
 /// `ddi_info_cmd_t` (`DDI_INFO_DEVT2DEVINFO` 0, `DDI_INFO_DEVT2INSTANCE` 1).
 pub type ddi_info_cmd_t = c_uint;
 
+/// `va_list` of the amd64 ABI: `__va_list_tag[1]`, 24 bytes (two 32-bit
+/// offsets and two pointers). The facade only passes it by pointer
+/// (`struct va_format`); a pointer to it is the pointer to its first tag,
+/// which is what `vsnprintf(9F)` and `vcmn_err(9F)` take.
+pub type va_list = [u64; 3];
+
 /// `kmutex_t`: `struct mutex { void *_opaque[1]; }`.
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]

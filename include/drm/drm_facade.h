@@ -28,6 +28,7 @@
 #include <drm/dma_buf.h>
 #include <drm/drm_syncobj.h>
 #include <drm/drm_print.h>
+#include <drm/drm_managed.h>
 #include <drm/drm_illumos.h>
 #include <drm/drm_rkms.h>
 #include <sys/cmn_err.h>
@@ -51,11 +52,17 @@ drm_facade_check(const char *driver)
 #define	DRM_FACADE_SIZEOF_(s)	sizeof (struct s),
 		DRM_FACADE_STRUCTS(DRM_FACADE_SIZEOF_)
 #undef	DRM_FACADE_SIZEOF_
+#define	DRM_FACADE_TAILOF_(s)	sizeof (((struct s *)0)->__core),
+		DRM_FACADE_TAILS(DRM_FACADE_TAILOF_)
+#undef	DRM_FACADE_TAILOF_
 	};
 	static const char *const names[] = {
-#define	DRM_FACADE_NAME_(s)	#s,
+#define	DRM_FACADE_NAME_(s)	"struct " #s,
 		DRM_FACADE_STRUCTS(DRM_FACADE_NAME_)
 #undef	DRM_FACADE_NAME_
+#define	DRM_FACADE_TAILNAME_(s)	"the private tail of struct " #s,
+		DRM_FACADE_TAILS(DRM_FACADE_TAILNAME_)
+#undef	DRM_FACADE_TAILNAME_
 	};
 	uint32_t i;
 
@@ -63,7 +70,9 @@ drm_facade_check(const char *driver)
 		cmn_err(CE_WARN, "%s: no DRM facade version", driver);
 		return (EINVAL);
 	}
-	if (v.major != DRM_FACADE_MAJOR || v.minor < DRM_FACADE_MINOR) {
+	/* A variable, not a constant: minor 0 would make "< 0" a warning. */
+	const uint32_t want_minor = DRM_FACADE_MINOR;
+	if (v.major != DRM_FACADE_MAJOR || v.minor < want_minor) {
 		cmn_err(CE_WARN, "%s: built for DRM facade %u.%u, misc/drm_core "
 		    "provides %u.%u", driver, DRM_FACADE_MAJOR,
 		    DRM_FACADE_MINOR, v.major, v.minor);
@@ -76,7 +85,7 @@ drm_facade_check(const char *driver)
 	}
 	for (i = 0; i < DRM_FACADE_NSIZES; i++) {
 		if (v.sizes[i] != mine[i]) {
-			cmn_err(CE_WARN, "%s: struct %s is %llu bytes in "
+			cmn_err(CE_WARN, "%s: %s is %llu bytes in "
 			    "misc/drm_core, %llu in the driver", driver,
 			    names[i], (unsigned long long)v.sizes[i],
 			    (unsigned long long)mine[i]);

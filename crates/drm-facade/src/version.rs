@@ -52,6 +52,25 @@ const MINE: [(usize, &str); N] = {
         drm_rkms_connector_state => DRM_FACADE_SZ_drm_rkms_connector_state,
         drm_rkms_fb_info => DRM_FACADE_SZ_drm_rkms_fb_info,
         drm_rkms_rect => DRM_FACADE_SZ_drm_rkms_rect,
+        drm_printer => DRM_FACADE_SZ_drm_printer,
+    }
+    // The private tails: the last field of each structure, so its size is
+    // what follows its offset.
+    macro_rules! tail {
+        ($($s:ident => $i:ident),* $(,)?) => {
+            $( a[sys::$i as usize] = (
+                size_of::<sys::$s>() - core::mem::offset_of!(sys::$s, __core),
+                concat!(stringify!($s), ".__core"),
+            ); )*
+        };
+    }
+    tail! {
+        drm_device => DRM_FACADE_TAIL_drm_device,
+        drm_file => DRM_FACADE_TAIL_drm_file,
+        drm_gem_object => DRM_FACADE_TAIL_drm_gem_object,
+        dma_fence => DRM_FACADE_TAIL_dma_fence,
+        dma_resv => DRM_FACADE_TAIL_dma_resv,
+        dma_buf => DRM_FACADE_TAIL_dma_buf,
     }
     // Every slot filled: a structure added to DRM_FACADE_STRUCTS must be
     // added here too.
@@ -71,6 +90,8 @@ enum Mismatch {
     Size { name: &'static str, core: u64, mine: usize },
 }
 
+// The minor version may be 0, which makes `v.minor < MINOR` always false.
+#[allow(clippy::absurd_extreme_comparisons)]
 fn compare(v: &sys::drm_facade_version) -> Result<(), Mismatch> {
     if v.major != sys::DRM_FACADE_MAJOR || v.minor < sys::DRM_FACADE_MINOR {
         return Err(Mismatch::Version { major: v.major, minor: v.minor });
@@ -108,7 +129,7 @@ pub fn check_facade(driver: &str) -> Result<(), Errno> {
             ),
             Mismatch::Count(n) => ddi::kwarn!("{driver}: misc/drm_core knows {n} facade structures, the driver {N}"),
             Mismatch::Size { name, core, mine } => {
-                ddi::kwarn!("{driver}: struct {name} is {core} bytes in misc/drm_core, {mine} in the driver")
+                ddi::kwarn!("{driver}: {name} is {core} bytes in misc/drm_core, {mine} in the driver")
             }
         }
         Errno::EINVAL
@@ -158,5 +179,8 @@ mod tests {
         let mut v = core_like();
         v.sizes[sys::DRM_FACADE_SZ_dma_fence as usize] += 8;
         assert!(matches!(compare(&v), Err(Mismatch::Size { name: "dma_fence", .. })));
+        let mut v = core_like();
+        v.sizes[sys::DRM_FACADE_TAIL_drm_gem_object as usize] -= 8;
+        assert!(matches!(compare(&v), Err(Mismatch::Size { name: "drm_gem_object.__core", .. })));
     }
 }

@@ -17,6 +17,11 @@ SYMBOL_SCOPE {
 		_fini;
 		_info;
 		__drm_dev_alloc;
+		__drm_printfn_dbg;
+		__drm_printfn_err;
+		__drm_printfn_info;
+		__drmm_add_action;
+		__drmm_add_action_or_reset;
 		dma_buf_fd;
 		dma_buf_get;
 		dma_buf_put;
@@ -104,6 +109,7 @@ SYMBOL_SCOPE {
 		drm_illumos_mapping_unload;
 		drm_illumos_mapping_user_offset;
 		drm_illumos_sync_file_get_fence;
+		drm_illumos_vprintk;
 		drm_ioctl;
 		drm_minor_instance;
 		drm_mode_size_dumb;
@@ -127,6 +133,10 @@ SYMBOL_SCOPE {
 		drm_syncobj_find_fence;
 		drm_syncobj_put;
 		drm_syncobj_replace_fence;
+		drmm_kfree;
+		drmm_kmalloc;
+		drmm_kstrdup;
+		drmm_release_action;
 		get_dma_buf;
 		sync_file_get_fence;
 	local:
