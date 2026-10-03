@@ -509,7 +509,8 @@ ldp_report() {
 # driver, minor name, mode (octal), owner and group, and in WANT
 # "MODE OWNER GROUP" of the /etc/minor_perm entry the kernel applies, or
 # "-" if there is none. The driver comes from /etc/path_to_inst by the
-# link's device path, and a link is followed (stat) only if its driver is
+# link's device path (for a pseudo device, which is not there, it is the
+# node name), and a link is followed (stat) only if its driver is
 # loaded: a lookup in /devices attaches a driver that is not, and loading
 # a DRM driver would make drmadm select refuse, or load a core beside the
 # other one's stack. The kernel's list of a driver's entries
@@ -528,6 +529,13 @@ dri_nodes() {
 		path=$(echo "$node" | sed -n 's|^.*/devices\(/[^:]*\):.*$|\1|p')
 		[ -n "$path" ] || continue
 		d=$(awk -v p="\"$path\"" '$1 == p { gsub(/"/, "", $3); print $3; exit }' /etc/path_to_inst)
+		if [ -z "$d" ]; then
+			# Not in path_to_inst (pseudo devices are not): the node
+			# name, if it is a driver's (cdrmnull@0 of cdrmnull.conf).
+			n=${path##*/}
+			n=${n%%@*}
+			installed "$n" && d=$n
+		fi
 		[ -n "$d" ] || continue
 		case $loaded in
 		*" $d "*) ;;

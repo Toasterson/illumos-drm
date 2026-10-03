@@ -1568,7 +1568,7 @@ right after the package is installed or updated (`restart_fmri` of
    patterns the later one wins. The nodes of a new-stack driver that an
    `/etc/logindevperm` rule names are left alone, and so are the nodes of
    drivers that are not loaded: drmadm finds a link's driver in
-   `/etc/path_to_inst` and follows the link only if the driver is loaded,
+   `/etc/path_to_inst` (a pseudo device's from its node name) and follows the link only if the driver is loaded,
    because a lookup in `/devices` attaches the driver (and a loaded DRM
    module makes `drmadm select` refuse; the first version did this from
    `drmadm status`, which G7's `select-new` phase caught).
