@@ -19,7 +19,9 @@
 #              ttymon's reads of /etc/logindevperm, renames onto it); with
 #              REVERT=1 it first restores the packaged /etc/logindevperm
 #              (pkg revert), whose rule applies to every driver, as on the
-#              first boot after an installation. Reboot afterwards.
+#              first boot after an installation. Reboot afterwards;
+#              coldboot fails if the boot it armed has no trace (and with
+#              REQUIRE_TRACE=1 if any boot has none).
 #   coldboot   right after a boot, before anything opened a DRM node:
 #              drm-perms is online and came online in this boot before
 #              console-login started; with a trace from arm, ttymon -g
@@ -344,9 +346,17 @@ proc:::exec-success /execname == "ttymon"/
 check_boot_trace() {
 	if ! dtrace -ae > boot-trace.out 2> boot-trace.err; then
 		cat boot-trace.err
-		info "no anonymous trace of this boot (run the arm phase before the reboot)"
+		# arm leaves boot-trace.armed; a boot it armed must have a trace
+		# (REQUIRE_TRACE=1 requires one in any case).
+		if [ -f boot-trace.armed ] || [ "${REQUIRE_TRACE:-0}" = 1 ]; then
+			bad "no anonymous trace of this boot although $( [ -f boot-trace.armed ] && echo "arm armed one" || echo "REQUIRE_TRACE=1")"
+			rm -f boot-trace.armed
+		else
+			info "no anonymous trace of this boot (run the arm phase before the reboot)"
+		fi
 		return 0
 	fi
+	rm -f boot-trace.armed
 	step cat boot-trace.out
 	# "TIME exec ttymon pid PID ppid PPID: ARGS"
 	tt=$(awk '$2 == "exec" && /ttymon -g / { print $5; exit }' boot-trace.out)
@@ -387,6 +397,7 @@ phase_arm() {
 	printf '%s\n' "$BOOT_D" > g10-boot.d
 	step dtrace -A -s g10-boot.d || { bad "dtrace -A failed"; return 1; }
 	step bootadm update-archive
+	date +%s > boot-trace.armed
 	pass "anonymous tracing armed for the next boot (reboot now)"
 }
 

@@ -528,19 +528,31 @@ dri_nodes() {
 		# ../../devices/pci@0,0/pci1af4,1100@10:card0 -> /pci@0,0/pci1af4,1100@10
 		path=$(echo "$node" | sed -n 's|^.*/devices\(/[^:]*\):.*$|\1|p')
 		[ -n "$path" ] || continue
-		d=$(awk -v p="\"$path\"" '$1 == p { gsub(/"/, "", $3); print $3; exit }' /etc/path_to_inst)
-		if [ -z "$d" ]; then
+		# Every driver path_to_inst lists for the path: one path can
+		# have several (i915 and i915n for one Intel GPU), in an order
+		# that a rewrite of the file can change.
+		cands=$(awk -v p="\"$path\"" '$1 == p { gsub(/"/, "", $3); print $3 }' /etc/path_to_inst | sort -u)
+		if [ -z "$cands" ]; then
 			# Not in path_to_inst (pseudo devices are not): the node
 			# name, if it is a driver's (cdrmnull@0 of cdrmnull.conf).
 			n=${path##*/}
 			n=${n%%@*}
-			installed "$n" && d=$n
+			installed "$n" && cands=$n
 		fi
-		[ -n "$d" ] || continue
-		case $loaded in
-		*" $d "*) ;;
-		*) continue ;;
-		esac
+		d=""
+		nd=0
+		for c in $cands; do
+			case $loaded in
+			*" $c "*) d=$c; nd=$((nd + 1)) ;;
+			esac
+		done
+		# No loaded driver: not looked up. Several: the node's driver is
+		# not known without the lookup, so it is reported and skipped.
+		if [ $nd -gt 1 ]; then
+			echo "$PROG: $l: several loaded drivers have $path in /etc/path_to_inst ($(words "$cands")); skipped" >&2
+			continue
+		fi
+		[ $nd -eq 1 ] || continue
 		info=$(ls -lL "$l" 2>/dev/null) || continue
 		echo "$l $d ${node##*:} $info"
 	done | awk -v mperm=/etc/minor_perm '
