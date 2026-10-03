@@ -21,7 +21,36 @@ driver `cdrmnull`) is done.
 
 ## Where things stand
 
-Milestones R0, R1, R2, R3 and R4 work, and so does R5a.
+Milestones R0, R1, R2, R3 and R4 work, and so do R5a and R5b.
+
+R5b (public-layout base objects, facade 1.0; see *R5b* under *Decisions*):
+on 3 October 2026, on fresh guests of `golden-20260930` (illumos
+`7e802e88a3`, libdrm 2.4.134) with a virtio-gpu device, at commit
+`c24a58e` (the later commits change tests and comments only),
+`tools/test/run-r5b-test.sh` passed: `run-r5a-test.sh` (R0 to R4 on the
+three drivers, R5a's cross-driver test after three unload orders, G6,
+R1 for two `cdrmnull` devices, the facade mismatch probes including a
+same-size `drm_device` with a smaller private tail; 168 passing checks,
+none failed), the managed resources of `cdrmnull` released in reverse
+order at all 7 of its detaches, `drm_r5b_test` (47 checks, none failed:
+the 15 fence-ops checks of `FENCE_OPS_SELFTEST` including 200 rounds of
+add/remove/signal against the soft interrupt, the driver's timeline
+fences in a binary sync object, an array of two contexts, a chain
+signalled out of order and an error sync file, 3000 handle walks while a
+thread created and closed 1592 handles, the live GEM reference count
+through name, dma-buf and mapping), every logging path in the system log
+with `drm_debug` 0 and 0x6, timeline fences released in thread context
+only, and `run-g8-test.sh kernel`. gcc's layout of the facade (40 sizes,
+256 offsets) matched the Rust bindings, and `kernel-check` with
+`misc/drm_core` loaded verified `drm-facade-sys` against the module's CTF
+(sizes 40 of 45 and offsets 244 of 256, the rest members of anonymous
+types checked through their parents; symbols 123 of 123). At `b3fab03`
+every phase of `run-g7-test.sh` passed again (81 checks), and with the new
+stack selected `run-r5a-test.sh` (`LEGACY_GUARD=skip`) behaved as in G7:
+its first run after the packaged drivers' removal failed the unprivileged
+opens of `cdrmnull`'s stale `0600` nodes (the open issue of G7 below),
+and the run after it passed (76 checks). Logs:
+`logs/hephaistos/illumos-drm/20261003-r5b-*` in the workspace.
 
 G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
 of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
