@@ -1,0 +1,19 @@
+/* SPDX-License-Identifier: MIT */
+/* Copyright 2026 The illumos-drm authors. The PCI IDs and class codes the layer and i915 use. */
+#ifndef _LINUX_PCI_IDS_H
+#define	_LINUX_PCI_IDS_H
+#define	PCI_VENDOR_ID_INTEL		0x8086
+#define	PCI_VENDOR_ID_ATI		0x1002
+#define	PCI_VENDOR_ID_AMD		0x1022
+#define	PCI_VENDOR_ID_REDHAT_QUMRANET	0x1af4
+#define	PCI_BASE_CLASS_DISPLAY		0x03
+#define	PCI_CLASS_DISPLAY_VGA		0x0300
+#define	PCI_CLASS_DISPLAY_OTHER		0x0380
+#define	PCI_CLASS_DISPLAY_3D		0x0302
+#define	PCI_BASE_CLASS_BRIDGE		0x06
+#define	PCI_CLASS_BRIDGE_HOST		0x0600
+#define	PCI_CLASS_BRIDGE_ISA		0x0601
+#define	PCI_CLASS_MULTIMEDIA_HD_AUDIO	0x0403
+#define	PCI_DEVICE_ID_INTEL_82830_HB	0x3575
+#define	PCI_DEVICE_ID_INTEL_82845G_HB	0x2560
+#endif
