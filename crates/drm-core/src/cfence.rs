@@ -367,7 +367,8 @@ unsafe fn init_public(
 /// context). Without memory the fence starts signalled with `-ENOMEM`.
 ///
 /// # Safety
-/// As [`init_public`].
+/// `fence` is writable and not in use; `ops` and `lock` stay valid while
+/// the fence exists.
 pub unsafe fn init(
     fence: *mut f::dma_fence,
     ops: *const f::dma_fence_ops,
@@ -892,7 +893,7 @@ pub unsafe fn enable_sw_signaling(fence: *mut f::dma_fence) {
 /// `fence` is live; the caller does not hold its lock.
 pub unsafe fn is_signaled(fence: *mut f::dma_fence) -> bool {
     if !initialised(fence) {
-        return fence.is_null();
+        return false;
     }
     if flags(fence).load(Ordering::Acquire) & SIGNALED != 0 {
         return true;

@@ -344,7 +344,11 @@ host tests) and tested on the host with real threads; the kernel layer
 of R2 is `fence_dev` (the device's synchronisation state and the `sync`
 kstat), `anon_fd` (file descriptors for dma-bufs, sync object files and
 sync files, over illumos-ddi's private tier), `syncobj_ioctl` and
-`prime`.
+`prime`. Since R5b `cfence` holds Linux's fence rules on the facade's
+`struct dma_fence` (with `spinlock`, the facade's `spinlock_t`),
+`managed` the `drmm_*` resources of a `struct drm_device`, `refcount`
+the reference count kept in a C structure, and `print` the rules of the
+facade's logging; all four are tested on the host.
 
 `examples/rdrmnull` is a DRM driver without hardware. It registers one
 device with a card and a render node, has dumb buffers in system memory,
@@ -377,7 +381,10 @@ Linux's names), `include/drm/drm_facade.mapfile` the facade's symbols for
 a driver's `-z defs` link and `modules/drm_core/drm_core.mapfile` the module's
 symbol scope. `crates/drm-facade-sys` is the facade as Rust declarations
 (bindgen), `crates/drm-facade` the safe layer the Rust drivers use, and
-`drivers/cdrmnull` the C test driver. `tools/facade` regenerates the
+`drivers/cdrmnull` the C test driver (since R5b with a GPU-like fence
+timeline, managed resources and the fence-ops, handle-walk and printing
+self-tests that `tools/test/drm_r5b_test.c` and `run-r5b-test.sh`
+drive). `tools/facade` regenerates the
 bindings, both mapfiles and the layout tables, and holds the C half of the
 layout check; `modules/drm_core/ctf` the CTF shadow of the facade structures.
 `packaging/drm-core.p5m` packages the module, `packaging/cdrmnull.p5m` the C
