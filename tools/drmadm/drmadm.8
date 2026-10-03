@@ -235,7 +235,8 @@ names are left alone, and so are those of drivers that are not loaded:
 finds a node's driver in
 .Pa /etc/path_to_inst ,
 or for a pseudo device from its node name,
-and does not look the node up otherwise, since a lookup would load the
+and does not look the node up otherwise
+.Pq a node for whose path several loaded drivers are listed is reported and skipped, since a lookup would load the
 driver.
 .El
 .Pp
