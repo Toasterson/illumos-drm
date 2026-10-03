@@ -309,7 +309,10 @@ symbol scope. `crates/drm-facade-sys` is the facade as Rust declarations
 bindings, both mapfiles and the layout tables, and holds the C half of the
 layout check; `modules/drm_core/ctf` the CTF shadow of the facade structures.
 `packaging/drm-core.p5m` packages the module, `packaging/cdrmnull.p5m` the C
-driver.
+driver. `tools/drmadm` holds `drmadm(8)`, which selects the legacy or this
+stack for boot (`packaging/drmadm.p5m`), and `tools/test/run-g7-test.sh`
+tests both stacks on one machine; `docs/x230.md` is the operator note for
+the ThinkPad X230.
 `tools/test/run-g6-test.sh` attaches two `rdrmnull` devices and
 `virtio_gpu` together and runs everything on each, `drm_g6_test.c`
 checks the argument size rule, and `drm-test-lib.sh` holds the shell
@@ -984,8 +987,10 @@ whatever path its latest load used, `misc/drm` or
 `/kernel/misc/amd64/drm`); the wrapper is
 `ddi::private::module_loaded(name, &Sleepable)` and takes no hold, so a
 symmetric guard cannot deadlock against it. Its answer is a snapshot, so
-the opposite guard belongs in gfx-drm's `misc/drm`, which must refuse
-while `misc/drm_core` is loaded (a separate gfx-drm item).
+the opposite guard belongs in gfx-drm's `misc/drm`, which refuses while
+`misc/drm_core` is loaded since G7 (see *Running beside the legacy
+stack*, which also describes `drmadm(8)` and the rule for a module left
+in memory by a failed `_init`).
 The guest test loads the legacy module from the installed
 `driver/graphics/drm`, checks that `misc/drm_core` refuses with the
 warning, unloads the legacy module and loads `misc/drm_core`. The facade
@@ -1269,11 +1274,20 @@ is during its `_init`, so two modules holding each other from their
 `_init` could deadlock; the walk waits only for `mod_lock`, which the
 module framework never holds while it calls `_init` or waits for a busy
 module (`modinstall` asserts `MUTEX_NOT_HELD(&mod_lock)`; `mod_hold_by_modctl`
-releases it in `cv_wait`). Two cores loading at the same time cannot both
-succeed: the framework sets `mod_loaded` before it calls `_init` and clears
-it only after an unload, and each check's `mutex_enter` (a locked
-instruction) orders that store before its reads, so at least one of them
-sees the other and refuses (both may refuse; a retry then loads one).
+releases it in `cv_wait`). The other core counts as loaded when it is
+installed (`mod_installed`), or in memory and held busy (`mod_loaded` and
+`mod_busy`), as it is while its `_init` or `_fini` runs. A core that is
+only in memory does not count: a dependency whose `_init` failed stays
+that way, invisible to `modinfo(8)`, because `mod_install_requisites`
+does not unload it and `modunload` cannot (`moduninstall` answers
+`EALREADY`); the first guest run found that counting it kept the other
+core out after a refused `modload drv/i915` until `misc/drm` was loaded
+again. Two cores loading at the same time cannot both succeed: each is in
+memory and busy before its own `_init` runs the check, `mod_busy` changes
+under `mod_lock`, `mod_installed` is set before the module is released,
+and each check's `mutex_enter` (a locked instruction) orders the earlier
+stores before its reads, so at least one of them sees the other and
+refuses (both may refuse; a retry then loads one).
 
 **drmadm(8) selects the stack for boot.** `tools/drmadm/drmadm`, a shell
 script in the package `driver/graphics/drmadm` (required by
