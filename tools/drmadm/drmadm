@@ -67,8 +67,9 @@ die() {
 	exit 1
 }
 
-# r PATH: PATH (relative to /) under the root.
-r() {
+# under PATH: PATH (relative to /) under the root. (Not "r", which is an
+# alias of ksh93, the /bin/sh of illumos.)
+under() {
 	if [ "$ROOT" = / ]; then
 		echo "/$1"
 	else
@@ -101,7 +102,7 @@ aliases_of() {
 	awk -v d="$1" '
 	    /^[ \t]*#/ { next }
 	    $1 == d { a = $2; gsub(/"/, "", a); if (a != "") print a }
-	' "$(r etc/driver_aliases)" | sort -u
+	' "$(under etc/driver_aliases)" | sort -u
 }
 
 # driver_of ALIAS: the driver ALIAS is bound to, if any.
@@ -109,12 +110,12 @@ driver_of() {
 	awk -v x="$1" '
 	    /^[ \t]*#/ { next }
 	    { a = $2; gsub(/"/, "", a); if (a == x) { print $1; exit } }
-	' "$(r etc/driver_aliases)"
+	' "$(under etc/driver_aliases)"
 }
 
 # installed DRIVER: whether DRIVER has a major number (add_drv was run).
 installed() {
-	awk -v d="$1" '$1 == d { f = 1 } END { exit !f }' "$(r etc/name_to_major)"
+	awk -v d="$1" '$1 == d { f = 1 } END { exit !f }' "$(under etc/name_to_major)"
 }
 
 # manifest_aliases: the aliases of the i915 driver action of the installed
@@ -140,7 +141,7 @@ manifest_aliases() {
 
 # recorded KEY: the values of "* drmadm-KEY: value" lines of the fragment.
 recorded() {
-	f=$(r "$FRAGMENT")
+	f=$(under "$FRAGMENT")
 	[ -f "$f" ] || return 0
 	sed -n "s/^\\* drmadm-$1: //p" "$f"
 }
@@ -167,7 +168,7 @@ stack_of() {
 # configuration) that names a module of either stack.
 excludes() {
 	all=$(names "$LEGACY_MODULES $NEW_MODULES" | tr '\n' ' ')
-	for f in "$(r etc/system)" "$(r etc/system.d)"/*; do
+	for f in "$(under etc/system)" "$(under etc/system.d)"/*; do
 		[ -f "$f" ] || continue
 		awk -v all="$all" -v f="$f" '
 		    BEGIN { n = split(all, m, " "); for (i = 1; i <= n; i++) want[m[i]] = 1 }
@@ -263,7 +264,7 @@ boot_time() {
 }
 
 do_status() {
-	frag=$(r "$FRAGMENT")
+	frag=$(under "$FRAGMENT")
 	sel=$(recorded selected)
 	at=$(recorded time)
 	echo "Root: $ROOT"
@@ -315,7 +316,7 @@ do_status() {
 	fi
 
 	echo
-	echo "Intel GPU aliases ($(r etc/driver_aliases)):"
+	echo "Intel GPU aliases ($(under etc/driver_aliases)):"
 	man=$(manifest_aliases)
 	for d in "$LEGACY_DRIVER" "$NEW_DRIVER"; do
 		n=$(count "$(aliases_of "$d")")
@@ -343,7 +344,7 @@ do_status() {
 	[ -n "$man" ] && echo "  ($LEGACY_PKG declares $(count "$man") aliases for $LEGACY_DRIVER)"
 
 	echo
-	n=$(ls "$(r dev/dri)" 2>/dev/null | wc -l | tr -d ' ')
+	n=$(ls "$(under dev/dri)" 2>/dev/null | wc -l | tr -d ' ')
 	echo "/dev/dri links: $n (after a switch, devfsadm -C removes those of the other stack)"
 
 	echo
@@ -358,7 +359,7 @@ do_status() {
 }
 
 unlock() {
-	rmdir "$(r "$LOCK")" 2>/dev/null
+	rmdir "$(under "$LOCK")" 2>/dev/null
 }
 
 do_select() {
@@ -374,8 +375,8 @@ do_select() {
 		usage ;;
 	esac
 
-	[ -d "$(r etc/system.d)" ] || die "$(r etc/system.d) does not exist (illumos before 2018 has no /etc/system.d)"
-	[ -f "$(r etc/driver_aliases)" ] || die "$(r etc/driver_aliases) does not exist"
+	[ -d "$(under etc/system.d)" ] || die "$(under etc/system.d) does not exist (illumos before 2018 has no /etc/system.d)"
+	[ -f "$(under etc/driver_aliases)" ] || die "$(under etc/driver_aliases) does not exist"
 
 	if live; then
 		lm=$(loaded_modules)
@@ -391,16 +392,16 @@ do_select() {
 		fi
 	fi
 
-	if ! mkdir "$(r "$LOCK")" 2>/dev/null; then
-		die "another drmadm is running (lock $(r "$LOCK")); remove it if none is"
+	if ! mkdir "$(under "$LOCK")" 2>/dev/null; then
+		die "another drmadm is running (lock $(under "$LOCK")); remove it if none is"
 	fi
 	trap unlock EXIT
 	trap 'unlock; exit 1' HUP INT TERM
 
 	changed=0
-	frag=$(r "$FRAGMENT")
-	prev=$(r etc/system.d/.drmadm.prev)
-	tmp=$(r "etc/system.d/.drmadm.$$")
+	frag=$(under "$FRAGMENT")
+	prev=$(under etc/system.d/.drmadm.prev)
+	tmp=$(under "etc/system.d/.drmadm.$$")
 
 	# What changes. The alias set drmadm manages: the aliases the legacy
 	# package declares for i915, those bound to either Intel driver, and
