@@ -90,8 +90,27 @@ unload_all() {
 	return 0
 }
 
+# msgs RE: how many console messages match RE. The kernel's message
+# buffer, not /var/adm/messages, whose syslogd folds repeated messages
+# into "last message repeated N times".
 msgs() {
-	grep -c "$1" /var/adm/messages
+	echo ::msgbuf | mdb -k | grep -c "$1"
+}
+
+# wait_msg RE N: waits up to 5 s until more than N messages match RE.
+wait_msg() {
+	i=0
+	while [ "$(msgs "$1")" -le "$2" ] && [ $i -lt 10 ]; do
+		sleep 0.5
+		i=$((i + 1))
+	done
+}
+
+# bits FILE: the BITS column of mdb's ::modctl for the module record whose
+# file name ends in /FILE: "l" in memory, "i" installed, "p" primary.
+bits() {
+	echo ::modctl | mdb -k | awk -v f="$1" '$NF == f || $NF ~ ("/" f "$") {
+	    b = $3; if (b ~ /^0x/) b = "-"; print b; exit }'
 }
 
 # refused WHAT MSG -- COMMAND: COMMAND fails and logs MSG once more.
@@ -103,12 +122,12 @@ refused() {
 		bad "$what: loaded"
 		return 1
 	fi
-	wait_log "$re" "$n"
+	wait_msg "$re" "$n"
 	if [ "$(msgs "$re")" -gt "$n" ]; then
-		grep "$re" /var/adm/messages | tail -1
+		echo ::msgbuf | mdb -k | grep "$re" | tail -1
 		pass "$what: refused with the guard's warning"
 	else
-		tail -3 /var/adm/messages
+		echo ::msgbuf | mdb -k | tail -3
 		bad "$what: failed without the guard's warning"
 	fi
 }
@@ -286,6 +305,30 @@ phase_guards() {
 	loaded i915 && bad "i915 is loaded" || pass "i915 is not loaded"
 	unload_all || exit 1
 	echo
+	echo "--- a core left in memory by a refused dependency does not count"
+	# A dependency whose _init fails stays in memory, not installed and not
+	# busy (mod_install_requisites does not unload it, modunload cannot),
+	# until it is loaded again. The refused drv/i915 above left misc/drm so.
+	step sh -c 'echo ::modctl | mdb -k | grep -E "/drm(_core)?$"'
+	b=$(bits drm)
+	info "misc/drm after the refused drv/i915: bits \"$b\" (l: in memory, i: installed)"
+	[ "$b" = l ] && pass "the refused drv/i915 left misc/drm in memory, not installed" ||
+	    info "misc/drm is not left in memory (bits \"$b\"): the next check is not exercised"
+	step modload -p misc/drm_core && pass "misc/drm_core loads beside a refused, uninstalled misc/drm" ||
+	    bad "misc/drm_core does not load beside a refused, uninstalled misc/drm"
+	unload_all || exit 1
+	step modload -p misc/drm || bad "the legacy misc/drm does not load"
+	refused "drv/virtio_gpu while misc/drm is loaded" "$NEW_MSG" -- modload -p drv/virtio_gpu
+	unload_all || exit 1
+	step sh -c 'echo ::modctl | mdb -k | grep -E "/drm(_core)?$"'
+	b=$(bits drm_core)
+	info "misc/drm_core after the refused drv/virtio_gpu: bits \"$b\""
+	[ "$b" = l ] && pass "the refused drv/virtio_gpu left misc/drm_core in memory, not installed" ||
+	    info "misc/drm_core is not left in memory (bits \"$b\"): the next check is not exercised"
+	step modload -p misc/drm && pass "misc/drm loads beside a refused, uninstalled misc/drm_core" ||
+	    bad "misc/drm does not load beside a refused, uninstalled misc/drm_core"
+	unload_all || exit 1
+	echo
 	echo "--- the drivers bring their core, and the other core refuses"
 	step devfsadm -i virtio_gpu
 	step devfsadm -i cdrmnull
@@ -297,13 +340,18 @@ phase_guards() {
 	unload_all || exit 1
 	echo
 	echo "--- $RACES concurrent loads of both cores"
+	# misc/drm_core (16 MB with its debug information) takes longer to
+	# load than misc/drm, so the second load starts after a delay that
+	# sweeps 0 to 98 ms, alternating which core starts first, to make the
+	# two _init calls meet.
 	n1=$(msgs "$LEGACY_MSG") n2=$(msgs "$NEW_MSG")
 	both=0 legacy=0 new=0 neither=0 i=0
 	while [ $i -lt "$RACES" ]; do
+		d=$(awk -v i=$i 'BEGIN { printf "%.3f", (int(i / 2) % 50) * 0.002 }')
 		if [ $((i % 2)) -eq 0 ]; then
-			modload -p misc/drm 2>/dev/null & modload -p misc/drm_core 2>/dev/null &
+			modload -p misc/drm_core 2>/dev/null & sleep "$d"; modload -p misc/drm 2>/dev/null &
 		else
-			modload -p misc/drm_core 2>/dev/null & modload -p misc/drm 2>/dev/null &
+			modload -p misc/drm 2>/dev/null & sleep "$d"; modload -p misc/drm_core 2>/dev/null &
 		fi
 		wait
 		l=no n=no
@@ -325,8 +373,8 @@ phase_guards() {
 	echo "warnings: legacy guard $(($(msgs "$LEGACY_MSG") - n1)), new guard $(($(msgs "$NEW_MSG") - n2))"
 	[ $both -eq 0 ] && pass "no race left both cores loaded ($RACES races)" ||
 	    bad "$both of $RACES races left both cores loaded"
-	[ $((legacy + new)) -gt 0 ] && pass "races loaded a core ($legacy legacy, $new new)" ||
-	    bad "no race loaded any core"
+	[ $legacy -gt 0 ] && [ $new -gt 0 ] && pass "races were won by both cores ($legacy legacy, $new new)" ||
+	    bad "the races were not exercised: $legacy won by the legacy core, $new by the new one"
 	unload_all
 }
 
