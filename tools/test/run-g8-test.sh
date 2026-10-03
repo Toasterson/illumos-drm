@@ -62,7 +62,7 @@ modid() {
 
 gem_kstats() {
 	step sh -c "kstat -p 'cdrmnull:*:gem' 'rdrmnull:*:gem' 'virtio_gpu:*:gem' |
-	    grep -E ':(objects|umem_bytes|dma_segments|handles|attached|names|mappings)	'"
+	    grep -E ':(objects|umem_bytes|dma_segments|handles|attached|opens|names|mappings)	'"
 }
 
 kernel() {
@@ -125,6 +125,10 @@ kernel() {
 }
 
 reproducer() {
+	if [ ! -s g8-nodes ]; then
+		echo "FAIL no g8-nodes: run \"KEEP=1 run-g8-test.sh kernel\" first"
+		exit 1
+	fi
 	set -- $(cat g8-nodes)
 	step sh -c 'pkg list -H x11/library/mesa 2>&1'
 	step gcc -m64 -Wall -D_XOPEN_SOURCE=600 -D__EXTENSIONS__ -o dmabuf_import_test \

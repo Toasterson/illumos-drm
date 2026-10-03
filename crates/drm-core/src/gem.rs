@@ -36,9 +36,13 @@
 //! `mmap(2)` calls in progress (`pending`). Each object has a mutex for its
 //! list of mappings. The order is: a file's hook lock (held while the
 //! driver's [`GemObject::handle_opened`] and [`GemObject::handle_closed`]
-//! run), `names`, then a file's handle table, then an object's mappings; `offsets`, `files` and `pending` are
-//! leaves that are never held while taking another lock. No reference is
-//! dropped with a lock held, because destroying an object takes `offsets`.
+//! run), `names`, then a file's handle table, then an object's mappings;
+//! `offsets`, `files` and `pending` are leaves that are never held while
+//! taking another lock. The core drops no reference with a lock held,
+//! because destroying an object takes `offsets`; only a driver's hooks and
+//! its `gem_prime_import`, which run with the file's hook lock held, may,
+//! because destroying an object never takes a hook lock (an object with a
+//! handle is not destroyed).
 //! [`crate::objects`] states the rules for handles and names and is tested
 //! on the host from several threads with the same order.
 //!
@@ -1079,6 +1083,9 @@ ddi::named_kstat! {
         /// its close hook has not: the objects each file holds at least one
         /// handle to (virtio-gpu: resources attached to a file's context).
         pub attached: u64,
+        /// Calls of the driver's open hook so far (a re-import, or a second
+        /// handle of a file, makes none).
+        pub opens: u64,
         /// FLINK names.
         pub names: u64,
         /// Objects with an mmap offset.
@@ -1105,6 +1112,7 @@ struct Stats {
     segments: AtomicU64,
     handles: AtomicU64,
     attached: AtomicU64,
+    opens: AtomicU64,
     names: AtomicU64,
     offsets: AtomicU64,
     mappings: AtomicU64,
@@ -1127,6 +1135,8 @@ pub struct GemStats {
     pub handles: u64,
     /// File and object pairs the driver's open hook ran for.
     pub attached: u64,
+    /// Calls of the driver's open hook so far.
+    pub opens: u64,
     /// FLINK names.
     pub names: u64,
     /// Objects with an mmap offset.
@@ -1160,6 +1170,7 @@ struct FileHooks<'a> {
 
 impl<O: GemObject> objects::Hooks<GemRef<O>> for FileHooks<'_> {
     fn opened(&self, obj: &GemRef<O>) -> Result<(), Errno> {
+        self.stats.opens.fetch_add(1, Ordering::Relaxed);
         obj.object().handle_opened(self.clone, self.ctx)?;
         self.stats.attached.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1336,6 +1347,7 @@ impl<O: GemObject> GemCore<O> {
             dma_segments: l(&s.segments),
             handles: l(&s.handles),
             attached: l(&s.attached),
+            opens: l(&s.opens),
             names: l(&s.names),
             offsets: l(&s.offsets),
             mappings: l(&s.mappings),
@@ -1357,6 +1369,7 @@ impl<O: GemObject> GemCore<O> {
         g.dma_segments.set(s.dma_segments);
         g.handles.set(s.handles);
         g.attached.set(s.attached);
+        g.opens.set(s.opens);
         g.names.set(s.names);
         g.offsets.set(s.offsets);
         g.mappings.set(s.mappings);
@@ -1478,8 +1491,11 @@ impl<O: GemObject> GemCore<O> {
         }
         if let Some(fg) = fg {
             let hooks = self.hooks(clone, ctx);
-            // References are dropped with no lock held.
-            while let Some((r, name_ref)) = fg.table.lock().pop(&self.names, &hooks) {
+            loop {
+                // The hook lock is released at the end of the statement:
+                // the references are dropped with no lock held.
+                let popped = fg.table.lock().pop(&self.names, &hooks);
+                let Some((r, name_ref)) = popped else { break };
                 self.handle_released(r, name_ref, ctx);
             }
             drop(fg);
@@ -1572,25 +1588,30 @@ impl<O: GemObject> GemCore<O> {
     /// Adds a new handle to `obj` in file `clone` with the file's hook lock
     /// `l` held ([`objects::Locked::add`]: the driver's open hook runs only
     /// if the file holds no handle to the object yet). The reference moves
-    /// into the table or is dropped.
+    /// into the table, or comes back with the error for [`GemCore::added`]
+    /// to drop once the lock is released.
     fn add_locked(
         &self,
         clone: CloneId,
         l: &objects::Locked<'_, GemRef<O>, KIdSpace>,
         obj: GemRef<O>,
         ctx: &Sleepable,
-    ) -> Result<u32, Errno> {
-        match l.add(&self.names, obj, &self.hooks(clone, ctx), ctx) {
-            Ok(h) => {
-                self.stats.handles.fetch_add(1, Ordering::Relaxed);
-                self.publish();
-                Ok(h)
-            }
-            Err((obj, e)) => {
-                obj.put(ctx);
-                Err(e)
-            }
+    ) -> Result<u32, (GemRef<O>, Errno)> {
+        let r = l.add(&self.names, obj, &self.hooks(clone, ctx), ctx);
+        if r.is_ok() {
+            self.stats.handles.fetch_add(1, Ordering::Relaxed);
+            self.publish();
         }
+        r
+    }
+
+    /// The handle [`GemCore::add_locked`] made, or its error after dropping
+    /// the reference that came back; no lock held.
+    fn added(&self, r: Result<u32, (GemRef<O>, Errno)>, ctx: &Sleepable) -> Result<u32, Errno> {
+        r.map_err(|(obj, e)| {
+            obj.put(ctx);
+            e
+        })
     }
 
     /// Creates a handle to `obj` in file `clone` and returns it, a new one
@@ -1606,8 +1627,9 @@ impl<O: GemObject> GemCore<O> {
                 return Err(e);
             }
         };
-        let l = fg.table.lock();
-        self.add_locked(clone, &l, obj, ctx)
+        // The guard is a temporary: the lock is released with the statement.
+        let r = self.add_locked(clone, &fg.table.lock(), obj, ctx);
+        self.added(r, ctx)
     }
 
     /// Looks up a handle of file `clone` (`ENOENT` if there is none).
@@ -1666,13 +1688,16 @@ impl<O: GemObject> GemCore<O> {
     pub fn open_name(&self, clone: CloneId, name: u32, ctx: &Sleepable) -> Result<(u32, u64), Errno> {
         self.housekeeping(ctx);
         let fg = self.file(clone)?;
-        let l = fg.table.lock();
-        // The reference keeps the object alive if its name goes away while
-        // the driver's hook runs, as a concurrent GEM_CLOSE of another
-        // file's last handle could make it.
-        let o = objects::open(&self.names.lock(), name)?;
-        let size = o.size() as u64;
-        let h = self.add_locked(clone, &l, o, ctx)?;
+        let (r, size) = {
+            let l = fg.table.lock();
+            // The reference keeps the object alive if its name goes away
+            // while the driver's hook runs, as a concurrent GEM_CLOSE of
+            // another file's last handle could make it.
+            let o = objects::open(&self.names.lock(), name)?;
+            let size = o.size() as u64;
+            (self.add_locked(clone, &l, o, ctx), size)
+        };
+        let h = self.added(r, ctx)?;
         Ok((h, size))
     }
 
@@ -1694,12 +1719,15 @@ impl<O: GemObject> GemCore<O> {
         ctx: &Sleepable,
     ) -> Result<u32, Errno> {
         let fg = self.file(clone)?;
-        let l = fg.table.lock();
-        if let Some(h) = l.find(find) {
-            return Ok(h);
-        }
-        let obj = make(ctx)?;
-        self.add_locked(clone, &l, obj, ctx)
+        let r = {
+            let l = fg.table.lock();
+            if let Some(h) = l.find(find) {
+                return Ok(h);
+            }
+            let obj = make(ctx)?;
+            self.add_locked(clone, &l, obj, ctx)
+        };
+        self.added(r, ctx)
     }
 
     /// Returns the object's fake mmap offset, assigning one on first use.

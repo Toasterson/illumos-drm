@@ -18,7 +18,9 @@
  * For each device given, on dumb buffers:
  *   - a file imports its own buffer twice: the same handle both times, and
  *     the gem kstat's handles, attached, objects, umem_bytes and
- *     dma_segments do not change; the buffer's mapping keeps its contents;
+ *     dma_segments do not change, nor does opens (the driver's open hook
+ *     calls; the code before G8 called open and then close); the buffer's
+ *     mapping keeps its contents;
  *   - a second file imports it twice: one handle, attached + 1;
  *   - GEM_OPEN of the buffer's name in the first file gives a second
  *     handle (as in Linux) with no new attachment, and closing it leaves the
@@ -108,17 +110,22 @@ struct dev {
 
 struct gem {
 	int ok;
-	uint64_t objects, umem_bytes, dma_segments, handles, attached;
+	uint64_t objects, umem_bytes, dma_segments, handles, attached, opens;
 };
+
+/* gem_delta's opens argument for "not checked". */
+#define	ANY	INT64_MIN
 
 static struct gem
 gem_stats(const char *drv)
 {
 	static const char *const names[] = {
-		"objects", "umem_bytes", "dma_segments", "handles", "attached"
+		"objects", "umem_bytes", "dma_segments", "handles", "attached", "opens"
 	};
 	struct gem g;
-	uint64_t *out[] = { &g.objects, &g.umem_bytes, &g.dma_segments, &g.handles, &g.attached };
+	uint64_t *out[] = {
+		&g.objects, &g.umem_bytes, &g.dma_segments, &g.handles, &g.attached, &g.opens
+	};
 	kstat_ctl_t *kc;
 	kstat_t *ks;
 
@@ -128,7 +135,7 @@ gem_stats(const char *drv)
 	if ((ks = kstat_lookup(kc, (char *)drv, -1, "gem")) != NULL &&
 	    kstat_read(kc, ks, NULL) != -1) {
 		g.ok = 1;
-		for (int i = 0; i < 5; i++) {
+		for (int i = 0; i < 6; i++) {
 			kstat_named_t *kn = kstat_data_lookup(ks, (char *)names[i]);
 
 			if (kn == NULL) {
@@ -147,17 +154,25 @@ static void
 print_gem(const char *drv, const char *when, struct gem *g)
 {
 	(void) printf("INFO %s gem %s: objects %llu umem_bytes %llu dma_segments %llu handles %llu "
-	    "attached %llu\n", drv, when, (unsigned long long)g->objects,
+	    "attached %llu opens %llu\n", drv, when, (unsigned long long)g->objects,
 	    (unsigned long long)g->umem_bytes, (unsigned long long)g->dma_segments,
-	    (unsigned long long)g->handles, (unsigned long long)g->attached);
+	    (unsigned long long)g->handles, (unsigned long long)g->attached,
+	    (unsigned long long)g->opens);
 }
 
-/* Whether the counters of `b` differ from `a` by exactly the deltas. */
+/*
+ * Whether the counters of `b` differ from `a` by exactly the deltas;
+ * `opens` (the driver's open hook calls, cumulative) may be ANY. On the
+ * code before G8 a re-import ran the open hook and undid it with the close
+ * hook: `attached` stayed, `opens` grew.
+ */
 static int
-gem_delta(struct gem *a, struct gem *b, int64_t objects, int64_t handles, int64_t attached)
+gem_delta(struct gem *a, struct gem *b, int64_t objects, int64_t handles, int64_t attached,
+    int64_t opens)
 {
 	return (a->ok && b->ok && b->objects == a->objects + objects &&
-	    b->handles == a->handles + handles && b->attached == a->attached + attached);
+	    b->handles == a->handles + handles && b->attached == a->attached + attached &&
+	    (opens == ANY || b->opens == a->opens + opens));
 }
 
 /* --- GEM helpers ---------------------------------------------------------- */
@@ -262,8 +277,8 @@ reimport(struct dev *d, struct dev *all, int n)
 	(void) printf("--- %s: re-import of a buffer the file holds\n", d->name);
 	g0 = gem_stats(d->name);
 	print_gem(d->name, "at the start", &g0);
-	check(g0.ok, "%s: the gem kstat has objects, umem_bytes, dma_segments, handles, attached",
-	    d->name);
+	check(g0.ok, "%s: the gem kstat has objects, umem_bytes, dma_segments, handles, attached, "
+	    "opens", d->name);
 	h = dumb(d->fd, &size);
 	check(h != 0, "%s: a 128x64 dumb buffer", d->name);
 	if (h == 0)
@@ -277,7 +292,8 @@ reimport(struct dev *d, struct dev *all, int n)
 	}
 	pattern(p, words, 0x67000000u);
 	g1 = gem_stats(d->name);
-	check(gem_delta(&g0, &g1, 1, 1, 1), "%s: one object, one handle, one attachment", d->name);
+	check(gem_delta(&g0, &g1, 1, 1, 1, 1), "%s: one object, one handle, one attachment, one open",
+	    d->name);
 	dfd = export(d->fd, h);
 	check(dfd >= 0, "%s: export it (PRIME_HANDLE_TO_FD)", d->name);
 	if (dfd < 0) {
@@ -291,10 +307,10 @@ reimport(struct dev *d, struct dev *all, int n)
 	check(import(d->fd, dfd) == h, "%s: and again: the same handle", d->name);
 	g2 = gem_stats(d->name);
 	print_gem(d->name, "after two self-imports", &g2);
-	check(gem_delta(&g1, &g2, 0, 0, 0) && g2.umem_bytes == g1.umem_bytes &&
+	check(gem_delta(&g1, &g2, 0, 0, 0, 0) && g2.umem_bytes == g1.umem_bytes &&
 	    g2.dma_segments == g1.dma_segments,
-	    "%s: kstat: no handle, attachment, object, memory or segment added or taken away",
-	    d->name);
+	    "%s: kstat: no handle, attachment, object, memory or segment added or taken away, "
+	    "no open hook called", d->name);
 	check(pattern_ok(p, words, 0x67000000u), "%s: the mapping still shows the buffer", d->name);
 
 	/* A second file imports it twice. */
@@ -306,11 +322,13 @@ reimport(struct dev *d, struct dev *all, int n)
 		check(hb != 0 && hb2 == hb, "%s: the second file imports it twice: one handle (%u, %u)",
 		    d->name, hb, hb2);
 		g2 = gem_stats(d->name);
-		check(gem_delta(&g1, &g2, 0, 1, 1), "%s: kstat: one more handle and attachment", d->name);
+		check(gem_delta(&g1, &g2, 0, 1, 1, 1), "%s: kstat: one more handle, attachment and "
+		    "open", d->name);
 		(void) close(f2);
 		g2 = gem_stats(d->name);
-		check(gem_delta(&g1, &g2, 0, 0, 0), "%s: closing the second file takes them away",
+		check(gem_delta(&g1, &g2, 0, 0, 0, 1), "%s: closing the second file takes them away",
 		    d->name);
+		g1 = g2;
 	}
 
 	/* GEM_OPEN in the creating file: a second handle, no attachment. */
@@ -326,14 +344,15 @@ reimport(struct dev *d, struct dev *all, int n)
 	check(h2 != 0 && h2 != h, "%s: GEM_OPEN in the same file gives a second handle %u (as Linux)",
 	    d->name, h2);
 	g2 = gem_stats(d->name);
-	check(gem_delta(&g1, &g2, 0, 1, 0), "%s: kstat: one more handle, no new attachment", d->name);
+	check(gem_delta(&g1, &g2, 0, 1, 0, 0), "%s: kstat: one more handle, no new attachment or "
+	    "open", d->name);
 	hb = import(d->fd, dfd);
 	check(hb == h || hb == h2, "%s: an import with two handles finds one of them (%u)", d->name,
 	    hb);
 	check(h2 != 0 && gem_close(d->fd, h2) == 0, "%s: GEM_CLOSE of the second handle", d->name);
 	g2 = gem_stats(d->name);
-	check(gem_delta(&g1, &g2, 0, 0, 0), "%s: kstat: the attachment stays with the first handle",
-	    d->name);
+	check(gem_delta(&g1, &g2, 0, 0, 0, 0), "%s: kstat: the attachment stays with the first "
+	    "handle", d->name);
 
 	/* MODE_GETFB, on devices with mode setting. */
 	{
@@ -353,12 +372,13 @@ reimport(struct dev *d, struct dev *all, int n)
 			check(hg != 0 && hg != h, "%s: MODE_GETFB gives a new handle %u (as Linux)",
 			    d->name, hg);
 			g2 = gem_stats(d->name);
-			check(gem_delta(&g1, &g2, 0, 1, 0), "%s: kstat: no new attachment", d->name);
+			check(gem_delta(&g1, &g2, 0, 1, 0, 0), "%s: kstat: no new attachment or open",
+			    d->name);
 			check(hg != 0 && gem_close(d->fd, hg) == 0, "%s: close the MODE_GETFB handle",
 			    d->name);
 			check(drmModeRmFB(d->fd, fb) == 0, "%s: RMFB", d->name);
 			g2 = gem_stats(d->name);
-			check(gem_delta(&g1, &g2, 0, 0, 0), "%s: kstat: the attachment stays", d->name);
+			check(gem_delta(&g1, &g2, 0, 0, 0, 0), "%s: kstat: the attachment stays", d->name);
 		}
 	}
 
@@ -376,8 +396,8 @@ reimport(struct dev *d, struct dev *all, int n)
 		check(ho != 0 && ho2 == ho, "%s imports %s's buffer twice: one handle (%u, %u)",
 		    o->name, d->name, ho, ho2);
 		o2 = gem_stats(o->name);
-		check(gem_delta(&o1, &o2, 1, 1, 1),
-		    "%s: kstat: one import object, one handle, one attachment", o->name);
+		check(gem_delta(&o1, &o2, 1, 1, 1, 1),
+		    "%s: kstat: one import object, one handle, one attachment, one open", o->name);
 		q = ho != 0 ? map_dumb(o->fd, ho, size) : NULL;
 		check(q != NULL && pattern_ok(q, words, 0x67000000u),
 		    "%s maps the import and sees %s's buffer", o->name, d->name);
@@ -385,9 +405,9 @@ reimport(struct dev *d, struct dev *all, int n)
 			(void) munmap((void *)q, size);
 		check(ho != 0 && gem_close(o->fd, ho) == 0, "%s: close the import", o->name);
 		o2 = gem_stats(o->name);
-		check(gem_delta(&o1, &o2, 0, 0, 0), "%s: kstat: back to the start", o->name);
+		check(gem_delta(&o1, &o2, 0, 0, 0, 1), "%s: kstat: back to the start", o->name);
 		g2 = gem_stats(d->name);
-		check(gem_delta(&g1, &g2, 0, 0, 0), "%s: kstat: unchanged by %s's import", d->name,
+		check(gem_delta(&g1, &g2, 0, 0, 0, 0), "%s: kstat: unchanged by %s's import", d->name,
 		    o->name);
 	}
 
@@ -407,7 +427,7 @@ reimport(struct dev *d, struct dev *all, int n)
 	check(gem_close(d->fd, h) == 0, "%s: close the buffer", d->name);
 	g2 = gem_stats(d->name);
 	print_gem(d->name, "at the end", &g2);
-	check(gem_delta(&g0, &g2, 0, 0, 0), "%s: kstat: back to the start", d->name);
+	check(gem_delta(&g0, &g2, 0, 0, 0, ANY), "%s: kstat: back to the start", d->name);
 }
 
 /* --- virtio_gpu with virgl: the DRI3 case ---------------------------------- */
@@ -645,8 +665,8 @@ dri3(struct dev *d)
 	    hy, hy2);
 	g2 = gem_stats(d->name);
 	print_gem(d->name, "after the imports", &g2);
-	check(gem_delta(&g1, &g2, 0, 1, 1), "%s: kstat: only the client's handle and attachment "
-	    "were added", d->name);
+	check(gem_delta(&g1, &g2, 0, 1, 1, 1), "%s: kstat: only the client's handle, attachment "
+	    "and open were added", d->name);
 
 	/* The server's context still has the texture. */
 	check(clear(d->fd, bo, res, 2, 0, 1, 0) == 0, "%s: the server clears it green through its "
@@ -679,7 +699,8 @@ dri3(struct dev *d)
 	if (have_mode) {
 		uint32_t handles[4] = { bo }, pitches[4] = { w * 4 }, offsets[4] = { 0 };
 
-		(void) drmSetMaster(d->fd);
+		if (drmSetMaster(d->fd) != 0)
+			(void) printf("INFO %s: SET_MASTER: %s\n", d->name, strerror(errno));
 		saved = drmModeGetCrtc(d->fd, crtc);
 		e = drmModeAddFB2(d->fd, w, h, DRM_FORMAT_XRGB8888, handles, pitches, offsets,
 		    &fb, 0);
@@ -688,9 +709,10 @@ dri3(struct dev *d)
 			check(clear(d->fd, bo, res, 3, 0, 0.5f, 1) == 0, "%s: the server clears it "
 			    "azure (0, 128, 255)", d->name);
 			e = drmModeSetCrtc(d->fd, crtc, fb, 0, 0, &conn, 1, &mode);
-			check(e == 0, "%s: SETCRTC shows it: %s", d->name, strerror(-e));
+			check(e == 0, "%s: SETCRTC shows it: %s", d->name, e == 0 ? "ok" : strerror(-e));
 			e = drmModeDirtyFB(d->fd, fb, NULL, 0);
-			check(e == 0, "%s: DIRTYFB (RESOURCE_FLUSH): %s", d->name, strerror(-e));
+			check(e == 0, "%s: DIRTYFB (RESOURCE_FLUSH): %s", d->name,
+			    e == 0 ? "ok" : strerror(-e));
 			expect_colour(d->fd, bo, map, w, h, 0xff, 0x80, 0, "the shown texture reads "
 			    "back azure");
 			if (getenv("G8_HOLD") != NULL) {
@@ -732,7 +754,7 @@ out:
 	(void) munmap((void *)map, size);
 	check(gem_close(d->fd, bo) == 0, "%s: the server closes the texture", d->name);
 	g2 = gem_stats(d->name);
-	check(gem_delta(&g0, &g2, 0, 0, 0), "%s: kstat: back to the start", d->name);
+	check(gem_delta(&g0, &g2, 0, 0, 0, ANY), "%s: kstat: back to the start", d->name);
 }
 
 int

@@ -44,13 +44,17 @@
 //!
 //! A file's hook lock comes first; the driver's hooks run with it held
 //! and no other lock of this module. The name table lock is taken before
-//! a file's handle table lock, never after: [`handle_create`] runs with both held (name table first), and
-//! closing a handle removes it with only the file's lock held
-//! ([`handle_delete`]) and then accounts for it with only the name table
-//! lock held ([`handle_released`]). References that come out of the tables
-//! are dropped by the caller after both locks are released, because
-//! destroying an object takes other locks. The functions here never drop a
-//! reference themselves.
+//! a file's handle table lock, never after: [`handle_create`] runs with
+//! both held (name table first), and closing a handle removes it with only
+//! the file's lock held ([`handle_delete`]) and then accounts for it with
+//! only the name table lock held ([`handle_released`]). References that
+//! come out of the tables are dropped by the caller after the locks are
+//! released, because destroying an object takes other locks. The functions
+//! here never drop a reference themselves.
+//!
+//! Adding a handle scans the file's table only for an object that has
+//! handles somewhere, and removing one only if the object still has
+//! handles, so creating and closing a file's own buffers stays cheap.
 //!
 //! The tests drive these rules from eight threads with the same locking
 //! and check the invariants after every step.
@@ -281,7 +285,9 @@ impl<R: ObjRef, B: IdAlloc> Locked<'_, R, B> {
         hooks: &impl Hooks<R>,
         ctx: &Sleepable,
     ) -> Result<u32, (R, Errno)> {
-        let first = !self.holds(&obj);
+        // An object without handles is held by no file; only an object
+        // with handles needs the scan of the file's table.
+        let first = obj.common().handle_count() == 0 || !self.holds(&obj);
         if first && let Err(e) = hooks.opened(&obj) {
             return Err((obj, e));
         }
@@ -322,7 +328,9 @@ impl<R: ObjRef, B: IdAlloc> Locked<'_, R, B> {
 
     fn released<A: IdAlloc>(&self, names: &KMutex<IdMap<R, A>>, r: R, hooks: &impl Hooks<R>) -> (R, Option<R>) {
         let name_ref = handle_released(&mut names.lock(), &r);
-        if !self.holds(&r) {
+        // The file's table cannot change while its hook lock is held: with
+        // no handle left anywhere, it holds none either.
+        if r.common().handle_count() == 0 || !self.holds(&r) {
             hooks.closed(&r);
         }
         (r, name_ref)

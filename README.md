@@ -720,8 +720,9 @@ file, `devmap(9E)` maps a dma-buf, and imports find the object by minor.
 [docs/anon-fd.md](docs/anon-fd.md) gives the design, the alternatives
 and why. `PRIME_HANDLE_TO_FD` honours `DRM_CLOEXEC` and `DRM_RDWR` and
 gives one dma-buf per object; `PRIME_FD_TO_HANDLE` returns the calling
-file's existing handle or creates one, for dma-bufs of the same device
-(`ENOTSUP` for another device of the driver, because importing across
+file's existing handle (with no driver hook, since G8) or creates one,
+for dma-bufs of the same device (`ENOTSUP` for another device of the
+driver, because importing across
 devices needs an attach and a scatter/gather mapping no driver has yet;
 `EINVAL` for other files). Sync files answer `SYNC_IOC_MERGE` and
 `SYNC_IOC_FILE_INFO`, dma-bufs `DMA_BUF_IOCTL_SYNC`: the start of CPU
@@ -1139,7 +1140,43 @@ Linux. PRIME import between devices of
 different drivers is supported and returns the exporter's object (one
 handle per object per file), which R2 refused with `ENOTSUP`; a C
 driver's import of another device's buffer exports that buffer again,
-as on Linux.
+as on Linux. An object's `funcs->open` and `funcs->close` run once per
+file and object (the file's first handle in, its last handle out), not
+once per handle as on Linux; see *Driver hooks per file and object (G8)*.
+
+**Driver hooks per file and object (G8).** Until G8,
+`PRIME_FD_TO_HANDLE` of an object the calling file held already ran the
+driver's open hook before looking for the file's handle and, on finding
+it, undid the hook with the close hook. `virtio_gpu`'s hooks attach the
+resource to the file's virgl context and detach it, and the host does not
+count attachments, so the undo detached the resource from the context of
+the handle the file already had: after Xorg's DRI3 `PixmapFromBuffer` of
+its own front buffer, glamor's context lost the buffer (virglrenderer:
+"Illegal resource") and the screen stayed black (G3 and G4 found it with
+Mesa's dma-buf import). Linux's per-handle callbacks would have the same
+effect for a second handle from `GEM_OPEN` or `MODE_GETFB` closed again
+(Linux's virtio-gpu detaches on every close). Now each file's handle
+table (`drm_core::objects::FileTable`) calls the open hook when the file
+gets its first handle to an object and the close hook when its last one
+goes, under a per-file hook lock held across the decision, the hook and
+the change of the table (Linux's per-file PRIME lock). `PRIME_FD_TO_HANDLE`
+looks for the file's handle under that lock first, for buffers of the
+same device and for another driver's (whose import, `gem_prime_import`,
+is now made under the lock too, so two threads of one file importing one
+buffer get one import), and runs no hook when it finds one. `GEM_OPEN`,
+`MODE_GETFB` and `drm_gem_handle_create()` still make a second handle when
+the file holds the object, as Linux does (R1's test checks it, and
+userland that opens a name, reads the size and closes the handle would
+otherwise close its own buffer), but run no hook for it, so closing it
+leaves the attachment alone. A handle creation that fails after the open
+hook ran undoes only that hook; one that fails for an object the file
+held runs none. Drivers that count their open and close calls, as
+Linux's amdgpu, radeon and nouveau do, see the same balance. The `gem`
+kstat counts the file and object pairs whose open hook ran (`attached`)
+and the open hook's calls (`opens`). The host tests in
+`crates/drm-core/src/objects.rs` drive the table from eight threads with
+hooks that assert they alternate; they fail with the old behaviour and
+without the hook lock.
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
@@ -1175,10 +1212,12 @@ entries (`RESOURCE_ATTACH_BACKING`, or the entries of
 (32 bits per pixel only, rows exactly `width` pixels, as the device
 copies 2D resources with their own stride), through the new
 `Driver::dumb_object` hook. With virgl, `RESOURCE_CREATE` makes 3D
-resources; a handle attaches the resource to the file's rendering context
-and removing it detaches it (the new `GemObject::handle_opened` and
-`handle_closed` hooks, Linux's GEM open and close callbacks), and a file's
-context is destroyed in the new `Driver::file_close` hook. An object's
+resources; a file's first handle to an object attaches the resource to the
+file's rendering context and removing its last one detaches it (the new
+`GemObject::handle_opened` and `handle_closed` hooks, Linux's GEM open and
+close callbacks, called once per file and object since G8: see *Driver
+hooks per file and object (G8)*), and a file's context is destroyed in the
+new `Driver::file_close` hook. An object's
 destruction (the new `GemObject::release` hook) sends `RESOURCE_UNREF` and
 frees the memory only after the device answered; without an answer the
 memory is leaked with a warning.
