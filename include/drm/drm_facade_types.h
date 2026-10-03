@@ -27,6 +27,8 @@
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
 #include <sys/stddef.h>
+#include <sys/time.h>
+#include <sys/debug.h>
 
 #ifdef	__cplusplus
 extern "C" {

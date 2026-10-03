@@ -65,6 +65,8 @@ extern crate alloc;
 pub mod anon_fd;
 #[cfg(feature = "kernel")]
 pub mod caps;
+#[cfg(feature = "kernel")]
+pub mod cfence;
 pub mod defer;
 #[cfg(not(test))]
 #[cfg(feature = "kernel")]

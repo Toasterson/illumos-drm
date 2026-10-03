@@ -192,6 +192,95 @@ pub fn put<T: Deferrable>(r: KArc<T>, ctx: Ctx<'_>, list: &DeferList<T>) -> Put 
     }
 }
 
+/// A deferred release of memory the core does not own as a [`KArc`]: a
+/// structure of a driver's (a C `struct dma_fence`) whose release must run
+/// in thread context. The node lives inside that structure (in its private
+/// tail), so parking it needs no memory, and `run` is called once, by the
+/// drain, with the node's address; it may free the memory around the node.
+#[repr(C)]
+pub struct RawDefer {
+    next: AtomicPtr<RawDefer>,
+    run: Option<unsafe fn(NonNull<RawDefer>, &Sleepable)>,
+}
+
+impl RawDefer {
+    /// The node's size, which the structures that embed one reserve.
+    pub const SIZE: usize = core::mem::size_of::<RawDefer>();
+}
+
+/// A lock-free list of [`RawDefer`] nodes, pushed from any context and
+/// drained in thread context.
+pub struct RawDeferList {
+    head: AtomicPtr<RawDefer>,
+}
+
+impl RawDeferList {
+    /// An empty list.
+    pub const fn new() -> RawDeferList {
+        RawDeferList { head: AtomicPtr::new(ptr::null_mut()) }
+    }
+
+    /// Parks `node`, to be passed to `run` by the next [`RawDeferList::drain`].
+    /// Any context: one compare-and-swap loop, no memory.
+    ///
+    /// # Safety
+    /// `node` points to writable memory of [`RawDefer::SIZE`] bytes, aligned
+    /// for a pointer, that is on no list and stays valid until `run` has
+    /// been called with it; `run` may be called on any thread.
+    pub unsafe fn push(&self, node: NonNull<RawDefer>, run: unsafe fn(NonNull<RawDefer>, &Sleepable)) {
+        // SAFETY: the caller's contract; the node is ours until the drain.
+        unsafe { ptr::write(node.as_ptr(), RawDefer { next: AtomicPtr::new(ptr::null_mut()), run: Some(run) }) };
+        let mut head = self.head.load(Ordering::Relaxed);
+        loop {
+            // SAFETY: as above.
+            unsafe { node.as_ref() }.next.store(head, Ordering::Relaxed);
+            match self.head.compare_exchange_weak(head, node.as_ptr(), Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(h) => head = h,
+            }
+        }
+    }
+
+    /// Whether nothing is parked.
+    pub fn is_empty(&self) -> bool {
+        self.head.load(Ordering::Acquire).is_null()
+    }
+
+    /// Runs every parked node, oldest first, and returns how many ran. A
+    /// `run` may park new nodes; they wait for the next drain. Thread
+    /// context.
+    pub fn drain(&self, ctx: &Sleepable) -> usize {
+        let mut rev: *mut RawDefer = ptr::null_mut();
+        let mut cur = self.head.swap(ptr::null_mut(), Ordering::Acquire);
+        // Reverse into pushing order.
+        while let Some(n) = NonNull::new(cur) {
+            // SAFETY: parked nodes stay valid until run.
+            cur = unsafe { n.as_ref() }.next.load(Ordering::Relaxed);
+            // SAFETY: as above.
+            unsafe { n.as_ref() }.next.store(rev, Ordering::Relaxed);
+            rev = n.as_ptr();
+        }
+        let mut ran = 0;
+        while let Some(n) = NonNull::new(rev) {
+            // SAFETY: as above; read before `run`, which may free the node.
+            let (next, run) = unsafe { (n.as_ref().next.load(Ordering::Relaxed), n.as_ref().run) };
+            rev = next;
+            if let Some(run) = run {
+                // SAFETY: the pusher's contract.
+                unsafe { run(n, ctx) };
+            }
+            ran += 1;
+        }
+        ran
+    }
+}
+
+impl Default for RawDeferList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -311,5 +400,59 @@ mod tests {
         assert_eq!(dropped.load(Ordering::SeqCst) as usize, OBJECTS);
         assert!(!bad.load(Ordering::SeqCst), "an object was destroyed in interrupt context");
         assert!(deferred.load(Ordering::SeqCst) > 0, "the test never exercised deferral");
+    }
+
+    #[repr(C)]
+    struct RawItem {
+        node: [u64; 2],
+        id: usize,
+        ran: &'static AtomicU32,
+        order: &'static std::sync::Mutex<Vec<usize>>,
+    }
+
+    unsafe fn raw_run(node: NonNull<RawDefer>, _ctx: &Sleepable) {
+        // SAFETY: the node is the first field of a boxed RawItem.
+        let item = unsafe { std::boxed::Box::from_raw(node.as_ptr() as *mut RawItem) };
+        item.order.lock().unwrap().push(item.id);
+        item.ran.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Nodes parked from several threads all run once, each thread's in
+    /// the order it parked them; a run may free its node.
+    #[test]
+    fn raw_defer_runs_every_node_once() {
+        let ran: &'static AtomicU32 = std::boxed::Box::leak(std::boxed::Box::new(AtomicU32::new(0)));
+        let order: &'static std::sync::Mutex<Vec<usize>> =
+            std::boxed::Box::leak(std::boxed::Box::new(std::sync::Mutex::new(Vec::new())));
+        let list: &'static RawDeferList = std::boxed::Box::leak(std::boxed::Box::new(RawDeferList::new()));
+        let threads: Vec<_> = (0..4)
+            .map(|t| {
+                thread::spawn(move || {
+                    for i in 0..250 {
+                        let item = std::boxed::Box::new(RawItem { node: [0; 2], id: t * 1000 + i, ran, order });
+                        let p = NonNull::new(std::boxed::Box::into_raw(item) as *mut RawDefer).unwrap();
+                        // SAFETY: a boxed item freed by raw_run.
+                        unsafe { list.push(p, raw_run) };
+                    }
+                })
+            })
+            .collect();
+        let mut drained = 0;
+        while drained < 1000 {
+            drained += list.drain(&sleep());
+            thread::yield_now();
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+        drained += list.drain(&sleep());
+        assert_eq!(drained, 1000);
+        assert_eq!(ran.load(Ordering::SeqCst), 1000);
+        assert!(list.is_empty());
+        let o = order.lock().unwrap();
+        for t in 0..4 {
+            let mine: Vec<usize> = o.iter().copied().filter(|id| id / 1000 == t).collect();
+            assert!(mine.windows(2).all(|w| w[0] < w[1]), "thread {t}'s nodes in order");
+        }
     }
 }

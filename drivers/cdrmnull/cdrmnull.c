@@ -1006,6 +1006,7 @@ struct cdrmnull_cbt {
 	struct dma_fence_cb cb;
 	volatile uint32_t ran;
 	boolean_t put_fence;
+	int error;		/* the fence's error when it ran */
 };
 
 static void
@@ -1014,6 +1015,7 @@ cdrmnull_cbt_func(struct dma_fence *fence, struct dma_fence_cb *cb)
 	struct cdrmnull_cbt *t = container_of(cb, struct cdrmnull_cbt, cb);
 
 	t->ran++;
+	t->error = fence->error;
 	/* The last reference to the structure of this very fence. */
 	if (t->put_fence)
 		dma_fence_put(fence);
@@ -1092,14 +1094,19 @@ cdrmnull_ioctl_fence_selftest(struct drm_device *dev, void *data,
 		dma_fence_put(f);
 	}
 
-	/* RELEASED: f goes with its callback added. */
+	/*
+	 * RELEASED: f goes with its callback added: the callback runs once,
+	 * with -EDEADLK, when f is released (Linux's rule, with a warning),
+	 * and not again when the core fence signals through g.
+	 */
 	bzero(t, 2 * sizeof (*t));
 	if ((f = cdrmnull_fence_pair(dev, file, so, a->syncobj, &g)) != NULL) {
 		if (dma_fence_add_callback(f, &t[0].cb, cdrmnull_cbt_func) ==
 		    0) {
 			dma_fence_put(f);
+			drm_illumos_fence_barrier();
 			dma_fence_signal(g);
-			if (t[0].ran == 0)
+			if (t[0].ran == 1 && t[0].error == -EDEADLK)
 				passed |= CDRMNULL_FENCE_T_RELEASED;
 		} else {
 			dma_fence_put(f);
@@ -1108,7 +1115,11 @@ cdrmnull_ioctl_fence_selftest(struct drm_device *dev, void *data,
 		drm_syncobj_replace_fence(so, NULL);
 	}
 
-	/* QUEUED: the first callback releases f; the second never runs. */
+	/*
+	 * QUEUED: the first callback drops the last reference to f; the
+	 * release waits (it is queued: the callback holds f's lock), so the
+	 * second callback still runs, as on Linux.
+	 */
 	bzero(t, 2 * sizeof (*t));
 	if ((f = cdrmnull_fence_pair(dev, file, so, a->syncobj, &g)) != NULL) {
 		t[0].put_fence = B_TRUE;
@@ -1116,7 +1127,8 @@ cdrmnull_ioctl_fence_selftest(struct drm_device *dev, void *data,
 		    0 && dma_fence_add_callback(f, &t[1].cb,
 		    cdrmnull_cbt_func) == 0) {
 			dma_fence_signal(g);
-			if (t[0].ran == 1 && t[1].ran == 0)
+			drm_illumos_fence_barrier();
+			if (t[0].ran == 1 && t[1].ran == 1)
 				passed |= CDRMNULL_FENCE_T_QUEUED;
 		} else {
 			dma_fence_put(f);

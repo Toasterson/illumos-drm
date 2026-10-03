@@ -954,10 +954,11 @@ unsafe extern "C" {
 }
 pub const DMA_FENCE_FLAG_INITIALIZED_BIT: dma_fence_flag_bits = 0;
 pub const DMA_FENCE_FLAG_INLINE_LOCK_BIT: dma_fence_flag_bits = 1;
-pub const DMA_FENCE_FLAG_SIGNALED_BIT: dma_fence_flag_bits = 2;
-pub const DMA_FENCE_FLAG_TIMESTAMP_BIT: dma_fence_flag_bits = 3;
-pub const DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT: dma_fence_flag_bits = 4;
-pub const DMA_FENCE_FLAG_USER_BITS: dma_fence_flag_bits = 5;
+pub const DMA_FENCE_FLAG_SEQNO64_BIT: dma_fence_flag_bits = 2;
+pub const DMA_FENCE_FLAG_SIGNALED_BIT: dma_fence_flag_bits = 3;
+pub const DMA_FENCE_FLAG_TIMESTAMP_BIT: dma_fence_flag_bits = 4;
+pub const DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT: dma_fence_flag_bits = 5;
+pub const DMA_FENCE_FLAG_USER_BITS: dma_fence_flag_bits = 6;
 pub type dma_fence_flag_bits = core::ffi::c_uint;
 #[repr(C)]
 pub struct dma_fence {
@@ -1105,10 +1106,34 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn dma_fence_init64(
+        fence: *mut dma_fence,
+        ops: *const dma_fence_ops,
+        lock: *mut spinlock_t,
+        context: u64,
+        seqno: u64,
+    );
+}
+unsafe extern "C" {
     pub fn dma_fence_context_alloc(num: core::ffi::c_uint) -> u64;
 }
 unsafe extern "C" {
     pub fn dma_fence_signal(fence: *mut dma_fence);
+}
+unsafe extern "C" {
+    pub fn dma_fence_signal_locked(fence: *mut dma_fence);
+}
+unsafe extern "C" {
+    pub fn dma_fence_signal_timestamp(fence: *mut dma_fence, timestamp: ktime_t);
+}
+unsafe extern "C" {
+    pub fn dma_fence_signal_timestamp_locked(fence: *mut dma_fence, timestamp: ktime_t);
+}
+unsafe extern "C" {
+    pub fn dma_fence_check_and_signal(fence: *mut dma_fence) -> bool;
+}
+unsafe extern "C" {
+    pub fn dma_fence_check_and_signal_locked(fence: *mut dma_fence) -> bool;
 }
 unsafe extern "C" {
     pub fn dma_fence_set_error(fence: *mut dma_fence, error: core::ffi::c_int);
@@ -1126,7 +1151,13 @@ unsafe extern "C" {
     pub fn dma_fence_get_status(fence: *mut dma_fence) -> core::ffi::c_int;
 }
 unsafe extern "C" {
+    pub fn dma_fence_enable_sw_signaling(fence: *mut dma_fence);
+}
+unsafe extern "C" {
     pub fn dma_fence_wait_timeout(fence: *mut dma_fence, intr: bool, timeout: core::ffi::c_long) -> core::ffi::c_long;
+}
+unsafe extern "C" {
+    pub fn dma_fence_default_wait(fence: *mut dma_fence, intr: bool, timeout: core::ffi::c_long) -> core::ffi::c_long;
 }
 unsafe extern "C" {
     pub fn dma_fence_add_callback(
@@ -1137,6 +1168,15 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn dma_fence_remove_callback(fence: *mut dma_fence, cb: *mut dma_fence_cb) -> bool;
+}
+unsafe extern "C" {
+    pub fn dma_fence_set_deadline(fence: *mut dma_fence, deadline: ktime_t);
+}
+unsafe extern "C" {
+    pub fn dma_fence_driver_name(fence: *mut dma_fence) -> *const core::ffi::c_char;
+}
+unsafe extern "C" {
+    pub fn dma_fence_timeline_name(fence: *mut dma_fence) -> *const core::ffi::c_char;
 }
 unsafe extern "C" {
     pub fn dma_fence_get_stub() -> *mut dma_fence;
@@ -1337,6 +1377,12 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn drm_illumos_fence_create(dev: *mut drm_device, context: u64, seqno: u64) -> *mut dma_fence;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_fence_put_deferred(fence: *mut dma_fence);
+}
+unsafe extern "C" {
+    pub fn drm_illumos_fence_barrier();
 }
 pub const DRM_RKMS_PLANE_OVERLAY: drm_rkms_plane_type = 0;
 pub const DRM_RKMS_PLANE_PRIMARY: drm_rkms_plane_type = 1;

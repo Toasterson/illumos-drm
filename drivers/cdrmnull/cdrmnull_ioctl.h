@@ -170,10 +170,10 @@ struct cdrmnull_prime_selftest {
  *		while the fence signals through another structure.
  * REMOVE	a callback removed before the fence signals never runs.
  * SIGNALED	adding a callback to a signalled fence fails with ENOENT.
- * RELEASED	a callback still added when its structure is released never
- *		runs.
- * QUEUED	a callback queued behind one that releases the structure
- *		never runs.
+ * RELEASED	a callback still added when its structure is released runs
+ *		once, with -EDEADLK (Linux's rule; facade 1.0).
+ * QUEUED	a callback queued behind one that drops the structure's last
+ *		reference still runs (the release waits; facade 1.0).
  */
 struct cdrmnull_fence_selftest {
 	__u32 syncobj;
