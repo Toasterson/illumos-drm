@@ -33,6 +33,14 @@
 #   i915n          with a stand-in i915n registered (add_drv -n), drmadm
 #                  moves the aliases from i915 to i915n and back.
 #   select-root    drmadm -R on a mounted clone of the boot environment.
+#   recover-remove the hand recovery: remove drmadm's fragment and update
+#                  the boot archive. Reboot.
+#   after-recover  nothing is selected; either core loads.
+#   overlap        a core held busy in modinstall before its _init (a
+#                  destructive DTrace chill) keeps the other one out.
+#   rollback       on a scratch root where update_drv -d fails, select
+#                  exits 1 and leaves the aliases and the fragment as
+#                  before.
 #
 # Then "drmadm select new", a reboot, "pkg uninstall virtio-gpu cdrmnull"
 # (their drivers would collide with the suites' own add_drv) and
@@ -532,6 +540,117 @@ phase_i915n() {
 	step "$DRMADM" status
 }
 
+phase_recover_remove() {
+	echo "=== recover-remove: the documented recovery by hand"
+	step "$DRMADM" status
+	step rm "$FRAG" || exit 1
+	step bootadm update-archive || exit 1
+	pass "removed the selection by hand (reboot next)"
+}
+
+phase_after_recover() {
+	echo "=== after-recover: no selection after the hand recovery"
+	status
+	grep -q '^Selected stack: none' drmadm-status.out && pass "drmadm status: nothing selected" ||
+	    bad "drmadm status: a stack is still selected"
+	n=$(grep -c 'drmadm' /etc/system.d/.self-assembly 2>/dev/null)
+	[ "${n:-0}" -eq 0 ] && pass "the boot read no drmadm fragment" || bad "the self-assembly file has the fragment"
+	echo "i915 has $(i915_aliases) aliases (the removed selection's state, as documented)"
+	unload_all || exit 1
+	step modload -p misc/drm && pass "the legacy misc/drm loads without a selection" ||
+	    bad "the legacy misc/drm does not load"
+	unload_all || exit 1
+	step modload -p misc/drm_core && pass "misc/drm_core loads without a selection" ||
+	    bad "misc/drm_core does not load"
+	unload_all || exit 1
+}
+
+# overlap FIRST SECOND MSG: FIRST's load is held for 400 ms in modinstall,
+# after the framework set mod_loaded and mod_busy and before its _init, by
+# a destructive DTrace chill; SECOND, loaded meanwhile, must refuse with
+# MSG because FIRST counts as loaded while it is busy.
+overlap() {
+	first=$1 second=$2 re=$3
+	unload_all || return 1
+	dtrace -w -q -n "BEGIN { printf(\"armed\\n\"); }
+	    fbt:genunix:modinstall:entry /stringof(args[0]->mod_modname) == \"$first\"/ {
+	    printf(\"chill %s\\n\", stringof(args[0]->mod_modname)); chill(400000000); }" \
+	    > dtrace-$first.out 2>&1 &
+	dpid=$!
+	i=0
+	while ! grep -q armed dtrace-$first.out && [ $i -lt 30 ]; do sleep 0.5; i=$((i + 1)); done
+	cat dtrace-$first.out
+	grep -q armed dtrace-$first.out || { bad "dtrace did not start"; kill $dpid; return 1; }
+	n=$(msgs "$re")
+	modload -p misc/$first & lpid=$!
+	sleep 0.15
+	if step modload -p misc/$second; then
+		bad "misc/$second loaded while misc/$first was busy before its _init"
+	else
+		wait_msg "$re" "$n"
+		[ "$(msgs "$re")" -gt "$n" ] &&
+		    pass "misc/$second refuses while misc/$first is in memory and busy, not yet installed" ||
+		    bad "misc/$second failed without the guard's warning"
+	fi
+	wait $lpid
+	r=$?
+	kill $dpid 2>/dev/null
+	wait $dpid 2>/dev/null
+	cat dtrace-$first.out
+	grep -q "chill $first" dtrace-$first.out && pass "the chill held misc/$first in modinstall" ||
+	    bad "the chill did not fire: the overlap was not exercised"
+	[ $r -eq 0 ] && loaded $first && pass "misc/$first loads after the chill" ||
+	    bad "misc/$first did not load after the chill"
+	unload_all
+}
+
+phase_overlap() {
+	echo "=== overlap: a core that is busy before its _init counts as loaded"
+	overlap drm_core drm "$LEGACY_MSG"
+	overlap drm drm_core "$NEW_MSG"
+}
+
+phase_rollback() {
+	echo "=== rollback: a failing alias move is undone (scratch root)"
+	R=/var/tmp/g7-rollback-root
+	rm -rf "$R"
+	mkdir -p "$R/etc/security" "$R/etc/system.d" || exit 1
+	for f in name_to_major minor_perm driver_aliases driver_classes; do
+		cp -p "/etc/$f" "$R/etc/$f" || exit 1
+	done
+	cp -p /etc/security/device_policy /etc/security/extra_privs "$R/etc/security/" || exit 1
+	n=$(awk '$1 == "i915"' "$R/etc/driver_aliases" | wc -l | tr -d ' ')
+	echo "i915 has $n aliases in $R"
+	[ "$n" -gt 0 ] || { bad "no i915 alias to move in $R"; return 1; }
+	cp -p "$R/etc/driver_aliases" driver_aliases.rollback-before
+	# update_drv -d writes driver_aliases.hold with O_EXCL: an existing one
+	# makes every removal fail.
+	step touch "$R/etc/driver_aliases.hold"
+	step "$DRMADM" -R "$R" select new > drmadm-rollback.out 2>&1
+	rc=$?
+	cat drmadm-rollback.out
+	[ $rc -eq 1 ] && pass "a select whose alias moves fail exits 1" || bad "the failing select exited $rc"
+	grep -q "undoing the selection" drmadm-rollback.out && pass "drmadm undoes the selection" ||
+	    bad "drmadm does not say that it undoes the selection"
+	cmp -s driver_aliases.rollback-before "$R/etc/driver_aliases" &&
+	    pass "the aliases are as before" || bad "the aliases changed"
+	[ ! -f "$R/$FRAG" ] && pass "the new fragment is removed again" || bad "a fragment is left"
+	step rm -f "$R/etc/driver_aliases.hold"
+	# Now with a previous fragment: select legacy, then a failing select new.
+	step "$DRMADM" -R "$R" select legacy > /dev/null 2>&1
+	cp -p "$R/$FRAG" frag.rollback-before
+	cp -p "$R/etc/driver_aliases" driver_aliases.rollback-before
+	step touch "$R/etc/driver_aliases.hold"
+	step "$DRMADM" -R "$R" select new > drmadm-rollback2.out 2>&1
+	rc=$?
+	cat drmadm-rollback2.out
+	[ $rc -eq 1 ] && cmp -s frag.rollback-before "$R/$FRAG" &&
+	    cmp -s driver_aliases.rollback-before "$R/etc/driver_aliases" &&
+	    pass "a failing select restores the previous fragment and the aliases" ||
+	    bad "a failing select left the previous fragment or the aliases changed"
+	step rm -rf "$R"
+}
+
 phase_select_root() {
 	echo "=== select-root: drmadm -R on a mounted boot environment"
 	cur=$(sed -n 's/^\* drmadm-selected: //p' "$FRAG")
@@ -565,7 +684,11 @@ select-legacy) phase_select_legacy ;;
 after-legacy) phase_after_legacy ;;
 select-root) phase_select_root ;;
 i915n) phase_i915n ;;
-*) echo "usage: run-g7-test.sh baseline|install|guards|select-new|after-new|select-legacy|after-legacy|i915n|select-root" >&2
+recover-remove) phase_recover_remove ;;
+after-recover) phase_after_recover ;;
+overlap) phase_overlap ;;
+rollback) phase_rollback ;;
+*) echo "usage: run-g7-test.sh baseline|install|guards|select-new|after-new|select-legacy|after-legacy|i915n|select-root|recover-remove|after-recover|overlap|rollback" >&2
    exit 2 ;;
 esac
 echo

@@ -246,15 +246,19 @@ rollback() {
 	done
 	back=$(minus "$bound_from" "$(aliases_of "$from")")
 	[ -n "$back" ] && udrv -a -i "$(quoted "$back")" "$from" >/dev/null 2>&1
-	if [ -f "$prev" ]; then
-		mv -f "$prev" "$frag"
-	else
-		rm -f "$frag"
-	fi
 	left=$(minus "$bound_from" "$(aliases_of "$from")")
 	if [ -n "$left" ]; then
+		# The new fragment stays: it records every alias drmadm manages,
+		# these included, and the next select gives them to a driver.
+		rm -f "$prev"
 		echo "$PROG: could not give these aliases back to $from: $(words "$left")" >&2
-		echo "$PROG: $frag lists every alias drmadm manages; run drmadm select again" >&2
+		echo "$PROG: $frag (the new selection, not yet in the boot archive) records them; run drmadm select again" >&2
+	elif [ -f "$prev" ]; then
+		mv -f "$prev" "$frag"
+		echo "$PROG: the aliases and $frag are as before" >&2
+	else
+		rm -f "$frag"
+		echo "$PROG: the aliases are as before; $frag is removed again" >&2
 	fi
 	exit 1
 }
@@ -286,8 +290,10 @@ do_status() {
 	echo
 	echo "Packages:"
 	# shellcheck disable=SC2086 # lists of package names
+	# pkg list -H prints NAME [(PUBLISHER)] VERSION IFO; the publisher only
+	# when it is not the first-ranked one.
 	list=$(pkgcmd list -H $LEGACY_PKGS $NEW_PKGS $SHARED_PKGS 2>/dev/null |
-	    awk '{ print $1, $2 }')
+	    awk '{ if ($2 ~ /^\(/) print $1, $3, $2; else print $1, $2 }')
 	for p in $LEGACY_PKGS $NEW_PKGS $SHARED_PKGS; do
 		case " $LEGACY_PKGS " in
 		*" $p "*) k=legacy ;;
@@ -296,7 +302,7 @@ do_status() {
 		   *) k=shared ;;
 		   esac ;;
 		esac
-		v=$(echo "$list" | awk -v p="$p" '$1 == p { print $2 }')
+		v=$(echo "$list" | awk -v p="$p" '$1 == p { print $2, $3 }')
 		printf '  %-7s %-30s %s\n' "$k" "$p" "${v:-not installed}"
 	done
 
@@ -396,7 +402,10 @@ do_select() {
 		die "another drmadm is running (lock $(under "$LOCK")); remove it if none is"
 	fi
 	trap unlock EXIT
-	trap 'unlock; exit 1' HUP INT TERM
+	# From the fragment write to the end of the alias moves, a signal
+	# undoes the selection; before and after, it only drops the lock.
+	moving=no
+	trap 'if [ $moving = yes ]; then rollback "interrupted"; fi; exit 1' HUP INT TERM
 
 	changed=0
 	frag=$(under "$FRAGMENT")
@@ -463,6 +472,7 @@ do_select() {
 		mv -f "$tmp" "$frag" || die "cannot replace $frag"
 		echo "Wrote $frag: selects $target, excludes $(names "$other_modules" | tr '\n' ' ')"
 		changed=1
+		moving=yes
 	fi
 
 	# 2. The Intel GPU aliases, with update_drv -n: the files only, for the
@@ -490,6 +500,7 @@ do_select() {
 		show "$unbound"
 	fi
 	[ -n "$conflict" ] && echo "Left alone, bound to other drivers:$conflict"
+	moving=no
 	rm -f "$prev"
 
 	# Excludes elsewhere that would keep the selected stack from loading.

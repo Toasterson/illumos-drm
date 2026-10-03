@@ -1325,11 +1325,12 @@ another `drmadm` holds its lock (`/etc/system.d/.drmadm.lock`), then:
    for the legacy stack, `i915n` for the new one. `i915n` is the name
    reserved for this stack's Intel driver (work item G5); until it exists,
    `select new` takes the aliases from `i915` and leaves them unbound, says
-   so, and an Intel GPU falls back to `vgatext` (the GPU's `pciclass,0300`
-   compatible name). The set moved is the aliases the installed
-   `driver/graphics/drm` declares for `i915` (`pkg contents -m`), those
+   so, and an Intel GPU falls back to `vgatext` (through the GPU's
+   compatible name `pciclass,030000`, an alias of `vgatext`). The set
+   moved is the aliases the installed `driver/graphics/drm` declares for
+   `i915` (`pkg contents -m`), those
    bound to `i915` or `i915n`, and those recorded in the fragment by an
-   earlier selection; `select legacy` gives `i915` exactly its package's
+   earlier selection; `select legacy` gives `i915` at least its package's
    aliases when that package is installed. Aliases of the set that are bound
    to any other driver are reported and left alone. `update_drv -d -i`
    takes one alias per call (given a list, it matches no line of
@@ -1356,12 +1357,14 @@ would try to unconfigure and unload the bound devices; with `-n` it only
 edits the file, which matches a selection for the next boot. Two IPS
 consequences: while the new stack is selected, `pkg verify
 driver/graphics/drm` reports the `i915` aliases as missing, and `pkg fix`
-would give them back (run `drmadm select new` again); and a package of
-this stack must not declare a legacy alias in its driver action:
-`add_drv` refuses an alias that another driver has, and IPS's driver
-action (`pkg5`'s `driver.py`) reports that and leaves the driver
-unregistered while the package installs. `i915n`'s package will therefore
-deliver its driver action without aliases, and no package of
+would give them back (run `drmadm select new` again; the same after a
+`pkg update` of `driver/graphics/drm` that adds `i915` aliases, which IPS
+adds with `update_drv`); and a package of
+this stack must not declare a legacy alias in its driver action: IPS
+refuses to install a driver action whose alias another driver action in
+the image declares, and the operation fails (`pkg5`'s `driver.py`).
+`i915n`'s package will therefore deliver its driver action without
+aliases, and no package of
 this repository binds an Intel GPU at installation (`virtio_gpu` binds only
 `pci1af4,1050`, `cdrmnull` and `rdrmnull` are pseudo devices).
 
