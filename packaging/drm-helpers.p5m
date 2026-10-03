@@ -6,18 +6,20 @@
 # IPS manifest of misc/drm_helpers (carried/), the Linux DRM helper code
 # that C drivers on the illumos-drm facade link against with
 # -N misc/drm_helpers: today drm_mm, Linux v7.2's range allocator, carried
-# unmodified (MIT), on linuxkpi's red-black trees (MIT reimplementation).
+# unmodified (MIT), on linuxkpi's red-black trees (MIT reimplementation),
+# and drm_cache's drm_clflush_virt_range() (MIT, carried/drm_cache).
 # Publish from a directory holding the module built by carried/build.sh as
-# kernel/misc/amd64/drm_helpers, this repository's LICENSE, drm_mm's
-# notice (carried/drm_mm/LICENSE) and the illumos-drm MIT notice of the
+# kernel/misc/amd64/drm_helpers, with this repository as the second
+# directory for LICENSE, the carried files' notices (carried/drm_mm/LICENSE,
+# carried/drm_cache/LICENSE) and the illumos-drm MIT notice of the
 # reimplemented Linux interfaces (include/drm/LICENSE):
 #
 #   carried/build.sh            # $OUT/drm_helpers
 #   cp $OUT/drm_helpers <proto>/kernel/misc/amd64/drm_helpers
 #   pkgsend publish -s <repo> -d <proto> -d . packaging/drm-helpers.p5m
 #
-# The module needs neither DRM core: it has no state, no device nodes and
-# no driver action; the kernel loads it with the first module that depends
+# The module needs neither DRM core: it keeps no state beyond the processor
+# facts read at load, has no device nodes and no driver action; the kernel loads it with the first module that depends
 # on it and keeps it while one does. Its exported names (drm_mm_init, ...)
 # are also exported by gfx-drm's legacy misc/drm; krtld binds each module to
 # the provider among its own dependencies, so the two stacks' modules never
@@ -26,7 +28,7 @@
 #
 set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drm-helpers@0.0.1,5.11-2026.0.0.0
 set name=pkg.summary value="Linux DRM helpers carried for C DRM drivers (misc/drm_helpers)"
-set name=pkg.description value="misc/drm_helpers, the Linux DRM helper code that C drivers on the illumos-drm facade link against: drm_mm (the range allocator of GPU address spaces) from Linux v7.2, unmodified, on MIT-licensed reimplementations of the Linux interfaces it needs."
+set name=pkg.description value="misc/drm_helpers, the Linux DRM helper code that C drivers on the illumos-drm facade link against: drm_mm (the range allocator of GPU address spaces) from Linux v7.2, unmodified, and drm_cache's CPU cache write-back, on MIT-licensed reimplementations of the Linux interfaces they need."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
 set name=info.source-url value=https://code.aopc.cloud/illumos/illumos-drm
 set name=variant.arch value=i386
@@ -37,4 +39,5 @@ dir  path=kernel/misc/amd64 owner=root group=sys mode=0755
 file path=kernel/misc/amd64/drm_helpers owner=root group=sys mode=0755 reboot-needed=true
 license LICENSE license=MPL-2.0
 license carried/drm_mm/LICENSE license=MIT-drm_mm
+license carried/drm_cache/LICENSE license=MIT-drm_cache
 license include/drm/LICENSE license=MIT

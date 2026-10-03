@@ -469,8 +469,8 @@ pinned Linux revision, with `-u` it refreshes them) and applies the series;
 the test driver `drm_helpers_test` (`carried/test/`, run by
 `tools/test/run-r5e-test.sh`); `carried/host-test.sh` runs the self-tests
 as a userland program. `linuxkpi/` holds the Linux kernel interfaces the
-carried code compiles against (`linuxkpi/include/linux/*.h`,
-`linuxkpi/lib/rbtree.c`); see *R5e: compatibility headers* for how they
+carried code compiles against (`linuxkpi/include/{linux,asm}/*.h`,
+`linuxkpi/lib/`); see *R5e: compatibility headers* for how they
 relate to R5c's compatibility layer. `packaging/drm-helpers.p5m` packages
 the module.
 
@@ -1487,27 +1487,32 @@ gen9.5), measured on R5c's configuration of Linux v7.2 `8d3ae59288`
 (163 headless translation units), it imports 63 symbols from Linux's
 `drm.ko`, 3 from `drm_kms_helper`, 29 from TTM, 4 from the GPU buddy
 allocator and 2 from `drm_buddy`, besides `dma-buf` and the kernel. Of the
-`drm.ko` ones, the facade provides 19; 10 are `drm_mm`, the range allocator
-i915 manages its GTT address spaces, the stolen memory and its eviction
-with, which is pure algorithm with no state outside the caller's structure
-and is carried here; the others belong to the core (files, ioctls, GEM,
-PRIME, sync objects, mapping offsets, printing, managed resources:
-carrying Linux's code would duplicate the core's state) or to R5c
-(`drm_clflush_sg` and `drm_clflush_virt_range`, x86 cache maintenance on
-R5c's page and scatterlist model), and one (`drm_mode_config_reset`) is
-display. Not carried: `drm_suballoc` and
+`drm.ko` ones, the facade provides 19, and 12 are carried here: 10 are
+`drm_mm`, the range allocator i915 manages its GTT address spaces, the
+stolen memory and its eviction with (pure algorithm, no state outside the
+caller's structure), and 2 are `drm_cache`, x86 cache write-back:
+`drm_clflush_virt_range` is built now, `drm_clflush_sg` once R5c's
+`struct page` and scatterlist models exist (see *unmodified Linux* below).
+31 belong to the core (files, ioctls, GEM, PRIME, sync objects, mapping
+offsets, printing, managed resources: carrying Linux's code would
+duplicate the core's state; they are facade work for R5c's inventory and
+the i915 port) and one (`drm_mode_config_reset`) is display. Not carried: `drm_suballoc` and
 `drm_exec` (i915 does not use them), `gpu-sched` and `drm_gpuvm` (i915 has
 its own scheduler and address spaces), the buddy allocator and
 `drm_buddy` (compiled into i915 unconditionally but used only by
 `i915_ttm_buddy_manager.c` for local memory, which integrated GPUs do not
 have: `intel_memory_regions_hw_probe()` sets up system memory with shmem
-and stolen memory with `drm_mm` unless `IS_DGFX()`), TTM (R5d, deferred
-to amdgpu; i915 does call `ttm_device_init()` on every GPU, which the i915
-port must stub or keep), `intel-gtt` from `drivers/char/agp` (only for
+and stolen memory with `drm_mm` unless `IS_DGFX()`; that object also
+imports TTM's resource manager, so it cannot be linked without TTM
+either: whichever way the i915 port links TTM decides it, and if TTM is
+carried, `drivers/gpu/buddy.c` and `drm_buddy.c`, both MIT, go into a
+`misc/gpu_buddy` with this machinery), TTM (R5d, deferred to amdgpu; i915
+calls `ttm_device_init()` on every GPU, so the port must stub the
+integrated path or carry TTM), `intel-gtt` from `drivers/char/agp` (only for
 gen2 to gen5; R5c leaves `intel_ggtt_gmch.o` out) and the display helpers
 (`drm_rect`, `drm_fourcc`, DP, atomic: the display phase).
 
-**R5e: one module, `misc/drm_helpers`.** Linux builds `drm_mm` into
+**R5e: one module, `misc/drm_helpers`.** Linux builds `drm_mm` and `drm_cache` into
 `drm.ko`, whose stateful part is our Rust `misc/drm_core`; C code cannot
 go into that Rust module without making it depend on the compatibility
 layer. So the C half of `drm.ko` becomes one C module, `misc/drm_helpers`,
@@ -1517,25 +1522,40 @@ Linux modules (`drm_suballoc_helper`, `drm_exec`, the buddy allocator,
 `gpu-sched`, TTM, the display helpers) get a module each when a driver
 needs them, so the provider table of the R5 analysis maps one to one. The
 module is linked `-z defs -B reduce` with `drm_helpers_scope.mapfile`: its
-global symbols are `_init`, `_fini`, `_info` and the ten `drm_mm`
-functions i915 imports, nothing else (`drm_mm_print()`, which i915 does not
-import, and the red-black tree stay local); `build.sh` fails otherwise.
+global symbols are `_init`, `_fini`, `_info`, the ten `drm_mm` functions
+i915 imports and `drm_clflush_virt_range`, nothing else (`drm_mm_print()`,
+which i915 does not import, the red-black tree and the processor facts
+stay local); `build.sh` fails otherwise.
 Dependents link with `-N misc/drm_helpers -M
 carried/drm_helpers/drm_helpers.mapfile`. The module depends on nothing but
-genunix, keeps no state and needs no guard against the legacy stack;
+genunix and needs no guard against the legacy stack; its only state is
+what `drm_cache` reads from CPUID in `_init` (CLFLUSH, CLFLUSHOPT, the
+line size), read-only afterwards, and `_init` refuses a processor without
+CLFLUSH;
 gfx-drm's `misc/drm` exports `drm_mm` functions under the same names, and
 krtld resolves each module against its own dependencies, so the stacks do
 not mix.
 
-**R5e: unmodified Linux, empty patch series.** `drm_mm.c` and `drm_mm.h`
-carry the MIT notice of Tungsten Graphics and Intel (no SPDX tag) and are
-vendored byte for byte (`fetch-and-patch -f` compares them with
-git.kernel.org at the pin); MIT and dual-licensed files may be vendored,
-GPL-only ones may not (the script refuses them). They build without a
-single change: `CONFIG_DRM_DEBUG_MM` is off (its stack depot is
-GPL-2.0-only), and every difference from Linux lives in the compatibility
-headers. The patch machinery (GNU patch, `-p1` in the Linux root) is in
-place for the next helper. Linux's KUnit tests for `drm_mm`
+**R5e: unmodified Linux, one patch.** `drm_mm.c`/`.h` (MIT notice of
+Tungsten Graphics and Intel) and `drm_cache.c`/`.h` (Tungsten Graphics,
+Red Hat), none with an SPDX tag, are vendored byte for byte
+(`fetch-and-patch -f` compares them with git.kernel.org at the pin); MIT
+and dual-licensed files may be vendored, GPL-only ones may not (the script
+refuses them, and files `SOURCES` does not list). `drm_mm` builds without
+a change: `CONFIG_DRM_DEBUG_MM` is off (its stack depot is GPL-2.0-only),
+and every difference from Linux lives in the compatibility headers.
+`drm_cache` has one patch, which only adds conditionals: its page,
+scatterlist, swiotlb and write-combining-copy functions need R5c's
+`struct page`, `sg_table` and `iosys_map`, so they and their headers are
+built only with `CONFIG_LKPI_STRUCT_PAGE`, which R5c's layer defines once
+those exist; then `drm_clflush_sg` (which i915 imports) compiles
+unchanged, joins the mapfiles and the patch can go. Until then the module
+builds `drm_clflush_virt_range` alone. Linux's fallback for processors
+without CLFLUSH, `wbinvd_on_all_cpus()`, has no definition here: CLFLUSH
+is a constant true after `_init`'s check, the compiler drops the call, and
+the `-z defs` link would fail if it did not. The configuration of the
+carried code is passed like Linux's, on the command line
+(`-DCONFIG_X86 -DCONFIG_X86_64`). Linux's KUnit tests for `drm_mm`
 (`drm_mm_test.c`) are GPL-2.0-only, so they were not copied: their six
 cases are re-expressed (MIT) in `carried/drm_mm/tests/drm_mm_selftest.c`
 and extended to what i915 relies on (reservations, the four insertion
@@ -1550,9 +1570,11 @@ colours, parent pointers, leftmost caches and augmented maxima.
 
 **R5e: compatibility headers.** The carried code needs Linux's lists,
 red-black and interval trees, bit operations, `min`/`max`, `WARN`, errno
+x86 barriers, `clflushopt()`, feature tests and `boot_cpu_data`
+(`linuxkpi/include/asm/`, filled from CPUID by `linuxkpi/lib/x86_cpu.c`),
 and a few headers that only have to exist (`slab.h`, `seq_file.h`,
-`stacktrace.h`, `mm_types.h`, `export.h`, `spinlock.h`). They are in
-`linuxkpi/include/linux/` and `linuxkpi/lib/rbtree.c`, written for R5e
+`stacktrace.h`, `mm_types.h`, `export.h`, `spinlock.h`, `scatterlist.h`). They are in
+`linuxkpi/include/` and `linuxkpi/lib/`, written for R5e
 before R5c's compatibility layer existed, MIT reimplementations (Linux's
 are GPL; decision D7), each marked "to be reconciled with R5c": R5c builds
 the full layer at the same paths, so the merge replaces these files, and
@@ -1577,7 +1599,12 @@ against the loaded `misc/drm_helpers`, logs each result (failures with
 failing check to prove the failure path. `drm_mm` takes no lock (its users
 serialise calls on one allocator; i915 holds the address space's mutex),
 so the concurrency test runs independent allocators on a DDI task queue
-of four threads at once.
+of four threads at once. Linux has no test for `drm_cache`, and a cache
+write-back changes nothing a CPU can see on coherent memory: its two tests
+flush every shape of range (empty, one byte, across lines and pages, the
+end of a buffer, random), also from four threads at once, and check the
+memory is unchanged; whether a GPU sees the data is the i915 port's test
+on hardware.
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
