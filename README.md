@@ -931,21 +931,35 @@ while a device number is taken or a fence of the module's domain lives,
 and the kernel keeps the module while a driver that depends on it is
 loaded.
 
-**R5a: the module's name.** The module is `misc/drm_core`, not
-`misc/drm`: OpenIndiana's gfx-drm delivers `/kernel/misc/amd64/drm`, the
-C core of its legacy drivers, in the package `driver/graphics/drm`, which
-libdrm requires, and the ThinkPad X230 needs gfx-drm's i915 and its core
-beside the new stack until the modern i915 port (G5). The two packages
+**R5a: the module's name, and never beside gfx-drm.** The module is
+`misc/drm_core`, not `misc/drm`: OpenIndiana's gfx-drm delivers
+`/kernel/misc/amd64/drm`, the C core of its legacy drivers, in the
+package `driver/graphics/drm`, which libdrm requires. The two packages
 (`driver/graphics/drm` and `driver/graphics/drm-core`) install together,
-and the two cores may be loaded at once, because no module depends on
-both: gfx-drm's drivers are linked with `-N misc/drm`, this project's
-with `-N misc/drm_core`, and a module resolves symbols only from its own
-dependencies. The facade keeps Linux's symbol names (`drm_dev_register`
-and so on), some of which gfx-drm's core exports too, so an unqualified
-fbt probe such as `fbt::drm_dev_register:entry` matches both modules;
-name the module (`fbt:drm_core:drm_dev_register:entry`). The fence
-domain's kstat keeps the name `drm:0:sync` of R2. The name follows
-G6's `misc/drm_minor`, whose table the module absorbed.
+but the two stacks must never be loaded at the same time, and loading
+both by accident must be impossible: `misc/drm_core`'s `_init` refuses
+(`EBUSY`, with the warning "drm_core: the legacy DRM core misc/drm
+(gfx-drm) is loaded; ...") while the legacy `misc/drm` is loaded. The
+DDI has no way to ask whether a module is loaded without loading it
+(`ddi_modopen(9F)` loads it), so the check walks the module list under
+`mod_lock` (`modctl.h`, private, bound in illumos-ddi's private tier at
+the pinned gate commit) and matches the module name `drm`, which is how
+the framework itself identifies a module (a module's file name is
+whatever path its latest load used, `misc/drm` or
+`/kernel/misc/amd64/drm`); the wrapper is
+`ddi::private::module_loaded(name, &Sleepable)` and takes no hold, so a
+symmetric guard cannot deadlock against it. Its answer is a snapshot, so
+the opposite guard belongs in gfx-drm's `misc/drm`, which must refuse
+while `misc/drm_core` is loaded (a separate gfx-drm item).
+The guest test loads the legacy module from the installed
+`driver/graphics/drm`, checks that `misc/drm_core` refuses with the
+warning, unloads the legacy module and loads `misc/drm_core`. The facade
+keeps Linux's symbol names (`drm_dev_register` and so on), some of which
+gfx-drm's core exports too, so an unqualified fbt probe such as
+`fbt::drm_dev_register:entry` names functions of both modules; name the
+module (`fbt:drm_core:drm_dev_register:entry`). The fence domain's
+kstat keeps the name `drm:0:sync` of R2. The name follows G6's
+`misc/drm_minor`, whose table the module absorbed.
 
 **R5a: one code path.** The Rust drivers use the same C interface as
 `cdrmnull`: `drm-facade` turns a driver's `Driver` implementation into a
@@ -1234,8 +1248,8 @@ DDI_MAPFILE=<gate>/usr/src/uts/common/mapfiles/ddi.mapfile drivers/cdrmnull/buil
 `driver/graphics/drm-core` of `packaging/drm-core.p5m`) before any driver
 loads; the test scripts link it from `drm_module.a` and `drm_core.mapfile`
 (and `drm_facade_ctf.o` if present) when it is not installed, and remove
-it again. It sits beside OpenIndiana's gfx-drm (see *R5a: the module's
-name*).
+it again. It is installed beside OpenIndiana's gfx-drm but never loaded
+beside it (see *R5a: the module's name, and never beside gfx-drm*).
 
 `tools/test/run-r1-test.sh` does the rest on a disposable illumos VM, as
 root, in a directory with `rdrmnull.a`, `rdrmnull.conf`,

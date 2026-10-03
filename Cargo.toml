@@ -40,11 +40,12 @@ drm-facade-sys = { path = "crates/drm-facade-sys" }
 # illumos 7e802e88a3, and for R5a the CharTable glue with which misc/drm_core
 # serves the character devices other driver modules attach, the cb_ops:
 # form of module!, Driver::load, FileRef::char_dev,
-# TaskQueue::without_node, IntrPriority::new and current_context. Move
+# TaskQueue::without_node, IntrPriority::new, current_context,
+# servicing_interrupt and module_loaded. Move
 # the pin to the merge commit on illumos-ddi main once those branches are
 # merged.
-ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "d630acd05425a10a907c6bd209f8b936a772f223" }
-ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "d630acd05425a10a907c6bd209f8b936a772f223", default-features = false }
+ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "10bdfba866260ef4f1876e29c07131378d0733df" }
+ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "10bdfba866260ef4f1876e29c07131378d0733df", default-features = false }
 serde_json = "1"
 
 # Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug

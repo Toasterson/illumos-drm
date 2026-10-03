@@ -21,11 +21,10 @@
 # The module is misc/drm_core, not misc/drm: OpenIndiana's
 # driver/graphics/drm (gfx-drm) delivers /kernel/misc/amd64/drm, the C
 # core of its legacy drivers (i915, radeon), and libdrm requires that
-# package. Both install and may be loaded at once: no module depends on
-# both, and the two export different symbol sets to different dependents
-# (their facade-style names overlap, e.g. drm_dev_register, so fbt probe
-# names such as fbt::drm_dev_register:entry match both modules; qualify
-# them with the module, fbt:drm_core:drm_dev_register:entry).
+# package. Both packages install together, but the two stacks are never
+# loaded at once: misc/drm_core's _init refuses while the legacy misc/drm
+# is loaded. Some facade names are also gfx-drm's (drm_dev_register), so
+# qualify fbt probes with the module: fbt:drm_core:drm_dev_register:entry.
 #
 # The module has no device nodes and no driver action; the kernel loads it
 # with the first driver that needs it and refuses to unload it while a

@@ -11,6 +11,8 @@
 #      facade's structure layouts as gcc compiles include/drm match the
 #      Rust bindings (tools/facade/facade_layout.c, compared by the caller
 #      with `cargo xtask facade-check`), and it loads and unloads.
+#   A' The legacy guard: with gfx-drm's misc/drm loaded, misc/drm_core
+#      refuses to load (its _init's warning), and loads once it is gone.
 #   B  The three drivers attached together: the device numbers, the R0 to
 #      R2 tests on cdrmnull and on rdrmnull, R3 on rdrmnull, R4 on
 #      virtio_gpu, drm_r5a_test (dma-bufs, sync files and cdrmnull's
@@ -254,6 +256,53 @@ if [ -n "$id" ] && step modunload -i "$id"; then
 	pass "misc/drm_core unloads with no driver"
 else
 	bad "misc/drm_core does not unload with no driver"
+fi
+
+echo
+echo "=== A: misc/drm_core never loads beside gfx-drm's misc/drm"
+# OpenIndiana's driver/graphics/drm (gfx-drm, which libdrm requires)
+# delivers the legacy C core /kernel/misc/amd64/drm. Both packages
+# install together; the two cores must never be loaded at once, and
+# misc/drm_core's _init refuses while the legacy one is loaded.
+guard_re='drm_core: .*misc/drm.* is loaded'
+if [ -f /kernel/misc/amd64/drm ]; then
+	if step modload /kernel/misc/amd64/drm; then
+		step sh -c 'modinfo | grep -E " drm | drm_core "'
+		n=$(grep -c "$guard_re" /var/adm/messages)
+		if step modload -p misc/drm_core; then
+			bad "misc/drm_core loaded beside the legacy misc/drm"
+			id=$(modid drm_core)
+			[ -n "$id" ] && step modunload -i "$id"
+		else
+			wait_log "$guard_re" "$n"
+			if [ "$(grep -c "$guard_re" /var/adm/messages)" -gt "$n" ]; then
+				grep "$guard_re" /var/adm/messages | tail -1
+				pass "misc/drm_core refuses to load while the legacy misc/drm is loaded"
+			else
+				tail -5 /var/adm/messages
+				bad "misc/drm_core failed to load without the guard's warning"
+			fi
+		fi
+		[ -z "$(modid drm_core)" ] && pass "misc/drm_core is not loaded after the refusal" ||
+		    bad "misc/drm_core is loaded after the refusal"
+		id=$(modid drm)
+		if [ -n "$id" ] && step modunload -i "$id"; then
+			pass "the legacy misc/drm unloads"
+		else
+			bad "the legacy misc/drm does not unload"
+		fi
+	else
+		bad "the legacy misc/drm does not load standalone"
+	fi
+	if step modload -p misc/drm_core; then
+		pass "misc/drm_core loads once the legacy misc/drm is unloaded"
+	else
+		bad "misc/drm_core does not load after the legacy misc/drm is unloaded"
+	fi
+	id=$(modid drm_core)
+	[ -n "$id" ] && step modunload -i "$id"
+else
+	bad "no legacy /kernel/misc/amd64/drm (package driver/graphics/drm) to test the guard with"
 fi
 
 echo

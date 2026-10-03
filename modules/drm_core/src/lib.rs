@@ -130,6 +130,20 @@ mod kernel {
     pub unsafe extern "C" fn _init() -> c_int {
         // SAFETY: _init(9E) runs in kernel context and may block.
         let ctx = unsafe { Sleepable::assume() };
+        // Never beside the legacy core: OpenIndiana's gfx-drm delivers its
+        // C core as misc/drm (and its drivers, i915 among them, depend on
+        // it). Both packages install together, but the two stacks must
+        // never be loaded at once.
+        if ddi::private::module_loaded(c"drm", &ctx) {
+            // SAFETY: a constant message.
+            unsafe {
+                sys::cmn_err(
+                    sys::CE_WARN,
+                    c"drm_core: the legacy DRM core misc/drm (gfx-drm) is loaded; misc/drm_core does not load beside it (unload gfx-drm's drivers and misc/drm first)".as_ptr(),
+                )
+            };
+            return sys::errno::EBUSY;
+        }
         let Ok(d) = FenceDomain::for_module(&ctx) else { return sys::errno::ENOMEM };
         if crate::ctxt::init(&ctx).is_err() {
             return sys::errno::ENOMEM;
