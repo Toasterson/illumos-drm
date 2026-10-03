@@ -52,6 +52,25 @@ opens of `cdrmnull`'s stale `0600` nodes (the open issue of G7 below),
 and the run after it passed (76 checks). Logs:
 `logs/hephaistos/illumos-drm/20261003-r5b-*` in the workspace.
 
+R5e (the Linux DRM helpers C drivers need; see *R5e* under *Decisions*):
+`misc/drm_helpers` carries Linux v7.2's `drm_mm` unmodified, on MIT
+reimplementations of the Linux interfaces it needs (`linuxkpi/`), and
+exports exactly the ten `drm_mm` functions i915's headless build imports.
+On 4 October 2026 it was built on illumos (gcc 14.3, the gate's kernel
+flags, `-z defs`) and tested on a fresh guest of `golden-20260930`
+(illumos `7e802e88a3`) with `tools/test/run-r5e-test.sh`: the module
+loaded and unloaded alone; the test driver `drm_helpers_test`, linked with
+`-N misc/drm_helpers` against the exported functions only, ran the 14
+`drm_mm` self-tests at attach for five seeds up to scale 50 (6,421,733
+checks in the largest run, none failed), `misc/drm_helpers` refused to
+unload under it and unloaded after `rem_drv`; an injected failing check was
+counted and logged with the attach still succeeding; `/etc` and
+`/devices/pseudo` were as before. `carried/host-test.sh` runs the same
+tests plus the host-only ones and the red-black and interval tree tests
+(24 tests, 839,569 checks) with clang under AddressSanitizer and
+UndefinedBehaviorSanitizer and with gcc on illumos; a seed gives the same
+counts on every compiler and in the kernel.
+
 G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
 of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
 gfx-drm's `driver/graphics/drm` built with the reverse guard (gfx-drm
@@ -437,6 +456,23 @@ package it. `tools/uapi/include/virtgpu_drm.h` is the Linux v6.12 uAPI
 header the bindings come from, `crates/drm-uapi/src/virtgpu_compat.rs`
 the older layouts, and `tools/uapi/virtgpu_compat_layout.c` their gcc
 check.
+
+`carried/` holds the Linux helper code that C drivers call and the
+Rust core does not provide (R5e), carried as Linux C: per helper a
+directory with the Linux files vendored unmodified at the revision of
+`carried/linux.pin` (`<helper>/linux/`, MIT or dual MIT only, listed with
+SHA-256 and licence in `<helper>/SOURCES`), the illumos patch series
+(`<helper>/patches/series`) and the self-tests (`<helper>/tests/`).
+`carried/fetch-and-patch` checks the vendored files (with `-f` against the
+pinned Linux revision, with `-u` it refreshes them) and applies the series;
+`carried/build.sh` builds `misc/drm_helpers` (`carried/drm_helpers/`) and
+the test driver `drm_helpers_test` (`carried/test/`, run by
+`tools/test/run-r5e-test.sh`); `carried/host-test.sh` runs the self-tests
+as a userland program. `linuxkpi/` holds the Linux kernel interfaces the
+carried code compiles against (`linuxkpi/include/linux/*.h`,
+`linuxkpi/lib/rbtree.c`); see *R5e: compatibility headers* for how they
+relate to R5c's compatibility layer. `packaging/drm-helpers.p5m` packages
+the module.
 
 ## Decisions
 
@@ -1445,6 +1481,104 @@ are not in the facade yet. A GEM object's `handle_count`, `name` and
 `dma_buf` stay in the core. Messages logged in interrupt context are cut
 by illumos at 200 bytes.
 
+**R5e: carried helpers.** C drivers call Linux helper code beyond the
+facade. For i915's headless build on the owner's integrated GPUs (gen7 and
+gen9.5), measured on R5c's configuration of Linux v7.2 `8d3ae59288`
+(163 headless translation units), it imports 63 symbols from Linux's
+`drm.ko`, 3 from `drm_kms_helper`, 29 from TTM, 4 from the GPU buddy
+allocator and 2 from `drm_buddy`, besides `dma-buf` and the kernel. Of the
+`drm.ko` ones, the facade provides 19; 10 are `drm_mm`, the range allocator
+i915 manages its GTT address spaces, the stolen memory and its eviction
+with, which is pure algorithm with no state outside the caller's structure
+and is carried here; the others belong to the core (files, ioctls, GEM,
+PRIME, sync objects, mapping offsets, printing, managed resources:
+carrying Linux's code would duplicate the core's state) or to R5c
+(`drm_clflush_sg` and `drm_clflush_virt_range`, x86 cache maintenance on
+R5c's page and scatterlist model), and one (`drm_mode_config_reset`) is
+display. Not carried: `drm_suballoc` and
+`drm_exec` (i915 does not use them), `gpu-sched` and `drm_gpuvm` (i915 has
+its own scheduler and address spaces), the buddy allocator and
+`drm_buddy` (compiled into i915 unconditionally but used only by
+`i915_ttm_buddy_manager.c` for local memory, which integrated GPUs do not
+have: `intel_memory_regions_hw_probe()` sets up system memory with shmem
+and stolen memory with `drm_mm` unless `IS_DGFX()`), TTM (R5d, deferred
+to amdgpu; i915 does call `ttm_device_init()` on every GPU, which the i915
+port must stub or keep), `intel-gtt` from `drivers/char/agp` (only for
+gen2 to gen5; R5c leaves `intel_ggtt_gmch.o` out) and the display helpers
+(`drm_rect`, `drm_fourcc`, DP, atomic: the display phase).
+
+**R5e: one module, `misc/drm_helpers`.** Linux builds `drm_mm` into
+`drm.ko`, whose stateful part is our Rust `misc/drm_core`; C code cannot
+go into that Rust module without making it depend on the compatibility
+layer. So the C half of `drm.ko` becomes one C module, `misc/drm_helpers`,
+which will also take the other `drm.ko` helpers C drivers need later
+(`drm_rect` and `drm_fourcc` with the display); helpers that are separate
+Linux modules (`drm_suballoc_helper`, `drm_exec`, the buddy allocator,
+`gpu-sched`, TTM, the display helpers) get a module each when a driver
+needs them, so the provider table of the R5 analysis maps one to one. The
+module is linked `-z defs -B reduce` with `drm_helpers_scope.mapfile`: its
+global symbols are `_init`, `_fini`, `_info` and the ten `drm_mm`
+functions i915 imports, nothing else (`drm_mm_print()`, which i915 does not
+import, and the red-black tree stay local); `build.sh` fails otherwise.
+Dependents link with `-N misc/drm_helpers -M
+carried/drm_helpers/drm_helpers.mapfile`. The module depends on nothing but
+genunix, keeps no state and needs no guard against the legacy stack;
+gfx-drm's `misc/drm` exports `drm_mm` functions under the same names, and
+krtld resolves each module against its own dependencies, so the stacks do
+not mix.
+
+**R5e: unmodified Linux, empty patch series.** `drm_mm.c` and `drm_mm.h`
+carry the MIT notice of Tungsten Graphics and Intel (no SPDX tag) and are
+vendored byte for byte (`fetch-and-patch -f` compares them with
+git.kernel.org at the pin); MIT and dual-licensed files may be vendored,
+GPL-only ones may not (the script refuses them). They build without a
+single change: `CONFIG_DRM_DEBUG_MM` is off (its stack depot is
+GPL-2.0-only), and every difference from Linux lives in the compatibility
+headers. The patch machinery (GNU patch, `-p1` in the Linux root) is in
+place for the next helper. Linux's KUnit tests for `drm_mm`
+(`drm_mm_test.c`) are GPL-2.0-only, so they were not copied: their six
+cases are re-expressed (MIT) in `carried/drm_mm/tests/drm_mm_selftest.c`
+and extended to what i915 relies on (reservations, the four insertion
+modes and `DRM_MM_INSERT_ONCE`, ranges, alignments that are not powers of
+two, colour adjustment with guard gaps as i915's GGTT uses it, interval
+queries, the eviction scan with colour eviction as
+`i915_gem_evict_something()` drives it, random sequences checked against
+an exhaustive feasibility oracle, and four allocators on four threads at
+once). After every change a test verifies the whole allocator: the node
+list, every hole, the hole stack and the three red-black trees with their
+colours, parent pointers, leftmost caches and augmented maxima.
+
+**R5e: compatibility headers.** The carried code needs Linux's lists,
+red-black and interval trees, bit operations, `min`/`max`, `WARN`, errno
+and a few headers that only have to exist (`slab.h`, `seq_file.h`,
+`stacktrace.h`, `mm_types.h`, `export.h`, `spinlock.h`). They are in
+`linuxkpi/include/linux/` and `linuxkpi/lib/rbtree.c`, written for R5e
+before R5c's compatibility layer existed, MIT reimplementations (Linux's
+are GPL; decision D7), each marked "to be reconciled with R5c": R5c builds
+the full layer at the same paths, so the merge replaces these files, and
+`misc/drm_helpers` then links R5c's trees instead of its local copy. The
+illumos kernel headers shape them: `struct list_head` and the base types
+come from the facade, `list_move_tail()` is left out (illumos has its own
+with another signature in `sys/list.h`), `__maybe_unused` comes from
+`sys/ccompile.h`, and `typeof` is defined because the gate's `-fno-asm`
+removes the keyword. The red-black tree implements Linux's interface and
+node layout (callers read `rb_left`, `rb_right` and `__rb_parent_color`)
+with the textbook algorithms and Linux's augmentation protocol;
+`carried/test/host/rbtree_test.c` tests it, plain, cached and augmented,
+against a full verification after every operation, and the interval tree
+against a brute-force scan.
+
+**R5e: tests in the kernel.** `drm_helpers_test` is a pseudo driver in the
+style of illumos-ddi's `rselftest`: at attach it runs every self-test
+against the loaded `misc/drm_helpers`, logs each result (failures with
+`CE_WARN`), publishes the totals as the kstat
+`drm_helpers_test:0:selftest` and attaches even when a test fails. Its
+`.conf` sets the seed, a scale factor and `inject_failure`, which adds one
+failing check to prove the failure path. `drm_mm` takes no lock (its users
+serialise calls on one allocator; i915 holds the address space's mutex),
+so the concurrency test runs independent allocators on a DDI task queue
+of four threads at once.
+
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
 illumos-ddi's private crate `illumos-kernel-private-virtio-sys` and its
@@ -1806,6 +1940,18 @@ devices together (see its header for the files it needs), and
 `tools/test/run-r5a-test.sh` runs `cdrmnull`, `rdrmnull` and
 `virtio_gpu` together on `misc/drm_core` (see its header).
 
+The carried helpers (R5e) build on illumos with the same kernel flags:
+
+```sh
+DDI_MAPFILE=<gate>/usr/src/uts/common/mapfiles/ddi.mapfile carried/build.sh
+# OUT (./target/carried): drm_helpers, drm_helpers_test
+carried/host-test.sh                 # the self-tests as a userland program
+carried/fetch-and-patch -f           # vendored files = Linux at the pin
+```
+
+`tools/test/run-r5e-test.sh` installs, tests and removes both modules on a
+disposable guest (see its header).
+
 ## Checks
 
 ```sh
@@ -1843,11 +1989,16 @@ drivers with `-N misc/drm_core`, checking that neither carries a symbol of the
 core's stateful modules), and builds `cdrmnull` with `-z defs` against
 the gate's `ddi.mapfile`. Neither loads a module, which needs root on a
 kernel that may panic (an R1 trial did panic the test machine, see
-*System memory and DMA*).
+*System memory and DMA*). The same job builds `misc/drm_helpers` and
+`drm_helpers_test` with `carried/build.sh` (vendored files against their
+SHA-256, `-z defs`, the module's globals against its scope mapfile) and
+runs `carried/host-test.sh` with gcc.
 
 ## Licence
 
 MPL-2.0, see `LICENSE`. The generated uAPI bindings in `crates/drm-uapi`
 and the patch in `tools/uapi/patches` are derived from MIT-licensed
 headers and keep that licence; the notice is in `crates/drm-uapi/src/lib.rs`
-and in the patch.
+and in the patch. The carried Linux files in `carried/*/linux/` keep their
+own MIT notices (`carried/drm_mm/LICENSE`); `linuxkpi/` and the carried
+helpers' tests are MIT, like the facade headers.
