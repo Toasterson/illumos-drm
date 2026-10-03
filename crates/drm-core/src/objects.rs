@@ -21,10 +21,30 @@
 //! handles: when the last handle goes, the name goes too, and `GEM_OPEN`
 //! can no longer find the object even if mappings keep it alive.
 //!
+//! # Driver hooks
+//!
+//! A driver may want to know which files use an object (virtio-gpu
+//! attaches a resource to the file's rendering context). Linux calls the
+//! object's `open` callback for every new handle and `close` for every
+//! removed one; here they run once per file and object ([`Hooks`]):
+//! `opened` when a file gains its first handle to the object, `closed`
+//! when its last one goes. A file may still hold several handles to one
+//! object (`GEM_OPEN` and `MODE_GETFB` make a new one each time, as in
+//! Linux), but only the first and the last change what the driver set up,
+//! so closing a second handle, or importing an object the file holds
+//! already, never takes the object away from the file's other handle.
+//! Each file's [`FileTable`] has a hook lock that is held across the
+//! decision, the hook and the change of the table, so that the hooks of
+//! one file and object strictly alternate even when several threads of a
+//! process add and remove handles at once. `PRIME_FD_TO_HANDLE` looks for
+//! the file's existing handle with the same lock held
+//! ([`Locked::find`]), as Linux's per-file PRIME lock does.
+//!
 //! # Lock order
 //!
-//! The name table lock is taken before a file's handle table lock, never
-//! after: [`handle_create`] runs with both held (name table first), and
+//! A file's hook lock comes first; the driver's hooks run with it held
+//! and no other lock of this module. The name table lock is taken before
+//! a file's handle table lock, never after: [`handle_create`] runs with both held (name table first), and
 //! closing a handle removes it with only the file's lock held
 //! ([`handle_delete`]) and then accounts for it with only the name table
 //! lock held ([`handle_released`]). References that come out of the tables
@@ -41,6 +61,7 @@ use ddi::{Errno, Sleepable};
 
 use crate::defer::DeferLink;
 use crate::idmap::{IdAlloc, IdMap};
+use crate::ksync::{KGuard, KMutex};
 
 /// The part of a GEM object that the core manages.
 pub struct ObjCommon {
@@ -186,6 +207,128 @@ pub fn open<R: ObjRef, A: IdAlloc>(names: &IdMap<R, A>, name: u32) -> Result<R, 
     names.get(name).map(ObjRef::clone_ref).ok_or(Errno::ENOENT)
 }
 
+/// What a driver does when a file starts or stops using an object
+/// (Linux's `drm_gem_object_funcs.open` and `.close`), called by
+/// [`Locked`] once per file and object, with the file's hook lock held and
+/// no other lock of this module.
+pub trait Hooks<R> {
+    /// The file gains its first handle to `obj`; an error refuses the
+    /// handle.
+    fn opened(&self, obj: &R) -> Result<(), Errno>;
+    /// The file's last handle to `obj` is gone, or the handle for which
+    /// [`Hooks::opened`] just succeeded could not be made.
+    fn closed(&self, obj: &R);
+}
+
+/// The handles of one open file, and the hook lock that keeps the
+/// driver's [`Hooks`] in step with them (see the module documentation).
+pub struct FileTable<R, B: IdAlloc> {
+    /// Held by [`Locked`] for every change of `handles`.
+    hooks: KMutex<()>,
+    handles: KMutex<IdMap<R, B>>,
+}
+
+impl<R: ObjRef, B: IdAlloc> FileTable<R, B> {
+    /// An empty table whose handle numbers come from `ids`.
+    pub fn new(ids: B) -> FileTable<R, B> {
+        FileTable { hooks: KMutex::new(()), handles: KMutex::new(IdMap::new(ids)) }
+    }
+
+    /// The handle table, for lookups. Adding and removing handles goes
+    /// through [`FileTable::lock`].
+    pub fn handles(&self) -> KGuard<'_, IdMap<R, B>> {
+        self.handles.lock()
+    }
+
+    /// Takes the file's hook lock, which every change of the table needs.
+    /// A driver hook must not change the same file's handles, which would
+    /// take it again.
+    pub fn lock(&self) -> Locked<'_, R, B> {
+        Locked { table: self, _hooks: self.hooks.lock() }
+    }
+}
+
+/// A [`FileTable`] with its hook lock held.
+pub struct Locked<'a, R, B: IdAlloc> {
+    table: &'a FileTable<R, B>,
+    _hooks: KGuard<'a, ()>,
+}
+
+impl<R: ObjRef, B: IdAlloc> Locked<'_, R, B> {
+    /// The file's handle to an object satisfying `pred`, if it has one
+    /// (`PRIME_FD_TO_HANDLE`'s lookup). `pred` runs with the handle table
+    /// locked and must not call into the GEM state.
+    pub fn find(&self, pred: impl Fn(&R) -> bool) -> Option<u32> {
+        self.table.handles.lock().iter().find(|(_, r)| pred(r)).map(|(n, _)| n)
+    }
+
+    /// Whether the file holds a handle to `obj`.
+    pub fn holds(&self, obj: &R) -> bool {
+        self.find(|r| r.same(obj)).is_some()
+    }
+
+    /// Creates a new handle to `obj` (Linux's `drm_gem_handle_create_tail`)
+    /// and returns it. If the file holds no handle to the object yet,
+    /// [`Hooks::opened`] runs first; if the handle cannot be made after
+    /// that, [`Hooks::closed`] undoes it. A file that holds the object
+    /// already gets another handle and no hook runs, so a failure cannot
+    /// undo what the existing handle set up. On failure the reference
+    /// comes back with the error.
+    pub fn add<A: IdAlloc>(
+        &self,
+        names: &KMutex<IdMap<R, A>>,
+        obj: R,
+        hooks: &impl Hooks<R>,
+        ctx: &Sleepable,
+    ) -> Result<u32, (R, Errno)> {
+        let first = !self.holds(&obj);
+        if first && let Err(e) = hooks.opened(&obj) {
+            return Err((obj, e));
+        }
+        let r = {
+            let mut n = names.lock();
+            let mut h = self.table.handles.lock();
+            handle_create(&mut n, &mut h, obj, ctx)
+        };
+        r.map_err(|(obj, e)| {
+            if first {
+                hooks.closed(&obj);
+            }
+            (obj, e)
+        })
+    }
+
+    /// Removes `handle` (`EINVAL` if there is none) and accounts for it
+    /// in the name table ([`handle_released`]); if it was the file's last
+    /// handle to its object, [`Hooks::closed`] runs. Returns the handle's
+    /// reference and the name table's, if the name went, for the caller to
+    /// drop.
+    pub fn remove<A: IdAlloc>(
+        &self,
+        names: &KMutex<IdMap<R, A>>,
+        handle: u32,
+        hooks: &impl Hooks<R>,
+    ) -> Result<(R, Option<R>), Errno> {
+        let r = handle_delete(&mut self.table.handles.lock(), handle)?;
+        Ok(self.released(names, r, hooks))
+    }
+
+    /// Removes the handle with the lowest number, as [`Locked::remove`]
+    /// does, or returns `None` if the table is empty (`close(9E)`).
+    pub fn pop<A: IdAlloc>(&self, names: &KMutex<IdMap<R, A>>, hooks: &impl Hooks<R>) -> Option<(R, Option<R>)> {
+        let (_, r) = self.table.handles.lock().pop_first()?;
+        Some(self.released(names, r, hooks))
+    }
+
+    fn released<A: IdAlloc>(&self, names: &KMutex<IdMap<R, A>>, r: R, hooks: &impl Hooks<R>) -> (R, Option<R>) {
+        let name_ref = handle_released(&mut names.lock(), &r);
+        if !self.holds(&r) {
+            hooks.closed(&r);
+        }
+        (r, name_ref)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -204,6 +347,9 @@ mod tests {
         /// incremented with the file's lock held, decremented with the name
         /// table's.
         closing: AtomicU32,
+        /// Bit `f` is set while file `f`'s driver hooks have the object
+        /// open (what virtio-gpu's context attachment is).
+        attached: AtomicU32,
     }
     impl Drop for Obj<'_> {
         fn drop(&mut self) {
@@ -232,7 +378,12 @@ mod tests {
         IdMap::new(FirstFit::new(1, i32::MAX as u32))
     }
     fn obj(dropped: &AtomicUsize) -> KArc<Obj<'_>> {
-        KArc::new(Obj { common: ObjCommon::new(4096), dropped, closing: AtomicU32::new(0) }, &ctx()).ok().unwrap()
+        KArc::new(
+            Obj { common: ObjCommon::new(4096), dropped, closing: AtomicU32::new(0), attached: AtomicU32::new(0) },
+            &ctx(),
+        )
+        .ok()
+        .unwrap()
     }
 
     /// The invariants between objects, handle tables and the name table.
@@ -429,5 +580,328 @@ mod tests {
         assert!(names.lock().unwrap().is_empty(), "names go with the last handle");
         assert_eq!(dropped.load(Ordering::SeqCst), created.load(Ordering::SeqCst));
         assert!(created.load(Ordering::SeqCst) > 0);
+    }
+
+    /// A driver whose hooks attach an object to a file, as virtio-gpu
+    /// attaches a resource to the file's context: opening an object the
+    /// file has open already, or closing one it does not, is a test
+    /// failure. `fail_open` makes the next `opened` fail.
+    struct Driver {
+        file: u32,
+        opens: AtomicUsize,
+        closes: AtomicUsize,
+        fail_open: std::sync::atomic::AtomicBool,
+        /// Yield inside the hooks, to widen the windows between threads.
+        slow: bool,
+    }
+    impl Driver {
+        fn new(file: u32) -> Driver {
+            Driver {
+                file,
+                opens: AtomicUsize::new(0),
+                closes: AtomicUsize::new(0),
+                fail_open: std::sync::atomic::AtomicBool::new(false),
+                slow: false,
+            }
+        }
+        fn counts(&self) -> (usize, usize) {
+            (self.opens.load(Ordering::SeqCst), self.closes.load(Ordering::SeqCst))
+        }
+    }
+    impl<'a> Hooks<KArc<Obj<'a>>> for Driver {
+        fn opened(&self, obj: &KArc<Obj<'a>>) -> Result<(), Errno> {
+            if self.fail_open.swap(false, Ordering::SeqCst) {
+                return Err(Errno::EIO);
+            }
+            if self.slow {
+                thread::yield_now();
+            }
+            let bit = 1 << self.file;
+            let was = obj.attached.fetch_or(bit, Ordering::SeqCst);
+            assert_eq!(was & bit, 0, "opened for an object the file has open already");
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn closed(&self, obj: &KArc<Obj<'a>>) {
+            if self.slow {
+                thread::yield_now();
+            }
+            let bit = 1 << self.file;
+            let was = obj.attached.fetch_and(!bit, Ordering::SeqCst);
+            assert_ne!(was & bit, 0, "closed for an object the file does not have open");
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    type File<'a> = FileTable<KArc<Obj<'a>>, FirstFit>;
+
+    fn file<'a>() -> File<'a> {
+        FileTable::new(FirstFit::new(1, i32::MAX as u32))
+    }
+
+    /// `PRIME_FD_TO_HANDLE` as the kernel does it: the file's handle for
+    /// the object if it has one, else a new one. The dma-buf's reference
+    /// stays with the caller.
+    fn import<'a>(
+        f: &File<'a>,
+        names: &KMutex<Table<'a>>,
+        buf: &KArc<Obj<'a>>,
+        d: &Driver,
+        ctx: &Sleepable,
+    ) -> Result<u32, Errno> {
+        let l = f.lock();
+        if let Some(h) = l.find(|r| r.same(buf)) {
+            return Ok(h);
+        }
+        l.add(names, buf.clone(), d, ctx).map_err(|(_, e)| e)
+    }
+
+    fn attached(o: &KArc<Obj<'_>>, file: u32) -> bool {
+        o.attached.load(Ordering::SeqCst) & (1 << file) != 0
+    }
+
+    /// Importing an object a file holds returns its handle and runs no
+    /// hook (the G8 bug: the old code opened the object again and then
+    /// closed it, which detached the virtio-gpu resource the existing
+    /// handle used). A second handle by `GEM_OPEN` runs no hook either, and
+    /// only the last handle's removal closes.
+    #[test]
+    fn reimport_and_second_handles_keep_the_attachment() {
+        let ctx = ctx();
+        let dropped = AtomicUsize::new(0);
+        let names = KMutex::new(table());
+        let (a, b) = (file(), file());
+        let (da, db) = (Driver::new(0), Driver::new(1));
+        let o = obj(&dropped);
+        let h = a.lock().add(&names, o.clone(), &da, &ctx).ok().unwrap();
+        assert_eq!(da.counts(), (1, 0));
+        assert!(attached(&o, 0));
+        // The same file imports its own buffer, twice.
+        assert_eq!(import(&a, &names, &o, &da, &ctx), Ok(h));
+        assert_eq!(import(&a, &names, &o, &da, &ctx), Ok(h));
+        assert_eq!(da.counts(), (1, 0), "no hook for a re-import");
+        assert!(attached(&o, 0));
+        assert_eq!(o.common().handle_count(), 1, "no second handle");
+        // Another file imports it twice: one handle, one open.
+        let hb = import(&b, &names, &o, &db, &ctx).unwrap();
+        assert_eq!(import(&b, &names, &o, &db, &ctx), Ok(hb));
+        assert_eq!(db.counts(), (1, 0));
+        assert!(attached(&o, 1));
+        // GEM_OPEN in the creating file: a second handle, no hook.
+        let name = flink(&mut names.lock(), &o, &ctx).unwrap();
+        let n = open(&names.lock(), name).unwrap();
+        let h2 = a.lock().add(&names, n, &da, &ctx).ok().unwrap();
+        assert_ne!(h2, h);
+        assert_eq!(da.counts(), (1, 0));
+        // An import with two handles finds one of them.
+        let found = import(&a, &names, &o, &da, &ctx).unwrap();
+        assert!(found == h || found == h2);
+        // Closing the first handle keeps the attachment for the second.
+        let (r, nr) = a.lock().remove(&names, h, &da).unwrap();
+        assert!(nr.is_none());
+        drop(r);
+        assert_eq!(da.counts(), (1, 0), "the file still holds the object");
+        assert!(attached(&o, 0));
+        assert_eq!(a.lock().remove(&names, h, &da).err(), Some(Errno::EINVAL));
+        // The last handle of the file closes.
+        let (r, _) = a.lock().remove(&names, h2, &da).unwrap();
+        drop(r);
+        assert_eq!(da.counts(), (1, 1));
+        assert!(!attached(&o, 0));
+        assert!(attached(&o, 1), "the other file is not affected");
+        // close(9E) of the other file.
+        while let Some((r, nr)) = b.lock().pop(&names, &db) {
+            drop((r, nr));
+        }
+        assert_eq!(db.counts(), (1, 1));
+        assert_eq!(o.attached.load(Ordering::SeqCst), 0);
+        drop(o);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    /// An allocator that hands out `n` numbers and then fails.
+    struct Few(FirstFit, u32);
+    impl IdAlloc for Few {
+        fn alloc(&mut self) -> Option<u32> {
+            if self.1 == 0 {
+                return None;
+            }
+            self.1 -= 1;
+            self.0.alloc()
+        }
+        fn free(&mut self, id: u32) {
+            self.0.free(id)
+        }
+    }
+
+    /// A failed handle creation undoes only what it did itself: the open
+    /// hook it ran, never the attachment of a handle the file had before.
+    #[test]
+    fn failed_creation_undoes_only_its_own_open() {
+        let ctx = ctx();
+        let dropped = AtomicUsize::new(0);
+        let names = KMutex::new(table());
+        let f: FileTable<KArc<Obj<'_>>, Few> = FileTable::new(Few(FirstFit::new(1, i32::MAX as u32), 1));
+        let d = Driver::new(0);
+        let (o, p) = (obj(&dropped), obj(&dropped));
+        // The open hook refuses: no handle, nothing to undo.
+        d.fail_open.store(true, Ordering::SeqCst);
+        let (back, e) = f.lock().add(&names, o.clone(), &d, &ctx).err().unwrap();
+        assert_eq!(e, Errno::EIO);
+        drop(back);
+        assert_eq!(d.counts(), (0, 0));
+        assert_eq!(o.common().handle_count(), 0);
+        // The one number goes to o.
+        let h = f.lock().add(&names, o.clone(), &d, &ctx).ok().unwrap();
+        assert_eq!(d.counts(), (1, 0));
+        // A second handle to o fails for want of numbers: o was open
+        // before, so nothing is closed.
+        let (back, e) = f.lock().add(&names, o.clone(), &d, &ctx).err().unwrap();
+        assert_eq!(e, Errno::ENOMEM);
+        drop(back);
+        assert_eq!(d.counts(), (1, 0));
+        assert!(attached(&o, 0));
+        assert_eq!(o.common().handle_count(), 1, "the count is restored");
+        // A first handle to p fails the same way: its own open is undone.
+        let (back, _) = f.lock().add(&names, p.clone(), &d, &ctx).err().unwrap();
+        drop(back);
+        assert_eq!(d.counts(), (2, 1));
+        assert!(!attached(&p, 0));
+        assert!(attached(&o, 0));
+        let (r, _) = f.lock().remove(&names, h, &d).unwrap();
+        drop(r);
+        assert_eq!(d.counts(), (2, 2));
+        drop((o, p));
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+    }
+
+    /// Eight threads create objects, import shared buffers (some twice in
+    /// a row, as DRI3 does), open them by name and close handles in four
+    /// files, with hooks that yield, while a checker verifies with every
+    /// hook lock held that a file has an object open exactly when it holds
+    /// a handle to it. The driver's assertions fail on any open of an open
+    /// object or close of a closed one. At the end every file is closed:
+    /// every open has its close and every object is destroyed once.
+    #[test]
+    fn concurrent_hooks_follow_the_handles() {
+        const FILES: usize = 4;
+        const THREADS: usize = 8;
+        const STEPS: usize = 1500;
+        let dropped = AtomicUsize::new(0);
+        let created = AtomicUsize::new(0);
+        let names: KMutex<Table<'_>> = KMutex::new(table());
+        let files: Vec<File<'_>> = (0..FILES).map(|_| file()).collect();
+        let drivers: Vec<Driver> = (0..FILES as u32).map(|f| Driver { slow: true, ..Driver::new(f) }).collect();
+        // The shared buffers (dma-bufs), each with its own reference.
+        let bufs: Vec<KArc<Obj<'_>>> = (0..6).map(|_| obj(&dropped)).collect();
+        created.fetch_add(bufs.len(), Ordering::SeqCst);
+        let published: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let check_all = || {
+            let locks: Vec<_> = files.iter().map(|f| f.lock()).collect();
+            let all: Vec<KArc<Obj<'_>>> = files
+                .iter()
+                .flat_map(|f| f.handles().iter().map(|(_, r)| r.clone()).collect::<Vec<_>>())
+                .chain(bufs.iter().cloned())
+                .collect();
+            for o in &all {
+                for (i, l) in locks.iter().enumerate() {
+                    assert_eq!(attached(o, i as u32), l.holds(o), "file {i}: open exactly while it holds a handle");
+                }
+            }
+            drop(locks);
+            drop(all);
+        };
+        thread::scope(|s| {
+            let checker = s.spawn(|| {
+                while !stop.load(Ordering::SeqCst) {
+                    check_all();
+                    thread::sleep(std::time::Duration::from_micros(200));
+                }
+            });
+            let workers: Vec<_> = (0..THREADS)
+                .map(|t| {
+                    let (names, files, drivers, bufs, published, dropped, created) =
+                        (&names, &files, &drivers, &bufs, &published, &dropped, &created);
+                    s.spawn(move || {
+                        let ctx = ctx();
+                        let mut rng = Lcg(t as u64 + 101);
+                        for _ in 0..STEPS {
+                            let f = rng.next(FILES);
+                            let (file, d) = (&files[f], &drivers[f]);
+                            match rng.next(5) {
+                                0 => {
+                                    created.fetch_add(1, Ordering::SeqCst);
+                                    let o = obj(dropped);
+                                    file.lock().add(names, o, d, &ctx).ok().unwrap();
+                                }
+                                1 => {
+                                    let b = &bufs[rng.next(bufs.len())];
+                                    let h = import(file, names, b, d, &ctx).unwrap();
+                                    if rng.next(2) == 0 {
+                                        // DRI3 imports what it holds again.
+                                        let again = import(file, names, b, d, &ctx).unwrap();
+                                        // Another thread may have closed h in between.
+                                        let _ = again;
+                                    }
+                                    if let Ok(name) = flink(&mut names.lock(), b, &ctx) {
+                                        published.lock().unwrap().push(name);
+                                    }
+                                    let _ = h;
+                                }
+                                2 | 3 => {
+                                    let Some((h, _)) = file.handles().iter().next().map(|(h, r)| (h, r.clone())) else {
+                                        continue;
+                                    };
+                                    match file.lock().remove(names, h, d) {
+                                        Ok((r, nr)) => drop((r, nr)),
+                                        // Removed by another thread meanwhile.
+                                        Err(e) => assert_eq!(e, Errno::EINVAL),
+                                    }
+                                }
+                                _ => {
+                                    let name = {
+                                        let p = published.lock().unwrap();
+                                        if p.is_empty() {
+                                            continue;
+                                        }
+                                        p[rng.next(p.len())]
+                                    };
+                                    let o = open(&names.lock(), name);
+                                    match o {
+                                        Ok(o) => {
+                                            file.lock().add(names, o, d, &ctx).ok().unwrap();
+                                        }
+                                        Err(e) => assert_eq!(e, Errno::ENOENT),
+                                    }
+                                }
+                            }
+                        }
+                    })
+                })
+                .collect();
+            // Stop the checker before reporting a worker's failure, so that a
+            // failure ends the test instead of hanging it.
+            let results: Vec<_> = workers.into_iter().map(|w| w.join()).collect();
+            stop.store(true, Ordering::SeqCst);
+            let checked = checker.join();
+            for r in results {
+                r.unwrap();
+            }
+            checked.unwrap();
+        });
+        check_all();
+        for (f, d) in files.iter().zip(&drivers) {
+            while let Some((r, nr)) = f.lock().pop(&names, d) {
+                drop((r, nr));
+            }
+            let (o, c) = d.counts();
+            assert_eq!(o, c, "every open has its close");
+            assert!(o > 0);
+        }
+        assert!(bufs.iter().all(|b| b.attached.load(Ordering::SeqCst) == 0));
+        drop(bufs);
+        assert!(names.lock().is_empty());
+        assert_eq!(dropped.load(Ordering::SeqCst), created.load(Ordering::SeqCst));
     }
 }

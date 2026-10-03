@@ -63,11 +63,20 @@ struct drm_illumos_fault;
  * free		frees the driver's structure once the last reference is
  *		gone and the core has released its state. Required. May be
  *		called from a task queue (never from interrupt context).
- * open		a handle to the object is being created on `file` (also when
- *		an object is opened by name or imported; once per handle). A
- *		negative errno refuses the handle. Optional.
- * close	a handle of the object on `file` was closed (once per
- *		handle, as Linux's drm_gem_object_release_handle). Optional.
+ * open		`file` is getting its first handle to the object (made,
+ *		opened by name or imported). Once per file and object, not
+ *		per handle as in Linux: a second handle on the same file
+ *		(GEM_OPEN, MODE_GETFB, drm_gem_handle_create()) causes no
+ *		call, and PRIME_FD_TO_HANDLE of an object the file holds
+ *		returns the existing handle without one. A negative errno
+ *		refuses the handle. Called with no lock a driver can see; it
+ *		must not create or delete handles of `file`. Optional.
+ * close	the last handle of the object on `file` was closed, or the
+ *		handle that open was just called for could not be made.
+ *		Never while `file` still holds a handle to the object, so
+ *		open and close of one file and object strictly alternate
+ *		(a driver that counts them, as Linux drivers do, sees the
+ *		same balance). Optional.
  * illumos_release
  *		called when the last reference is gone and the core has
  *		released its state, before free, in thread context: the driver
