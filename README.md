@@ -1237,6 +1237,141 @@ Under Xorg, the modesetting driver works, but OpenIndiana's Xorg is
 built without glamor, so it offers neither DRI2 nor DRI3 and `glxinfo`
 reports softpipe; GLX with virgl needs an Xorg built with glamor.
 
+## Running beside the legacy stack
+
+OpenIndiana's DRM drivers come from gfx-drm: the core `misc/drm` and the
+Intel driver `i915` in the package `driver/graphics/drm`, which also binds
+the Intel GPUs it supports. This repository's stack is `misc/drm_core`
+(`driver/graphics/drm-core`) and the drivers linked against it
+(`virtio_gpu`, `cdrmnull`, `rdrmnull`, and later an Intel driver). The two
+stacks install together on one machine; they must never be loaded at the
+same time, and loading both by accident must be impossible. Three things
+make it so.
+
+**Each core refuses the other.** `misc/drm_core`'s `_init` returns `EBUSY`
+with the warning "drm_core: the legacy DRM core misc/drm (gfx-drm) is
+loaded; ..." while a module named `drm` is loaded, and gfx-drm's `misc/drm`
+returns `EBUSY` with "drm: the DRM core misc/drm_core is loaded; ..." while
+a module named `drm_core` is loaded. Every driver depends on its core
+(`-N misc/drm` or `-N misc/drm_core`), and the kernel loads and
+initialises a module's dependencies first, so a driver of one stack fails
+to load while the other stack is loaded, whichever path or dependency
+loads it. The reverse check is a change to gfx-drm's `drm_sunmod.c`
+(branch `drm-coexist` of gfx-drm, from `master`); until a
+`driver/graphics/drm` with it is installed, only `misc/drm_core` refuses,
+and OpenIndiana's `misc/drm` still loads beside `misc/drm_core` (the G7
+test shows both). Both checks walk the module list under `mod_lock` as
+`mod_name_to_modid()` does and compare `mod_modname`, which is the same
+whatever path loaded the module (illumos-ddi's
+`ddi::private::module_loaded`, and the same loop in C). Neither takes a
+hold: a hold (`mod_hold_by_name`) waits while a module is busy, which it
+is during its `_init`, so two modules holding each other from their
+`_init` could deadlock; the walk waits only for `mod_lock`, which the
+module framework never holds while it calls `_init` or waits for a busy
+module (`modinstall` asserts `MUTEX_NOT_HELD(&mod_lock)`; `mod_hold_by_modctl`
+releases it in `cv_wait`). Two cores loading at the same time cannot both
+succeed: the framework sets `mod_loaded` before it calls `_init` and clears
+it only after an unload, and each check's `mutex_enter` (a locked
+instruction) orders that store before its reads, so at least one of them
+sees the other and refuses (both may refuse; a retry then loads one).
+
+**drmadm(8) selects the stack for boot.** `tools/drmadm/drmadm`, a shell
+script in the package `driver/graphics/drmadm` (required by
+`driver/graphics/drm-core`, so it stays when the new stack is removed),
+with its manual page `tools/drmadm/drmadm.8`:
+
+```sh
+drmadm status               # selection, packages, loaded modules, Intel aliases, excludes
+drmadm select legacy|new    # for the next boot
+drmadm -R /mnt select legacy    # in a mounted boot environment
+```
+
+`select` refuses while any module of either stack is loaded and while
+another `drmadm` holds its lock (`/etc/system.d/.drmadm.lock`), then:
+
+1. moves the Intel GPU aliases to the driver of the selected stack: `i915`
+   for the legacy stack, `i915n` for the new one. `i915n` is the name
+   reserved for this stack's Intel driver (work item G5); until it exists,
+   `select new` takes the aliases from `i915` and leaves them unbound, says
+   so, and an Intel GPU falls back to `vgatext` (the GPU's `pciclass,0300`
+   compatible name). The set moved is the aliases the installed
+   `driver/graphics/drm` declares for `i915` (`pkg contents -m`), those
+   bound to `i915` or `i915n`, and those recorded in the fragment by an
+   earlier selection; `select legacy` gives `i915` exactly its package's
+   aliases when that package is installed. Aliases of the set that are bound
+   to any other driver are reported and left alone.
+2. writes `/etc/system.d/driver:graphics:drmadm` (named after the package,
+   as `system(5)` recommends) with the selection, its time, the alias set
+   and `exclude:` lines for the other stack's modules: `misc/drm`,
+   `drv/i915`, `drv/radeon` when the new stack is selected, `misc/drm_core`,
+   `drv/i915n`, `drv/virtio_gpu`, `drv/cdrmnull`, `drv/rdrmnull` when the
+   legacy stack is. Each is written as `class/name` (the form of
+   `system(5)`, which matches a load as a dependency or by class) and as
+   the bare name, because `mod_load` checks the exclude list against both
+   `mod_filename` and `mod_modname` (`os/modctl.c`), and only the bare name
+   matches `modload /kernel/misc/amd64/drm`. Excluding the core alone would
+   suffice, since every driver needs it; the drivers are listed so that
+   their loads at boot fail on their own exclusion.
+3. runs `bootadm update-archive`: the kernel reads `/etc/driver_aliases`
+   and `/etc/system.d/.self-assembly` (which `bootadm` assembles from the
+   fragments; `/etc/system.d` exists since illumos 2018) from the boot
+   archive, and `exclude:` lines are read only at boot.
+
+A selection therefore takes effect at the next boot; until then the
+guards keep the running system safe. Selecting the selected stack again
+changes nothing.
+
+Why `update_drv` and why `-n`: `update_drv -a/-d -i` is the supported way
+to change `/etc/driver_aliases` (it locks the file against `add_drv` and
+`rem_drv`, checks that an alias is not bound to another driver and
+rewrites the file atomically), where editing the file by hand would race
+with them and skip those checks. Without `-n`, `update_drv -a` would bind
+and attach the driver at once (loading its stack) and `update_drv -d`
+would try to unconfigure and unload the bound devices; with `-n` it only
+edits the file, which matches a selection for the next boot. Two IPS
+consequences: while the new stack is selected, `pkg verify
+driver/graphics/drm` reports the `i915` aliases as missing, and `pkg fix`
+would give them back (run `drmadm select new` again); and a package of
+this stack must not declare a legacy alias in its driver action, because
+IPS refuses to install a driver action whose alias another installed
+driver action claims (`pkg5`'s `driver.py`). `i915n`'s package will
+therefore deliver its driver action without aliases, and no package of
+this repository binds an Intel GPU at installation (`virtio_gpu` binds only
+`pci1af4,1050`, `cdrmnull` and `rdrmnull` are pseudo devices).
+
+**Device links.** Both stacks create `ddi_display:drm` minor nodes, and
+the devfsadm link module `SUNW_drm_link` makes `/dev/dri/<minor name>`
+for either; since gfx-drm's G2 change it is the package
+`driver/graphics/drm-devlink`, which libdrm requires instead of the
+legacy kernel package. The `devlink=` attributes of this repository's
+driver actions add the same links where that module is missing; both
+make identical links. A switch leaves the links of the stack that is no
+longer loaded pointing at minor nodes that no longer exist. `devfsadm -C`
+removes dangling links only through the link modules' removal rules, and
+`SUNW_drm_link`'s rule (`^dri/[a-z]D?[0-9]+$`) matched none of `card0`,
+`controlD64` or `renderD128`; gfx-drm's branch `drm-coexist` fixes it
+(`^dri/[a-z]+D?[0-9]+$`), so after a switch `devfsadm -C` cleans
+`/dev/dri`. libdrm 2.4.134 enumerates `/dev/dri`, takes a link's node only
+if `stat(2)` reaches it and libdevinfo shows a `ddi_display:drm` minor with
+its device number, so it skips stale links (a node of an excluded driver
+cannot attach) and lists only the devices of the stack that is attached.
+
+**Recovery.** From the boot loader, boot the previous boot environment;
+or boot single user (`-s`) and remove the fragment:
+
+```sh
+rm /etc/system.d/driver:graphics:drmadm
+bootadm update-archive
+```
+
+then reboot and run `drmadm select legacy` (the Intel aliases still belong
+to the driver of the removed selection). From another boot environment:
+`beadm mount <be> /mnt; drmadm -R /mnt select legacy; beadm umount <be>`.
+Before removing the new stack's packages, run `drmadm select legacy`: the
+fragment is not a packaged file, and a selection of the new stack would
+keep excluding the legacy modules. `docs/x230.md` is the operator note
+for the ThinkPad X230.
+
 ## Building
 
 Type checking, linting and host tests work on any host with stable Rust
