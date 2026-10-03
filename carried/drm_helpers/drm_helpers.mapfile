@@ -1,0 +1,29 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The functions of misc/drm_helpers a module may use: link it with
+#   ld -ztype=kmod -N misc/drm_helpers -z defs ... -M drm_helpers.mapfile
+# They are the Linux symbols of the carried helpers that i915's headless
+# build (Linux v7.2, the R5c configuration) imports, and no others: drm_mm's
+# ten (drm_mm_print() and the linuxkpi red-black tree compiled into the
+# module stay local). drm_helpers_scope.mapfile, the module's own
+# symbol-scope mapfile, lists the same names; CI compares the two lists
+# and the module's global symbols.
+#
+$mapfile_version 2
+
+SYMBOL_SCOPE {
+	global:
+		__drm_mm_interval_first		{ FLAGS = EXTERN };
+		drm_mm_init			{ FLAGS = EXTERN };
+		drm_mm_insert_node_in_range	{ FLAGS = EXTERN };
+		drm_mm_remove_node		{ FLAGS = EXTERN };
+		drm_mm_reserve_node		{ FLAGS = EXTERN };
+		drm_mm_scan_add_block		{ FLAGS = EXTERN };
+		drm_mm_scan_color_evict		{ FLAGS = EXTERN };
+		drm_mm_scan_init_with_range	{ FLAGS = EXTERN };
+		drm_mm_scan_remove_block	{ FLAGS = EXTERN };
+		drm_mm_takedown			{ FLAGS = EXTERN };
+};

@@ -1,0 +1,20 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The symbols misc/drm_helpers uses that the gate's ddi.mapfile
+# (usr/src/uts/common/mapfiles/ddi.mapfile) does not declare, for its link
+# with -z defs (carried/build.sh). Declarations only (EXTERN): genunix
+# provides them.
+#
+$mapfile_version 2
+
+SYMBOL_SCOPE {
+	global:
+		#
+		# The linkage of a miscellaneous module (modlmisc(9S)),
+		# exported by genunix; the DDI lists only mod_driverops.
+		#
+		mod_miscops		{ FLAGS = EXTERN };
+};

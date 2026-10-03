@@ -1,0 +1,7 @@
+# The Linux files carried for drm_mm, vendored unmodified under linux/ at
+# the revision of ../linux.pin: path in the Linux tree, SHA-256, licence.
+# Both carry the MIT permission notice of Tungsten Graphics and Intel in
+# their header comment and no SPDX tag; the notice stays intact (it is
+# also in ./LICENSE for the package).
+drivers/gpu/drm/drm_mm.c	456a003da23d8d4b243d6ea2e59d69ddf593aef09d81c5b70015726fd666adbf	MIT
+include/drm/drm_mm.h	483d7f163534dad0edc9e11b307be40e097c58fd2e6de3ac7c6612fa44f97462	MIT

@@ -1,0 +1,7 @@
+# The Linux revision every carried helper (carried/<helper>/linux/) comes
+# from, and where fetch-and-patch -f fetches it to check the vendored
+# copies against. Linux v7.2, the revision the R5 analysis counted and R5c
+# measures (notes: drm-r5-c-facade-analysis section 1).
+rev=8d3ae59288f1e7d58d76558a6ee96d533bc5019f
+tag=v7.2
+url=https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
