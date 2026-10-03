@@ -30,4 +30,10 @@ SYMBOL_SCOPE {
 		ddi_intr_get_softint_pri	{ FLAGS = EXTERN };
 		ddi_intr_remove_softint		{ FLAGS = EXTERN };
 		ddi_intr_trigger_softint	{ FLAGS = EXTERN };
+		#
+		# servicing_interrupt (sys/disp.h, genunix, no manual page):
+		# the fence tests (R5b) check with it that the core runs a
+		# fence's release callback in thread context.
+		#
+		servicing_interrupt		{ FLAGS = EXTERN };
 };
