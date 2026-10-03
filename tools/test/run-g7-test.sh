@@ -50,8 +50,8 @@
 # Run as root in a directory that holds drm-test-lib.sh, drm_module.a,
 # drm_core.mapfile, drm_facade_ctf.o (optional), virtio_gpu.a, the cdrmnull
 # module (drivers/cdrmnull/build.sh) and cdrmnull.conf, drmadm and drmadm.8
-# (tools/drmadm), packaging/*.p5m as *.p5m, packaging/xorg.conf.d and
-# LICENSE. The machine needs a virtio-gpu device (pci1af4,1050), gcc and,
+# (tools/drmadm), packaging/*.p5m as *.p5m, packaging/drm-perms.xml,
+# packaging/xorg.conf.d and LICENSE. The machine needs a virtio-gpu device (pci1af4,1050), gcc and,
 # from the install phase on, libdrm 2.4.134 with its tests
 # (/opt/drm-tests/amd64). Use a disposable VM.
 set -u
@@ -253,7 +253,8 @@ phase_install() {
 	R=$PWD/repo
 	rm -rf "$P" "$R"
 	mkdir -p "$P/kernel/misc/amd64" "$P/kernel/drv/amd64" "$P/usr/kernel/drv/amd64" \
-	    "$P/usr/sbin" "$P/usr/share/man/man8" "$P/etc/X11/xorg.conf.d"
+	    "$P/usr/sbin" "$P/usr/share/man/man8" "$P/etc/X11/xorg.conf.d" \
+	    "$P/lib/svc/manifest/system"
 	ctf=
 	[ -f drm_facade_ctf.o ] && ctf="-z defaultextract drm_facade_ctf.o"
 	# shellcheck disable=SC2086 # $ctf is empty or two words
@@ -265,6 +266,7 @@ phase_install() {
 	step cp cdrmnull.conf "$P/usr/kernel/drv/cdrmnull.conf" || exit 1
 	step cp drmadm "$P/usr/sbin/drmadm" || exit 1
 	step cp drmadm.8 "$P/usr/share/man/man8/drmadm.8" || exit 1
+	step cp drm-perms.xml "$P/lib/svc/manifest/system/drm-perms.xml" || exit 1
 	step cp xorg.conf.d/20-virtio-gpu.conf "$P/etc/X11/xorg.conf.d/" || exit 1
 	step pkgrepo create "$R" || exit 1
 	step pkgrepo -s "$R" set publisher/prefix=illumos-drm || exit 1
