@@ -1,0 +1,77 @@
+drm_cache: build only drm_clflush_virt_range() until R5c's page model
+
+illumos-drm R5e patch 0001 (carried/drm_cache/patches), on Linux v7.2
+8d3ae59288 drivers/gpu/drm/drm_cache.c (MIT).
+
+drm_clflush_pages() and drm_clflush_sg() flush through kmap_atomic() on a
+struct page and walk a struct sg_table; drm_need_swiotlb() reads the iomem
+resource tree, Xen and memory-encryption state; drm_memcpy_from_wc() uses
+iosys_map, static keys and the kernel FPU. On illumos those are the
+compatibility layer's struct page, scatterlist and iosys-map models (R5c),
+which do not exist yet. This patch puts them, and the headers they need,
+under CONFIG_LKPI_STRUCT_PAGE, which nothing defines today: the module
+builds drm_clflush_virt_range() alone, the one function of the file that
+needs no page model. When R5c's models land, the compatibility layer
+defines CONFIG_LKPI_STRUCT_PAGE, drm_clflush_sg() (which i915's headless
+build imports) compiles unchanged, it joins drm_helpers.mapfile, and this
+patch can be dropped. The code itself is untouched.
+
+--- a/drivers/gpu/drm/drm_cache.c
++++ b/drivers/gpu/drm/drm_cache.c
+@@ -27,12 +27,14 @@
+ /*
+  * Authors: Thomas Hellström <thomas-at-tungstengraphics-dot-com>
+  */
+-#include <linux/cc_platform.h>
+ #include <linux/export.h>
++#ifdef CONFIG_LKPI_STRUCT_PAGE
++#include <linux/cc_platform.h>
+ #include <linux/highmem.h>
+ #include <linux/ioport.h>
+ #include <linux/iosys-map.h>
+ #include <xen/xen.h>
++#endif
+ 
+ #include <drm/drm_cache.h>
+ 
+@@ -42,6 +44,7 @@
+ #if defined(CONFIG_X86)
+ #include <asm/smp.h>
+ 
++#ifdef CONFIG_LKPI_STRUCT_PAGE
+ /*
+  * clflushopt is an unordered instruction which needs fencing with mfence or
+  * sfence to avoid ordering issues.  For drm_clflush_page this fencing happens
+@@ -73,8 +76,10 @@
+ 		drm_clflush_page(*pages++);
+ 	mb(); /*Also used after CLFLUSH so that all cache is flushed*/
+ }
++#endif /* CONFIG_LKPI_STRUCT_PAGE */
+ #endif
+ 
++#ifdef CONFIG_LKPI_STRUCT_PAGE
+ /**
+  * drm_clflush_pages - Flush dcache lines of a set of pages.
+  * @pages: List of pages to be flushed.
+@@ -144,6 +149,7 @@
+ #endif
+ }
+ EXPORT_SYMBOL(drm_clflush_sg);
++#endif /* CONFIG_LKPI_STRUCT_PAGE */
+ 
+ /**
+  * drm_clflush_virt_range - Flush dcache lines of a region
+@@ -177,6 +183,8 @@
+ }
+ EXPORT_SYMBOL(drm_clflush_virt_range);
+ 
++#ifdef CONFIG_LKPI_STRUCT_PAGE
++
+ bool drm_need_swiotlb(int dma_bits)
+ {
+ 	struct resource *tmp;
+@@ -351,3 +359,4 @@
+ {
+ }
+ #endif /* CONFIG_X86 */
++#endif /* CONFIG_LKPI_STRUCT_PAGE */

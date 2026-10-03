@@ -47,12 +47,26 @@ if [ "${SANITIZE:-0}" = 1 ]; then
 fi
 CPPFLAGS="-I$HERE/test/host/include -I$REPO/linuxkpi/include"
 CPPFLAGS="$CPPFLAGS -I$OUT/linux/include -I$HERE/test"
+# drm_cache is x86 code (CLFLUSH): built and tested on x86-64 hosts only.
+cache_srcs=
+case "$(uname -m)" in
+x86_64|amd64|i86pc)
+	if "$CC" -dM -E - < /dev/null | grep -q '__x86_64__'; then
+		CPPFLAGS="$CPPFLAGS -DCONFIG_X86=1 -DCONFIG_X86_64=1"
+		CPPFLAGS="$CPPFLAGS -DST_HAVE_DRM_CACHE"
+		cache_srcs="$OUT/linux/drivers/gpu/drm/drm_cache.c
+$REPO/linuxkpi/lib/x86_cpu.c
+$HERE/drm_cache/tests/drm_cache_selftest.c"
+	fi
+	;;
+esac
 
 echo "\$ $CC --version"
 "$CC" --version | sed -n 1p
 set -- "$@"
 objs=
-for src in \
+# shellcheck disable=SC2086 # cache_srcs is a newline-separated list
+for src in $cache_srcs \
     "$OUT/linux/drivers/gpu/drm/drm_mm.c" \
     "$REPO/linuxkpi/lib/rbtree.c" \
     "$HERE/drm_mm/tests/drm_mm_selftest.c" \

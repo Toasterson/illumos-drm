@@ -13,7 +13,8 @@
 # Every helper is a directory carried/<helper>/ with
 #   SOURCES          one line per Linux file: path, SHA-256, licence
 #   linux/<path>     the file as it is at the revision of carried/linux.pin
-#   patches/series   the illumos patches, in order (patch -p1, Linux root)
+#   patches/series   the illumos patches, in order (patch -p1, Linux root;
+#                    no fuzz)
 #
 # Only MIT or dual MIT/GPL files are vendored (SOURCES says which); a
 # GPL-only file is never carried (decision D7: reimplement it under MIT
@@ -67,16 +68,18 @@ sha256() {
 	fi
 }
 
-# GNU patch: illumos may have it as gpatch.
+# patch(1): GNU patch (illumos' gpatch, or patch) or BSD patch (macOS);
+# both take -p1 -N -t -F 0 (strip one level, refuse a reversed or already
+# applied patch, no questions, no fuzz) and fail on a hunk that does not
+# apply.
 patch_tool() {
 	for p in gpatch patch; do
-		if command -v "$p" >/dev/null 2>&1 &&
-		    "$p" --version 2>/dev/null | grep -q GNU; then
+		if command -v "$p" >/dev/null 2>&1; then
 			echo "$p"
 			return 0
 		fi
 	done
-	die "GNU patch (gpatch or patch) is needed for a non-empty series"
+	die "patch(1) is needed for a non-empty series"
 }
 
 pin() {
@@ -147,15 +150,25 @@ done
 [ "$update" -eq 0 ] || exit 0
 [ -n "$OUT" ] || exit 0
 
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
 rm -rf "$OUT/linux"
 mkdir -p "$OUT/linux"
 for sources in "$HERE"/*/SOURCES; do
 	dir=$(dirname "$sources")
 	name=$(basename "$dir")
-	(cd "$dir/linux" && find . -type f | while read -r f; do
-		mkdir -p "$OUT/linux/$(dirname "$f")"
-		cp "$f" "$OUT/linux/$f"
-	done)
+	# Only the files SOURCES lists (and that were checked above) are
+	# copied; any other file under linux/ is an error.
+	(cd "$dir/linux" && find . -type f | sed 's|^\./||' | sort) \
+	    > "$TMPD/$name.present"
+	cut -f1 "$TMPD/$name.sources" | sort > "$TMPD/$name.listed"
+	extra=$(comm -23 "$TMPD/$name.present" "$TMPD/$name.listed")
+	[ -z "$extra" ] || die "$name: files under linux/ not in SOURCES:" \
+	    "$extra"
+	while read -r path; do
+		mkdir -p "$OUT/linux/$(dirname "$path")"
+		cp "$dir/linux/$path" "$OUT/linux/$path"
+	done < "$TMPD/$name.listed"
 	series="$dir/patches/series"
 	n=0
 	if [ -f "$series" ]; then
@@ -164,8 +177,8 @@ for sources in "$HERE"/*/SOURCES; do
 		while read -r p; do
 			[ -f "$dir/patches/$p" ] || die "$name: patch $p missing"
 			tool=$(patch_tool)
-			(cd "$OUT/linux" && "$tool" -p1 --forward --batch \
-			    --no-backup-if-mismatch < "$dir/patches/$p") ||
+			(cd "$OUT/linux" &&
+			    "$tool" -p1 -N -t -F 0 < "$dir/patches/$p") ||
 			    die "$name: $p does not apply"
 			n=$((n + 1))
 		done < "$TMPD/$name.series"

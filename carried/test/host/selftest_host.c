@@ -4,7 +4,8 @@
  *
  * The host environment of the carried helpers' self-tests
  * (carried/test/selftest.h) and the test program's main(): runs the same
- * drm_mm tests as the kernel's drm_helpers_test, the host-only tests
+ * drm_mm tests as the kernel's drm_helpers_test (and on x86-64 hosts its
+ * drm_cache tests), the host-only tests
  * (drm_mm_host_test.c: functions misc/drm_helpers does not export) and the
  * red-black and interval tree tests of linuxkpi (rbtree_test.c).
  *
@@ -20,6 +21,10 @@
 #include <string.h>
 
 #include "selftest.h"
+
+#ifdef ST_HAVE_DRM_CACHE
+#include <asm/processor.h>
+#endif
 
 unsigned long lkpi_host_warnings;
 
@@ -170,6 +175,18 @@ main(int argc, char **argv)
 	(void) printf("seed %llu, scale %u\n", (unsigned long long)seed, scale);
 	st_run_suite("drm_mm", drm_mm_selftests, drm_mm_nselftests, seed, scale,
 	    argc, argv, first, &passed, &failed, &checks);
+#ifdef ST_HAVE_DRM_CACHE
+	if (lkpi_x86_cpu_init() != 0) {
+		(void) printf("FAIL drm_cache: no CLFLUSH on this processor\n");
+		failed++;
+	} else {
+		st_run_suite("drm_cache", drm_cache_selftests,
+		    drm_cache_nselftests, seed + 1000, scale, argc, argv, first,
+		    &passed, &failed, &checks);
+	}
+#else
+	(void) printf("drm_cache: not an x86-64 host, its tests not built\n");
+#endif
 	st_run_suite("drm_mm-host", drm_mm_host_tests, drm_mm_nhost_tests, seed,
 	    scale, argc, argv, first, &passed, &failed, &checks);
 	st_run_suite("rbtree", rbtree_tests, rbtree_ntests, seed, scale,

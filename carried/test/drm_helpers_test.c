@@ -20,7 +20,8 @@
  * point is to report failures, not to hide them behind a missing device.
  *
  * Properties (drm_helpers_test.conf): seed (the random seed, default
- * 20261004), scale (iteration multiplier, default 1) and inject_failure
+ * 20261004), scale (iteration multiplier 1..100, default 1; anything
+ * else is reported and replaced by 1) and inject_failure
  * (default 0; 1 adds a test "inject_failure" whose one check fails, so
  * that a run can show the failure path: one failed test and check in the
  * kstat, a CE_WARN, and the attach still succeeding). A TEST DRIVER: not
@@ -120,8 +121,11 @@ drm_helpers_test_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	    DDI_PROP_DONTPASS, "seed", 20261004);
 	scale = (uint32_t)ddi_prop_get_int(DDI_DEV_T_ANY, dip,
 	    DDI_PROP_DONTPASS, "scale", 1);
-	if (scale == 0 || scale > 100)
+	if (scale == 0 || scale > 100) {
+		cmn_err(CE_WARN, "drm_helpers_test: scale %u outside 1..100; "
+		    "using 1", scale);
 		scale = 1;
+	}
 	inject = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
 	    "inject_failure", 0);
 
@@ -147,6 +151,8 @@ drm_helpers_test_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	start = gethrtime();
 	drm_helpers_test_suite("drm_mm", drm_mm_selftests, drm_mm_nselftests,
 	    seed, scale, st);
+	drm_helpers_test_suite("drm_cache", drm_cache_selftests,
+	    drm_cache_nselftests, seed + 1000, scale, st);
 	if (inject == 1) {
 		drm_helpers_test_suite("selftest", drm_helpers_test_injected, 1,
 		    seed, scale, st);

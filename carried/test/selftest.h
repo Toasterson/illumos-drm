@@ -85,5 +85,8 @@ st_seed(struct st_ctx *ctx, uint64_t seed)
 /* The tests of carried/drm_mm/tests/drm_mm_selftest.c. */
 extern const struct st_test drm_mm_selftests[];
 extern const unsigned int drm_mm_nselftests;
+/* The tests of carried/drm_cache/tests/drm_cache_selftest.c (x86-64). */
+extern const struct st_test drm_cache_selftests[];
+extern const unsigned int drm_cache_nselftests;
 
 #endif	/* _CARRIED_SELFTEST_H */

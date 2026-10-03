@@ -12,7 +12,8 @@
 #
 # 1. carried/fetch-and-patch verifies the vendored Linux files and applies
 #    the patch series into $OUT/src/linux.
-# 2. drm_mm.c (Linux), linuxkpi/lib/rbtree.c and the module linkage are
+# 2. drm_mm.c and drm_cache.c (Linux), linuxkpi/lib/rbtree.c and
+#    x86_cpu.c and the module linkage are
 #    compiled against carried headers, linuxkpi/include, the facade
 #    (include/) and the system headers, and linked
 #      ld -ztype=kmod -z defs -B reduce -M ddi.mapfile \
@@ -105,6 +106,10 @@ done
 
 CPPFLAGS="-D_KERNEL -D_SYSCALL32 -D_SYSCALL32_IMPL -D_ELF64 -D_DDI_STRICT"
 CPPFLAGS="$CPPFLAGS -Dsun -D__sun -D__SVR4 -D_ASM_INLINES"
+# The Linux configuration of the carried code (Linux passes its Kconfig on
+# the command line as well): x86-64. CONFIG_LKPI_STRUCT_PAGE stays
+# undefined until R5c's page model exists (carried/drm_cache/patches).
+CPPFLAGS="$CPPFLAGS -DCONFIG_X86=1 -DCONFIG_X86_64=1"
 # Carried Linux headers, then linuxkpi's linux/*.h, then the facade's
 # drm/*.h (drm_print.h and the base types), then the system headers.
 CPPFLAGS="$CPPFLAGS -nostdinc -I$OUT/src/linux/include -I$REPO/linuxkpi/include"
@@ -123,7 +128,9 @@ echo "CPPFLAGS: $CPPFLAGS"
 
 mkdir -p "$OUT/obj"
 cc1 "$OUT/src/linux/drivers/gpu/drm/drm_mm.c" "$OUT/obj/drm_mm.o"
+cc1 "$OUT/src/linux/drivers/gpu/drm/drm_cache.c" "$OUT/obj/drm_cache.o"
 cc1 "$REPO/linuxkpi/lib/rbtree.c" "$OUT/obj/rbtree.o"
+cc1 "$REPO/linuxkpi/lib/x86_cpu.c" "$OUT/obj/x86_cpu.o"
 cc1 "$HERE/drm_helpers/drm_helpers_mod.c" "$OUT/obj/drm_helpers_mod.o"
 
 SCOPE=$HERE/drm_helpers/drm_helpers_scope.mapfile
@@ -131,8 +138,8 @@ echo "\$ $LD -ztype=kmod -z defs -B reduce -M $DDI_MAPFILE" \
     "-M $HERE/drm_helpers/private.mapfile -M $SCOPE -o $OUT/drm_helpers ..."
 "$LD" -ztype=kmod -z defs -B reduce -M "$DDI_MAPFILE" \
     -M "$HERE/drm_helpers/private.mapfile" -M "$SCOPE" \
-    -o "$OUT/drm_helpers" "$OUT/obj/drm_mm.o" "$OUT/obj/rbtree.o" \
-    "$OUT/obj/drm_helpers_mod.o"
+    -o "$OUT/drm_helpers" "$OUT/obj/drm_mm.o" "$OUT/obj/drm_cache.o" \
+    "$OUT/obj/rbtree.o" "$OUT/obj/x86_cpu.o" "$OUT/obj/drm_helpers_mod.o"
 
 # The module's global definitions are exactly the scope mapfile's.
 nm "$OUT/drm_helpers" | awk -F'|' '$5 ~ /GLOB/ && $7 !~ /UNDEF/ {
@@ -152,6 +159,8 @@ echo "misc/drm_helpers: $(wc -l < "$OUT/drm_helpers.globals" | tr -d ' ')" \
     "global symbols, as $(basename "$SCOPE")"
 
 cc1 "$HERE/drm_mm/tests/drm_mm_selftest.c" "$OUT/obj/drm_mm_selftest.o"
+cc1 "$HERE/drm_cache/tests/drm_cache_selftest.c" \
+    "$OUT/obj/drm_cache_selftest.o"
 cc1 "$HERE/test/selftest_kernel.c" "$OUT/obj/selftest_kernel.o"
 cc1 "$HERE/test/drm_helpers_test.c" "$OUT/obj/drm_helpers_test.o"
 echo "\$ $LD -ztype=kmod -N misc/drm_helpers -z defs -M $DDI_MAPFILE" \
@@ -159,7 +168,8 @@ echo "\$ $LD -ztype=kmod -N misc/drm_helpers -z defs -M $DDI_MAPFILE" \
 "$LD" -ztype=kmod -N misc/drm_helpers -z defs -M "$DDI_MAPFILE" \
     -M "$HERE/drm_helpers/drm_helpers.mapfile" \
     -o "$OUT/drm_helpers_test" "$OUT/obj/drm_helpers_test.o" \
-    "$OUT/obj/selftest_kernel.o" "$OUT/obj/drm_mm_selftest.o"
+    "$OUT/obj/selftest_kernel.o" "$OUT/obj/drm_mm_selftest.o" \
+    "$OUT/obj/drm_cache_selftest.o"
 
 if command -v elfdump >/dev/null 2>&1; then
 	for m in drm_helpers drm_helpers_test; do

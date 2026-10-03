@@ -7,8 +7,10 @@
 #   ld -ztype=kmod -N misc/drm_helpers -z defs ... -M drm_helpers.mapfile
 # They are the Linux symbols of the carried helpers that i915's headless
 # build (Linux v7.2, the R5c configuration) imports, and no others: drm_mm's
-# ten (drm_mm_print() and the linuxkpi red-black tree compiled into the
-# module stay local). drm_helpers_scope.mapfile, the module's own
+# ten and drm_cache's drm_clflush_virt_range() (drm_mm_print() and the
+# linuxkpi code compiled into the module stay local). drm_clflush_sg(),
+# which i915 imports too, joins once R5c's page and scatterlist models
+# exist (carried/drm_cache/patches/0001-*). drm_helpers_scope.mapfile, the module's own
 # symbol-scope mapfile, lists the same names; CI compares the two lists
 # and the module's global symbols.
 #
@@ -26,4 +28,5 @@ SYMBOL_SCOPE {
 		drm_mm_scan_init_with_range	{ FLAGS = EXTERN };
 		drm_mm_scan_remove_block	{ FLAGS = EXTERN };
 		drm_mm_takedown			{ FLAGS = EXTERN };
+		drm_clflush_virt_range		{ FLAGS = EXTERN };
 };

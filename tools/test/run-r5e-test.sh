@@ -4,32 +4,38 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # The guest test of illumos-drm R5e: misc/drm_helpers, the carried Linux
-# helpers (drm_mm), and its self-tests in the test driver drm_helpers_test.
+# helpers (drm_mm, drm_cache's drm_clflush_virt_range()), and its
+# self-tests in the test driver drm_helpers_test.
 #
 #   1  misc/drm_helpers loads alone (krtld resolves every symbol it
 #      imports) and unloads again.
 #   2  for every run in RUNS ("seed:scale ..."): add_drv drm_helpers_test
 #      with that seed and scale in its .conf; attaching it loads
-#      misc/drm_helpers as its dependency and runs the drm_mm self-tests;
-#      the kstat drm_helpers_test:0:selftest must report EXPECT_TESTS tests
-#      and no failed test or check; misc/drm_helpers refuses to unload
-#      while the driver is loaded; rem_drv; then misc/drm_helpers unloads.
+#      misc/drm_helpers as its dependency and runs the drm_mm and
+#      drm_cache self-tests; the kstat drm_helpers_test:0:selftest must
+#      report EXPECT_TESTS tests, no failed test or check, and the
+#      requested seed and scale; misc/drm_helpers refuses to unload while
+#      the driver is loaded; rem_drv; then misc/drm_helpers unloads.
 #   3  a run with inject_failure=1 adds a test that fails on purpose: the
 #      attach still succeeds, the kstat counts exactly one failed test and
 #      one failed check, and the failure is logged (CE_WARN).
 #   4  the driver files in /etc and the /devices/pseudo entries are as
 #      before, and everything installed is removed again.
+#   5  with PKG=<archive.p5p> (packaging/drm-helpers.p5m published into a
+#      p5p archive): pkg install driver/graphics/drm-helpers from it, the
+#      installed module is the tested one and loads and unloads, pkg
+#      verify is clean, pkg uninstall removes it.
 #
 # Run as root on a disposable illumos VM, in a directory with drm_helpers
 # and drm_helpers_test (carried/build.sh) and drm_helpers_test.conf
 # (carried/test/). It refuses to run where a misc/drm_helpers is installed
 # already (a package), so that it never replaces one. Environment: RUNS
-# [20261004:1 1:2 424242:3], EXPECT_TESTS [14].
+# [20261004:1 1:2 424242:3], EXPECT_TESTS [16], PKG [none].
 set -u
 cd "$(dirname "$0")" || exit 1
 
 RUNS=${RUNS:-"20261004:1 1:2 424242:3"}
-EXPECT_TESTS=${EXPECT_TESTS:-14}
+EXPECT_TESTS=${EXPECT_TESTS:-16}
 MOD=/kernel/misc/amd64/drm_helpers
 DRV=/usr/kernel/drv/amd64/drm_helpers_test
 CONF=/usr/kernel/drv/drm_helpers_test.conf
@@ -119,16 +125,17 @@ for run in $RUNS; do
 	cp=$(kstat -p drm_helpers_test:0:selftest:checks_passed | awk '{print $2}')
 	cf=$(kstat -p drm_helpers_test:0:selftest:checks_failed | awk '{print $2}')
 	ks=$(kstat -p drm_helpers_test:0:selftest:seed | awk '{print $2}')
+	kx=$(kstat -p drm_helpers_test:0:selftest:scale | awk '{print $2}')
 	echo "messages:"
 	tail -n +"$((mark + 1))" /var/adm/messages | grep 'drm_helpers_test' |
 	    sed 's/^.*drm_helpers_test/drm_helpers_test/'
 	if [ "${tp:-0}" -eq "$EXPECT_TESTS" ] && [ "${tf:-1}" -eq 0 ] &&
 	    [ "${cf:-1}" -eq 0 ] && [ "${cp:-0}" -gt 0 ] &&
-	    [ "${ks:-}" = "$seed" ]; then
+	    [ "${ks:-}" = "$seed" ] && [ "${kx:-}" = "$scale" ]; then
 		pass "self-tests, seed $seed scale $scale: $tp tests, $cp checks"
 	else
 		bad "self-tests, seed $seed scale $scale: passed $tp, failed" \
-		    "$tf, checks $cp passed, $cf failed (seed $ks)"
+		    "$tf, checks $cp passed, $cf failed (seed $ks, scale $kx)"
 	fi
 	if [ -n "$(modid drm_helpers)" ]; then
 		pass "misc/drm_helpers loaded as drm_helpers_test's dependency"
@@ -189,6 +196,40 @@ if step diff state.before state.after; then
 	pass "/etc driver files and /devices/pseudo as before"
 else
 	bad "/etc driver files or /devices/pseudo changed"
+fi
+
+if [ -n "${PKG:-}" ]; then
+	echo
+	echo "=== 5: the package ($PKG)"
+	want=$(digest -a sha256 drm_helpers)
+	if step pkg install -g "$PKG" driver/graphics/drm-helpers; then
+		step pkg contents -m driver/graphics/drm-helpers
+		got=$(digest -a sha256 "$MOD" 2>/dev/null)
+		if [ "$got" = "$want" ]; then
+			pass "the package installs the tested $MOD"
+		else
+			bad "the package's $MOD is not the tested module"
+		fi
+		if step modload -p misc/drm_helpers &&
+		    step modunload -i "$(modid drm_helpers)"; then
+			pass "the packaged module loads and unloads"
+		else
+			bad "the packaged module does not load or unload"
+		fi
+		if step pkg verify driver/graphics/drm-helpers; then
+			pass "pkg verify driver/graphics/drm-helpers"
+		else
+			bad "pkg verify driver/graphics/drm-helpers"
+		fi
+		if step pkg uninstall driver/graphics/drm-helpers &&
+		    [ ! -e "$MOD" ]; then
+			pass "pkg uninstall removes the module"
+		else
+			bad "pkg uninstall left $MOD"
+		fi
+	else
+		bad "pkg install -g $PKG driver/graphics/drm-helpers"
+	fi
 fi
 
 echo

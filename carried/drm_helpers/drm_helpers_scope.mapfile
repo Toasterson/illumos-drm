@@ -6,8 +6,8 @@
 # The symbol scope of misc/drm_helpers, for its link with -B reduce: the
 # module entry points and the carried helpers' exported functions (the
 # names drm_helpers.mapfile declares for dependent modules) stay global;
-# everything else (drm_mm_print(), linuxkpi's red-black tree, static
-# helpers) becomes local, so no other module can bind to it.
+# everything else (drm_mm_print(), linuxkpi's red-black tree and processor
+# facts, static helpers) becomes local, so no other module can bind to it.
 #
 $mapfile_version 2
 
@@ -26,6 +26,7 @@ SYMBOL_SCOPE {
 		drm_mm_scan_init_with_range;
 		drm_mm_scan_remove_block;
 		drm_mm_takedown;
+		drm_clflush_virt_range;
 	local:
 		*;
 };
