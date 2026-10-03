@@ -379,7 +379,9 @@ phase_arm() {
 		rules | grep -q '^all ' && pass "/etc/logindevperm has the packaged rule for every driver again" ||
 		    bad "pkg revert did not bring back the rule for every driver"
 	fi
-	echo "$BOOT_D" > g10-boot.d
+	# printf, not echo: the echo of ksh93 would turn the \n of the
+	# program's strings into line breaks.
+	printf '%s\n' "$BOOT_D" > g10-boot.d
 	step dtrace -A -s g10-boot.d || { bad "dtrace -A failed"; return 1; }
 	step bootadm update-archive
 	pass "anonymous tracing armed for the next boot (reboot now)"
