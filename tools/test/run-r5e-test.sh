@@ -22,9 +22,10 @@
 #   4  the driver files in /etc and the /devices/pseudo entries are as
 #      before, and everything installed is removed again.
 #   5  with PKG=<archive.p5p> (packaging/drm-helpers.p5m published into a
-#      p5p archive): pkg install driver/graphics/drm-helpers from it, the
-#      installed module is the tested one and loads and unloads, pkg
-#      verify is clean, pkg uninstall removes it.
+#      p5p archive), in a scratch boot environment mounted for pkg -R:
+#      pkg install driver/graphics/drm-helpers from it installs the module
+#      phase 1 loaded (same SHA-256), pkg verify is clean, pkg uninstall
+#      removes it; the boot environment is destroyed again.
 #
 # Run as root on a disposable illumos VM, in a directory with drm_helpers
 # and drm_helpers_test (carried/build.sh) and drm_helpers_test.conf
@@ -199,37 +200,48 @@ else
 fi
 
 if [ -n "${PKG:-}" ]; then
+	# In a scratch boot environment, so that the live system stays as
+	# it is: removing a reboot-needed file from the live image would make
+	# pkg(1) clone the boot environment.
 	echo
-	echo "=== 5: the package ($PKG)"
+	echo "=== 5: the package ($PKG) in a scratch boot environment"
+	be=r5e-pkgtest
+	mnt=/tmp/r5e-pkgtest
 	want=$(digest -a sha256 drm_helpers)
-	if step pkg install -g "$PKG" driver/graphics/drm-helpers; then
-		step pkg contents -m driver/graphics/drm-helpers
-		got=$(digest -a sha256 "$MOD" 2>/dev/null)
-		if [ "$got" = "$want" ]; then
-			pass "the package installs the tested $MOD"
+	if step beadm create "$be" && mkdir -p "$mnt" &&
+	    step beadm mount "$be" "$mnt"; then
+		if step pkg -R "$mnt" install -g "$PKG" \
+		    driver/graphics/drm-helpers; then
+			step pkg -R "$mnt" contents -m driver/graphics/drm-helpers
+			got=$(digest -a sha256 "$mnt$MOD" 2>/dev/null)
+			if [ "$got" = "$want" ]; then
+				pass "the package installs the tested $MOD" \
+				    "(the module phase 1 loaded)"
+			else
+				bad "the package's $MOD is not the tested module"
+			fi
+			if step pkg -R "$mnt" verify driver/graphics/drm-helpers
+			then
+				pass "pkg verify driver/graphics/drm-helpers"
+			else
+				bad "pkg verify driver/graphics/drm-helpers"
+			fi
+			if step pkg -R "$mnt" uninstall \
+			    driver/graphics/drm-helpers &&
+			    [ ! -e "$mnt$MOD" ]; then
+				pass "pkg uninstall removes the module"
+			else
+				bad "pkg uninstall left $MOD"
+			fi
 		else
-			bad "the package's $MOD is not the tested module"
+			bad "pkg install -g $PKG driver/graphics/drm-helpers"
 		fi
-		if step modload -p misc/drm_helpers &&
-		    step modunload -i "$(modid drm_helpers)"; then
-			pass "the packaged module loads and unloads"
-		else
-			bad "the packaged module does not load or unload"
-		fi
-		if step pkg verify driver/graphics/drm-helpers; then
-			pass "pkg verify driver/graphics/drm-helpers"
-		else
-			bad "pkg verify driver/graphics/drm-helpers"
-		fi
-		if step pkg uninstall driver/graphics/drm-helpers &&
-		    [ ! -e "$MOD" ]; then
-			pass "pkg uninstall removes the module"
-		else
-			bad "pkg uninstall left $MOD"
-		fi
+		step beadm unmount "$be"
 	else
-		bad "pkg install -g $PKG driver/graphics/drm-helpers"
+		bad "scratch boot environment $be"
 	fi
+	step beadm destroy -F "$be" || bad "beadm destroy $be"
+	rmdir "$mnt" 2>/dev/null
 fi
 
 echo
