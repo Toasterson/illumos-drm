@@ -182,6 +182,26 @@ pub unsafe extern "C" fn drm_gem_object_lookup(file: *mut f::drm_file, handle: u
     }
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_gem_for_each_handle(
+    file: *mut f::drm_file,
+    func: Option<unsafe extern "C" fn(u32, *mut f::drm_gem_object, *mut core::ffi::c_void) -> i32>,
+    arg: *mut core::ffi::c_void,
+) -> i32 {
+    // SAFETY: documented for thread context.
+    let ctx = unsafe { super::sleepable() };
+    let Some(func) = func else { return neg(Errno::EINVAL) };
+    // SAFETY: the caller's open file.
+    let Some((c, core)) = (unsafe { file_of(file) }) else { return neg(Errno::EINVAL) };
+    let Some(gem) = core.device().and_then(|d| d.gem().cloned()) else { return neg(Errno::ENODEV) };
+    // SAFETY: the driver's callback with a handle and its live object (the
+    // walk holds a reference to each).
+    match gem.for_each_handle(c, |h, r| unsafe { func(h, r.object().base(), arg) }, &ctx) {
+        Ok(r) => r,
+        Err(e) => neg(e),
+    }
+}
+
 /// The fake offset of an object, made if it has none.
 fn offset_of_obj(core: &DevCore, r: &GemRef<FObj>) -> Result<u64, Errno> {
     // SAFETY: documented for thread context.

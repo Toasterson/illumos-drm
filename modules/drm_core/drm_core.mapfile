@@ -88,6 +88,7 @@ SYMBOL_SCOPE {
 		drm_illumos_fence_create;
 		drm_illumos_fence_put_deferred;
 		drm_illumos_gem_add_backing;
+		drm_illumos_gem_for_each_handle;
 		drm_illumos_gem_foreach_mapping;
 		drm_illumos_gem_object_put_deferred;
 		drm_illumos_gem_sg_cookie;

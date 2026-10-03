@@ -934,6 +934,19 @@ unsafe extern "C" {
     pub fn drm_gem_object_lookup(file: *mut drm_file, handle: u32) -> *mut drm_gem_object;
 }
 unsafe extern "C" {
+    pub fn drm_illumos_gem_for_each_handle(
+        file: *mut drm_file,
+        fn_: ::core::option::Option<
+            unsafe extern "C" fn(
+                handle: u32,
+                obj: *mut drm_gem_object,
+                arg: *mut core::ffi::c_void,
+            ) -> core::ffi::c_int,
+        >,
+        arg: *mut core::ffi::c_void,
+    ) -> core::ffi::c_int;
+}
+unsafe extern "C" {
     pub fn drm_gem_create_mmap_offset(obj: *mut drm_gem_object) -> core::ffi::c_int;
 }
 unsafe extern "C" {

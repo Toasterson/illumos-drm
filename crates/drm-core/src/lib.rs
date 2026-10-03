@@ -102,6 +102,7 @@ pub mod offsets;
 #[cfg(feature = "kernel")]
 pub mod prime;
 pub mod published;
+pub mod refcount;
 #[cfg(feature = "kernel")]
 pub mod resv;
 #[cfg(feature = "kernel")]

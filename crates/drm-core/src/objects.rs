@@ -266,6 +266,26 @@ impl<R: ObjRef, B: IdAlloc> Locked<'_, R, B> {
         self.table.handles.lock().iter().find(|(_, r)| pred(r)).map(|(n, _)| n)
     }
 
+    /// Every handle of the file with a new reference to its object, in
+    /// handle order: the replacement for walking Linux's
+    /// `drm_file.object_idr` under `table_lock`. The table cannot change
+    /// while this guard (the file's hook lock) is held, so the snapshot
+    /// stays exact until it is dropped; lookups, which take only the
+    /// handle table's lock, still work meanwhile. The caller drops the
+    /// references after releasing the guard (the core drops no reference
+    /// with a lock held). `ENOMEM` if the list cannot be allocated.
+    pub fn snapshot(&self, ctx: &Sleepable) -> Result<crate::kvec::KVec<(u32, R)>, Errno> {
+        let h = self.table.handles.lock();
+        let mut out = crate::kvec::KVec::new();
+        out.reserve(h.len(), ctx)?;
+        for (n, r) in h.iter() {
+            if out.try_push((n, r.clone_ref())).is_err() {
+                return Err(Errno::ENOMEM);
+            }
+        }
+        Ok(out)
+    }
+
     /// Whether the file holds a handle to `obj`.
     pub fn holds(&self, obj: &R) -> bool {
         self.find(|r| r.same(obj)).is_some()
@@ -910,6 +930,78 @@ mod tests {
         assert!(bufs.iter().all(|b| b.attached.load(Ordering::SeqCst) == 0));
         drop(bufs);
         assert!(names.lock().is_empty());
+        assert_eq!(dropped.load(Ordering::SeqCst), created.load(Ordering::SeqCst));
+    }
+
+    /// A thread walks a file's handles ([`Locked::snapshot`]) while others
+    /// close and create handles of the same file: during a walk no handle
+    /// of the snapshot goes away and none appears, lookups work, and every
+    /// object is destroyed exactly once at the end.
+    #[test]
+    fn handle_walk_is_stable_under_concurrent_close() {
+        let dropped = AtomicUsize::new(0);
+        let created = AtomicUsize::new(0);
+        let names: KMutex<Table<'_>> = KMutex::new(table());
+        let f = file();
+        let d = Driver::new(0);
+        for _ in 0..64 {
+            created.fetch_add(1, Ordering::SeqCst);
+            f.lock().add(&names, obj(&dropped), &d, &ctx()).ok().unwrap();
+        }
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let walks = AtomicUsize::new(0);
+        thread::scope(|s| {
+            let walker = s.spawn(|| {
+                let ctx = ctx();
+                while !stop.load(Ordering::SeqCst) {
+                    let l = f.lock();
+                    let snap = l.snapshot(&ctx).unwrap();
+                    let before = f.handles().len();
+                    assert_eq!(snap.len(), before, "the snapshot is the whole table");
+                    for (h, o) in snap.iter() {
+                        // A lookup from inside the walk (handle table lock only).
+                        let r = lookup(&f.handles(), *h).unwrap();
+                        assert!(r.same(o), "handle {h} still names its object");
+                        drop(r);
+                        thread::yield_now();
+                    }
+                    assert_eq!(f.handles().len(), before, "no handle came or went during the walk");
+                    drop(l);
+                    drop(snap);
+                    walks.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            let closers: Vec<_> = (0..4)
+                .map(|t| {
+                    let (f, names, d, dropped, created) = (&f, &names, &d, &dropped, &created);
+                    s.spawn(move || {
+                        let ctx = ctx();
+                        let mut rng = Lcg(t as u64 + 7);
+                        for _ in 0..400 {
+                            if rng.next(3) == 0 {
+                                created.fetch_add(1, Ordering::SeqCst);
+                                f.lock().add(names, obj(dropped), d, &ctx).ok().unwrap();
+                                continue;
+                            }
+                            let Some(h) = f.handles().iter().next().map(|(h, _)| h) else { continue };
+                            match f.lock().remove(names, h, d) {
+                                Ok((r, nr)) => drop((r, nr)),
+                                Err(e) => assert_eq!(e, Errno::EINVAL),
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for c in closers {
+                c.join().unwrap();
+            }
+            stop.store(true, Ordering::SeqCst);
+            walker.join().unwrap();
+        });
+        assert!(walks.load(Ordering::SeqCst) > 0);
+        while let Some((r, nr)) = f.lock().pop(&names, &d) {
+            drop((r, nr));
+        }
         assert_eq!(dropped.load(Ordering::SeqCst), created.load(Ordering::SeqCst));
     }
 }

@@ -117,6 +117,10 @@ impl FObj {
             Some(r) => Box::into_raw(Box::new(r)),
             None => ptr::null_mut(),
         };
+        // The object's count is the structure's own (ext_count): the
+        // creator's reference.
+        // SAFETY: the caller's structure, not shared yet.
+        unsafe { (*base.as_ptr()).refcount.refcount.refs.counter = 1 };
         Ok(FObj {
             base,
             core,
@@ -314,6 +318,17 @@ impl GemObject for FObj {
 
     fn imported_from(&self) -> Option<&GemRef<Self>> {
         self.exporter()
+    }
+
+    fn ext_count(&self) -> Option<&core::sync::atomic::AtomicU32> {
+        // SAFETY: the structure lives until release() frees it, after the
+        // count reached zero; the counter is an aligned int changed only
+        // atomically (by the core and by drivers' kref calls).
+        Some(unsafe {
+            core::sync::atomic::AtomicU32::from_ptr(ptr::addr_of_mut!(
+                (*self.base.as_ptr()).refcount.refcount.refs.counter
+            ) as *mut u32)
+        })
     }
 }
 
