@@ -35,6 +35,7 @@ typedef struct {
 #define	PAGE_KERNEL_IO		__pgprot(LKPI_PROT_UC)
 #define	PAGE_KERNEL_NOCACHE	__pgprot(LKPI_PROT_UC)
 #define	PAGE_KERNEL_RO		__pgprot(LKPI_PROT_WB)
+#undef	PAGE_SHARED	/* <vm/hat.h> has its own */
 #define	PAGE_SHARED		__pgprot(LKPI_PROT_WB)
 #define	pgprot_writecombine(p)	__pgprot((pgprot_val(p) & ~LKPI_PROT_CACHE_MASK) | LKPI_PROT_WC)
 #define	pgprot_noncached(p)	__pgprot((pgprot_val(p) & ~LKPI_PROT_CACHE_MASK) | LKPI_PROT_UC)

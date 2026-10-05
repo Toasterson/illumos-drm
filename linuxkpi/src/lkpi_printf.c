@@ -16,8 +16,8 @@
  *	%ph[CDN]	a buffer in hex, the field width is the byte count
  *			(default 1, at most 64); separators ' ', ':', '-', none
  *	%pV		struct va_format *: its format and arguments
- *	%pS %ps %pB %pF %pf	the address in hex (no symbol lookup)
- *	%p %px %pK	the pointer, 16 hex digits
+ *	%pS %ps %pB %pF %pf	the address, 0x and 16 hex digits (no symbols)
+ *	%p %px %pK	the pointer, 16 hex digits (%p of NULL: "(null)")
  *	%pR %pr		struct resource *: [mem 0x...-0x... flags 0x...]
  *	%pU[bBlL]	a 16-byte UUID, big- (b) or little-endian (l) layout
  *	%p4cc		a fourcc code (u32 *): four characters and endianness
@@ -186,6 +186,18 @@ out_ptr(struct lkpi_out *o, const void *p, const struct lkpi_spec *sp)
 	}
 	s.flags &= ~(FL_PLUS | FL_SPACE);
 	out_num(o, (uintptr_t)p, false, 16, &s);
+}
+
+/* NULL for %p: "(null)", right-aligned in a pointer's width (as Linux). */
+static void
+out_null_ptr(struct lkpi_out *o, const struct lkpi_spec *sp)
+{
+	struct lkpi_spec s = *sp;
+
+	if (!(s.flags & FL_WIDTH))
+		s.width = 16;
+	s.prec = -1;
+	out_str(o, "(null)", &s);
 }
 
 /* "0x" and 16 digits, for %pa/%pad and the addresses of %pS. */
@@ -411,7 +423,10 @@ out_pext(struct lkpi_out *o, const char **fmtp, const void *p,
 	case 'S': case 's': case 'B': case 'F': case 'f':
 		while (isalnum(*f))
 			f++;
-		out_hex64(o, (uintptr_t)p, 1);
+		if (p == NULL)
+			out_null_ptr(o, sp);
+		else
+			out_hex64(o, (uintptr_t)p, 16);
 		break;
 	case 'R': case 'r':
 		f++;
@@ -451,7 +466,10 @@ out_pext(struct lkpi_out *o, const char **fmtp, const void *p,
 		/* %p, %px, %pK and every extension the layer lacks. */
 		while (isalnum(*f))
 			f++;
-		out_ptr(o, p, sp);
+		if (p == NULL && e != 'x' && e != 'K')
+			out_null_ptr(o, sp);
+		else
+			out_ptr(o, p, sp);
 		break;
 	}
 	*fmtp = f;

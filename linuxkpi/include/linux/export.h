@@ -6,7 +6,7 @@
 #define	EXPORT_SYMBOL_GPL(sym)
 #define	EXPORT_SYMBOL_NS(sym, ns)
 #define	EXPORT_SYMBOL_NS_GPL(sym, ns)
-#define	EXPORT_SYMBOL_FOR_TESTS_ONLY(sym)
+#define	EXPORT_SYMBOL_FOR_TESTS_ONLY(x)	/* as <drm/drm_util.h> */
 #define	EXPORT_SYMBOL_IF_KUNIT(sym)
 #define	VISIBLE_IF_KUNIT	static
 #endif

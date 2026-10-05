@@ -49,6 +49,8 @@ extern void free_pages_exact(void *virt, size_t size);
 #define	gfp_zone(gfp)			0
 #define	numa_node_id()			0
 #define	NUMA_NO_NODE			(-1)
+#ifndef dev_to_node	/* <linux/device.h> defines it too */
 #define	dev_to_node(dev)		NUMA_NO_NODE
+#endif
 
 #endif

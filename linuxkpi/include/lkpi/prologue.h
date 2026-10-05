@@ -84,6 +84,10 @@
 #undef	sigmask
 #undef	TS_RUN
 #undef	BIT
+#undef	__maybe_unused
+#undef	__section
+#undef	__cacheline_aligned
+#undef	NOPID		/* <sys/proc.h>; i915 names a register so */
 
 /* illumos structure tags that are Linux structures in Linux code. */
 #define	mutex	lx_mutex

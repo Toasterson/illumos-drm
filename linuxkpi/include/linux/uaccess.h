@@ -49,7 +49,7 @@ extern long strncpy_from_user(char *dst, const char __user *src, long count);
 #define	__copy_from_user_inatomic_nocache(t, f, n)	copy_from_user(t, f, n)
 #define	access_ok(addr, size)			((void)(addr), (void)(size), true)
 #define	get_user(x, ptr) ({ \
-	typeof (*(ptr)) __gu_v; \
+	__typeof_unqual__(*(ptr)) __gu_v; \
 	int __gu_e = copy_from_user(&__gu_v, (ptr), sizeof (__gu_v)) ? -EFAULT : 0; \
 	(x) = __gu_e == 0 ? __gu_v : (typeof (*(ptr)))0; \
 	__gu_e; })

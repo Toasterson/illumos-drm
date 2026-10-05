@@ -252,9 +252,10 @@ TEST(bitmap_regions)
 	bitmap_set(m, 0, 5);
 	bitmap_set(m, 9, 1);
 	CHECK_EQ(bitmap_find_next_zero_area(m, 256, 0, 3, 0), 5);
-	CHECK_EQ(bitmap_find_next_zero_area(m, 256, 0, 4, 0), 10);
+	CHECK_EQ(bitmap_find_next_zero_area(m, 256, 0, 4, 0), 5);
+	CHECK_EQ(bitmap_find_next_zero_area(m, 256, 0, 5, 0), 10);
 	CHECK_EQ(bitmap_find_next_zero_area(m, 256, 0, 3, 7), 16);
-	CHECK(bitmap_find_next_zero_area(m, 12, 0, 4, 0) > 12 - 4);
+	CHECK(bitmap_find_next_zero_area(m, 12, 0, 5, 0) > 12 - 5);
 
 	/* u32 arrays, bit 0 of word 0 first. */
 	bitmap_from_arr32(m, arr, 132);

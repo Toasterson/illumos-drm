@@ -34,6 +34,8 @@ LKPI_CFLAGS="$LKPI_CFLAGS -Wall -Wno-unused-parameter -Wno-sign-compare"
 LKPI_CFLAGS="$LKPI_CFLAGS -Wno-missing-field-initializers -Wno-unused-function"
 LKPI_CFLAGS="$LKPI_CFLAGS -Wno-address-of-packed-member -Wno-format-truncation"
 LKPI_CFLAGS="$LKPI_CFLAGS -Wno-microsoft-anon-tag -Wno-override-init -Wno-comment"
+# Linux builds with -Wno-pointer-sign too (char * vs u8 * throughout).
+LKPI_CFLAGS="$LKPI_CFLAGS -Wno-pointer-sign"
 LKPI_CFLAGS="$LKPI_CFLAGS -Werror=implicit-function-declaration -Werror=implicit-int"
 LKPI_CFLAGS="$LKPI_CFLAGS -Werror=incompatible-pointer-types -Werror=int-conversion"
 LKPI_CFLAGS="$LKPI_CFLAGS -Werror=return-type"

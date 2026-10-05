@@ -29,6 +29,8 @@
 #                measurement container): drops illumos-only flags and
 #                undefines the Linux target macros.
 set -u
+# GNU grep first on illumos (grep -m in the summary)
+PATH=/usr/gnu/bin:$PATH
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=${REPO:-$(cd "$HERE/../.." && pwd)}
@@ -79,6 +81,8 @@ export -f compile_one
 export CC CFLAGS CPPFLAGS OUT I915 HERE
 
 if [ "$mode" = compile ] || [ "$mode" = all ]; then
+	# Only this TU list's objects are linked: start from an empty obj/.
+	rm -rf "$OUT/obj"
 	grep -v '^#' "$TUS" | grep . | xargs -P "$JOBS" -I{} bash -c 'compile_one {}' \
 	    > "$OUT/results.txt"
 	ok=$(grep -c '^OK' "$OUT/results.txt")

@@ -31,6 +31,7 @@
 #include <drm/ttm/ttm_resource.h>
 #include <linux/gpu_buddy.h>
 #include "intel_memory_region.h"
+#include "i915_ttm_buddy_manager.h"
 #include "intel_region_ttm.h"
 #include "gem/i915_gem_ttm.h"
 #include "gem/i915_gem_ttm_pm.h"
@@ -87,6 +88,28 @@ int
 i915_ttm_restore_region(struct intel_memory_region *mr, u32 flags)
 {
 	return (0);
+}
+
+/*
+ * The buddy manager of local memory (i915_ttm_buddy_manager.c, left out):
+ * no region of this build has one (no lmem); the memory-region code calls
+ * these only for INTEL_MEMORY_LOCAL regions.
+ */
+int
+i915_ttm_buddy_man_reserve(struct ttm_resource_manager *man, u64 start,
+    u64 size)
+{
+	I915_ILLUMOS_UNSUPPORTED("i915_ttm_buddy_man_reserve");
+	return (-ENODEV);
+}
+
+void
+i915_ttm_buddy_man_avail(struct ttm_resource_manager *man, u64 *avail,
+    u64 *avail_visible)
+{
+	I915_ILLUMOS_UNSUPPORTED("i915_ttm_buddy_man_avail");
+	*avail = 0;
+	*avail_visible = 0;
 }
 
 bool

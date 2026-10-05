@@ -86,7 +86,9 @@ dev_set_drvdata(struct device *dev, void *data)
 }
 
 
+#ifndef dev_to_node	/* <linux/gfp.h> defines it too */
 #define	dev_to_node(dev)		(-1)
+#endif
 #define	set_dev_node(dev, n)		((void)(dev))
 #define	get_device(dev)			(dev)
 #define	put_device(dev)			((void)(dev))
