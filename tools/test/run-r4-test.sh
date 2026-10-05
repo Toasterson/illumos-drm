@@ -15,6 +15,15 @@
 #   virtio_gpu.a      from `cargo xtask build virtio_gpu`
 #   drm_r4_test.c     tools/test/drm_r4_test.c
 #   drm/              the headers of tools/uapi/generate.sh
+#   drm-test-lib.sh   tools/test/drm-test-lib.sh
+#   drm_minor.a       from `cargo xtask build drm_minor`, and drm_minor.mapfile
+#                     (modules/drm-minor/exports.mapfile), unless
+#                     misc/drm_minor is installed already
+#
+# virtio_gpu's nodes are card<N> and renderD<128+N> for the device number
+# N it gets from misc/drm_minor, which it shares with every other DRM
+# driver of the core; the script finds them through /dev/dri and passes
+# them to drm_r4_test in DRM_CARD and DRM_RENDER.
 #
 # The machine needs gcc and libdrm 2.4.109 (x11/library/libdrm); modetest
 # comes from $MODETEST, default /opt/drm-tests/amd64/modetest. With
@@ -32,6 +41,8 @@ step() {
 	echo "[exit $rc]"
 	return $rc
 }
+
+. ./drm-test-lib.sh
 
 ETC="/etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/driver_classes /etc/devlink.tab
     /etc/security/device_policy"
@@ -171,10 +182,12 @@ step uname -a
 step sh -c 'prtconf -v 2>/dev/null | grep -i -B2 -A2 "pci1af4,1050" | head -20'
 step devfsadm -C
 state before
+drm_minor_install || exit 1
 step digest -a sha256 virtio_gpu.a
 # -N misc/virtio: the virtio framework (illumos-kernel-private-virtio-sys);
-# -N fs/specfs: makespecvp, for dma-bufs, sync objects and sync files.
-step ld -ztype=kmod -N misc/virtio -N fs/specfs -z allextract virtio_gpu.a -o virtio_gpu || exit 1
+# -N fs/specfs: makespecvp, for dma-bufs, sync objects and sync files;
+# -N misc/drm_minor: the DRM device numbers every driver shares.
+step ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_minor -z allextract virtio_gpu.a -o virtio_gpu || exit 1
 step digest -a sha256 virtio_gpu
 step elfdump -d virtio_gpu
 echo
@@ -203,6 +216,10 @@ step sh -c "tail -n +$((msgs + 1)) /var/adm/messages | grep -i -E 'virtio|drm'"
 step sh -c 'modinfo | grep -E "virtio|drm"'
 step sh -c 'find /devices -name "*virtio_gpu*" | sort'
 step ls -lL /dev/dri
+DRM_CARD=$(dri_link pci1af4,1100@ card) || fail=1
+DRM_RENDER=$(dri_link pci1af4,1100@ renderD) || fail=1
+export DRM_CARD DRM_RENDER
+echo "virtio_gpu nodes: DRM_CARD=$DRM_CARD DRM_RENDER=$DRM_RENDER"
 gemstat "after attach"
 
 step ./drm_r4_test > drm_r4_test.out 2>&1
@@ -231,12 +248,9 @@ step rm -f /kernel/drv/amd64/virtio_gpu
 step devfsadm -C
 # devfsadm -C only removes links that a link module claims; remove the
 # /dev/dri links to virtio_gpu's nodes, and the directory if the test made it.
-for l in /dev/dri/*; do
-	case $(ls -l "$l" 2>/dev/null) in
-	*"-> "*/pci1af4,1100@*) step rm -f "$l" ;;
-	esac
-done
+remove_dri_links pci1af4,1100@
 [ $had_dri = no ] && [ -d /dev/dri ] && step rmdir /dev/dri
+drm_minor_remove || fail=1
 state after
 if cmp -s state-before.etc state-after.etc && cmp -s state-before.devices state-after.devices; then
 	echo "PASS /etc driver files and /devices are as before"

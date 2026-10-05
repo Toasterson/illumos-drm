@@ -13,17 +13,163 @@
 //! callers through LDI (`FKIOCTL`) work. It is local to the DRM core until
 //! the `ddi` crate grows an equivalent.
 //!
-//! Padding bytes are never invented by the kernel: an argument is either
-//! copied in completely or starts zeroed, handlers change it only through
+//! Padding bytes are never invented by the kernel: an argument starts
+//! zeroed and is filled from the caller, handlers change it only through
 //! field assignments (the contract of the `unsafe` [`UserArg::get_mut`]),
 //! and it is copied out byte for byte. No uninitialised kernel memory can
 //! therefore reach the caller.
+//!
+//! An argument structure is copied through an [`ArgIo`]: a plain
+//! `IoctlArg` copies exactly the structure's size (driver-private ioctls,
+//! the ioctls of dma-bufs and sync files), and a [`CoreArg`] follows
+//! Linux's `drm_ioctl()` size rule for the core and mode-setting ioctls,
+//! whose callers may have a shorter or longer structure
+//! ([`crate::ioctl::SizePlan`]). `CoreArg` deliberately does not
+//! dereference to the `IoctlArg` it wraps, so that a core handler cannot
+//! hand it to a function that would copy the exact size by accident; it
+//! passes `CoreArg::io` where an `IoctlArg` is meant.
 
 use core::ffi::c_void;
 use core::mem::{MaybeUninit, size_of};
 
 use ddi::{Errno, IoctlArg, sys};
 use drm_uapi as uapi;
+
+use crate::ioctl::{SizePlan, assemble_out};
+
+/// Where an ioctl's argument structure comes from and goes to.
+pub trait ArgIo {
+    /// The ioctl argument: the caller's address, the `mode` for
+    /// `ddi_copyin(9F)` and the device number.
+    fn io(&self) -> &IoctlArg<'_>;
+
+    /// Fills the kernel structure at `dst`, `len` bytes that are zero, from
+    /// the caller. `EFAULT` for an unreadable argument.
+    ///
+    /// # Safety
+    /// `dst` must be valid for `len` bytes of writes.
+    unsafe fn copy_in_struct(&self, dst: *mut u8, len: usize) -> Result<(), Errno>;
+
+    /// Copies the kernel structure at `src`, `len` initialised bytes, out to
+    /// the caller. `EFAULT` for an unwritable argument.
+    ///
+    /// # Safety
+    /// `src` must be valid for `len` bytes of reads, all initialised.
+    unsafe fn copy_out_struct(&self, src: *const u8, len: usize) -> Result<(), Errno>;
+}
+
+impl ArgIo for IoctlArg<'_> {
+    fn io(&self) -> &IoctlArg<'_> {
+        self
+    }
+
+    /// Copies exactly `len` bytes.
+    unsafe fn copy_in_struct(&self, dst: *mut u8, len: usize) -> Result<(), Errno> {
+        // SAFETY: the caller's contract covers dst; ddi_copyin checks the
+        // source against the caller's address space.
+        let r = unsafe { sys::ddi_copyin(self.raw() as *const c_void, dst as *mut c_void, len, self.mode()) };
+        if r != 0 { Err(Errno::EFAULT) } else { Ok(()) }
+    }
+
+    /// Copies exactly `len` bytes.
+    unsafe fn copy_out_struct(&self, src: *const u8, len: usize) -> Result<(), Errno> {
+        // SAFETY: the caller's contract covers src; ddi_copyout checks the
+        // destination.
+        let r = unsafe { sys::ddi_copyout(src as *const c_void, self.raw() as *mut c_void, len, self.mode()) };
+        if r != 0 { Err(Errno::EFAULT) } else { Ok(()) }
+    }
+}
+
+/// The most bytes a caller's structure can have: the size field of an
+/// illumos command is eight bits wide.
+const USER_MAX: usize = 255;
+
+/// The argument of a core or mode-setting ioctl, copied as Linux's
+/// `drm_ioctl()` copies it: the caller's size comes from its command, a
+/// shorter structure is zero-extended, a longer one has its extra bytes
+/// copied in when the call starts and copied back unchanged (or as zeros,
+/// for commands that only copy out) with the result
+/// ([`crate::ioctl::SizePlan`]).
+pub struct CoreArg<'a> {
+    io: &'a IoctlArg<'a>,
+    plan: SizePlan,
+    /// The caller's bytes after the kernel structure (`plan.tail_in()`).
+    tail: [u8; USER_MAX],
+}
+
+impl<'a> CoreArg<'a> {
+    /// Prepares the argument of a call with the size plan `plan`. Copies in
+    /// the bytes of a longer structure beyond the kernel's, so that an
+    /// unreadable tail is `EFAULT` before anything happens, as on Linux.
+    pub fn new(io: &'a IoctlArg<'a>, plan: SizePlan) -> Result<CoreArg<'a>, Errno> {
+        let mut tail = [0u8; USER_MAX];
+        let n = plan.tail_in();
+        if n > 0 {
+            let dst = tail.get_mut(..n).ok_or(Errno::EINVAL)?;
+            let src = io.raw().checked_add_unsigned(plan.kernel).ok_or(Errno::EFAULT)?;
+            // SAFETY: dst is n bytes of the local array; ddi_copyin checks
+            // the source.
+            let r = unsafe { sys::ddi_copyin(src as *const c_void, dst.as_mut_ptr() as *mut c_void, n, io.mode()) };
+            if r != 0 {
+                return Err(Errno::EFAULT);
+            }
+        }
+        Ok(CoreArg { io, plan, tail })
+    }
+
+    /// The size plan of the call.
+    pub fn plan(&self) -> &SizePlan {
+        &self.plan
+    }
+}
+
+impl ArgIo for CoreArg<'_> {
+    fn io(&self) -> &IoctlArg<'_> {
+        self.io
+    }
+
+    /// Copies the first `min(U, K)` bytes if the command copies in; the
+    /// rest stays zero. `len` must be the table's size `K`: a handler that
+    /// reads another structure than the table names is a bug, refused with
+    /// `EINVAL` rather than copying a wrong length.
+    unsafe fn copy_in_struct(&self, dst: *mut u8, len: usize) -> Result<(), Errno> {
+        if len != self.plan.kernel {
+            return Err(Errno::EINVAL);
+        }
+        let n = self.plan.copy_in();
+        if n == 0 {
+            return Ok(());
+        }
+        // SAFETY: n <= len, which the caller's contract covers.
+        let r = unsafe { sys::ddi_copyin(self.io.raw() as *const c_void, dst as *mut c_void, n, self.io.mode()) };
+        if r != 0 { Err(Errno::EFAULT) } else { Ok(()) }
+    }
+
+    /// Copies out `U` bytes if the command copies out: `min(U, K)` of the
+    /// structure and, for a longer caller structure, the tail it came with
+    /// (zeros if the command did not copy in).
+    unsafe fn copy_out_struct(&self, src: *const u8, len: usize) -> Result<(), Errno> {
+        if len != self.plan.kernel {
+            return Err(Errno::EINVAL);
+        }
+        if self.plan.is_exact() && self.plan.output {
+            // SAFETY: the caller's contract covers src.
+            return unsafe { self.io.copy_out_struct(src, len) };
+        }
+        // SAFETY: the caller's contract: len initialised bytes at src.
+        let kernel = unsafe { core::slice::from_raw_parts(src, len) };
+        let mut out = [0u8; USER_MAX];
+        let tail = self.tail.get(..self.plan.tail_in()).ok_or(Errno::EINVAL)?;
+        let n = assemble_out(&self.plan, kernel, tail, &mut out).ok_or(Errno::EINVAL)?;
+        if n == 0 {
+            return Ok(());
+        }
+        // SAFETY: out is a local array of which n bytes were written.
+        let r =
+            unsafe { sys::ddi_copyout(out.as_ptr() as *const c_void, self.io.raw() as *mut c_void, n, self.io.mode()) };
+        if r != 0 { Err(Errno::EFAULT) } else { Ok(()) }
+    }
+}
 
 /// A `#[repr(C)]` uAPI structure for which every bit pattern is a valid
 /// value: integers and raw pointers only.
@@ -125,18 +271,13 @@ pub struct UserArg<T: Plain> {
 }
 
 impl<T: Plain> UserArg<T> {
-    /// Copies the argument in from the caller. Fails with `EFAULT` if the
-    /// address is not readable.
-    pub fn read(arg: &IoctlArg<'_>) -> Result<UserArg<T>, Errno> {
-        let mut buf = MaybeUninit::<T>::uninit();
-        // SAFETY: the destination is size_of::<T>() bytes of our own stack;
-        // ddi_copyin checks the source against the caller's address space.
-        let r = unsafe {
-            sys::ddi_copyin(arg.raw() as *const c_void, buf.as_mut_ptr() as *mut c_void, size_of::<T>(), arg.mode())
-        };
-        if r != 0 {
-            return Err(Errno::EFAULT);
-        }
+    /// Copies the argument in from the caller: all of it through an
+    /// `IoctlArg`, as much as the caller has through a [`CoreArg`] (the
+    /// rest is zero). Fails with `EFAULT` if the address is not readable.
+    pub fn read<A: ArgIo + ?Sized>(arg: &A) -> Result<UserArg<T>, Errno> {
+        let mut buf = MaybeUninit::<T>::zeroed();
+        // SAFETY: the destination is size_of::<T>() bytes of our own stack.
+        unsafe { arg.copy_in_struct(buf.as_mut_ptr() as *mut u8, size_of::<T>())? };
         Ok(UserArg { buf })
     }
 
@@ -166,21 +307,19 @@ impl<T: Plain> UserArg<T> {
         unsafe { self.buf.assume_init_mut() }
     }
 
-    /// Copies the argument out to the caller. Fails with `EFAULT` if the
+    /// Copies the argument out to the caller (through a [`CoreArg`], as
+    /// much as the caller's command copies out). Fails with `EFAULT` if the
     /// address is not writable.
-    pub fn write(&self, arg: &IoctlArg<'_>) -> Result<(), Errno> {
-        // SAFETY: the source is the fully initialised buffer; ddi_copyout
-        // checks the destination.
-        let r = unsafe {
-            sys::ddi_copyout(self.buf.as_ptr() as *const c_void, arg.raw() as *mut c_void, size_of::<T>(), arg.mode())
-        };
-        if r != 0 { Err(Errno::EFAULT) } else { Ok(()) }
+    pub fn write<A: ArgIo + ?Sized>(&self, arg: &A) -> Result<(), Errno> {
+        // SAFETY: the source is the fully initialised buffer.
+        unsafe { arg.copy_out_struct(self.buf.as_ptr() as *const u8, size_of::<T>()) }
     }
 }
 
 /// Copies `src` to the caller's buffer at `addr`, with the data model and
 /// `FKIOCTL` handling of `arg`. Fails with `EFAULT`.
-pub fn copy_out_bytes(arg: &IoctlArg<'_>, addr: usize, src: &[u8]) -> Result<(), Errno> {
+pub fn copy_out_bytes<A: ArgIo + ?Sized>(arg: &A, addr: usize, src: &[u8]) -> Result<(), Errno> {
+    let arg = arg.io();
     if src.is_empty() {
         return Ok(());
     }
@@ -197,11 +336,12 @@ pub const MAX_ARRAY: usize = 1 << 16;
 /// memory (`KM_SLEEP`). `EINVAL` for more than [`MAX_ARRAY`] values,
 /// `EFAULT` for an unreadable array.
 pub fn copy_in_array<T: Plain + Default>(
-    arg: &IoctlArg<'_>,
+    arg: &(impl ArgIo + ?Sized),
     addr: usize,
     n: usize,
     ctx: &ddi::Sleepable,
 ) -> Result<crate::kvec::KVec<T>, Errno> {
+    let arg = arg.io();
     if n > MAX_ARRAY {
         return Err(Errno::EINVAL);
     }
@@ -220,7 +360,8 @@ pub fn copy_in_array<T: Plain + Default>(
 }
 
 /// Copies `src` to the caller's array at `addr`. Fails with `EFAULT`.
-pub fn copy_out_array<T: Plain>(arg: &IoctlArg<'_>, addr: usize, src: &[T]) -> Result<(), Errno> {
+pub fn copy_out_array<T: Plain, A: ArgIo + ?Sized>(arg: &A, addr: usize, src: &[T]) -> Result<(), Errno> {
+    let arg = arg.io();
     let bytes = core::mem::size_of_val(src);
     if bytes == 0 {
         return Ok(());
@@ -232,7 +373,8 @@ pub fn copy_out_array<T: Plain>(arg: &IoctlArg<'_>, addr: usize, src: &[T]) -> R
 }
 
 /// Fills `dst` from the caller's buffer at `addr`. Fails with `EFAULT`.
-pub fn copy_in_bytes(arg: &IoctlArg<'_>, addr: usize, dst: &mut [u8]) -> Result<(), Errno> {
+pub fn copy_in_bytes<A: ArgIo + ?Sized>(arg: &A, addr: usize, dst: &mut [u8]) -> Result<(), Errno> {
+    let arg = arg.io();
     if dst.is_empty() {
         return Ok(());
     }

@@ -40,7 +40,7 @@ use crate::gem::{GemCore, GemObject};
 use crate::ioctl::Op;
 use crate::karc::KArc;
 use crate::minor::CloneId;
-use crate::uaccess::{Plain, UserArg};
+use crate::uaccess::{ArgIo, CoreArg, Plain, UserArg};
 
 // SAFETY: integer fields only; see the bindings in drm-uapi.
 unsafe impl Plain for uapi::drm_prime_handle {}
@@ -64,7 +64,7 @@ impl<O: GemObject> SyncCore<O> {
         c: CloneId,
         features: Features,
         gem: Option<&KArc<GemCore<O>>>,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         let gem = match gem {
@@ -85,7 +85,7 @@ impl<O: GemObject> SyncCore<O> {
         &self,
         c: CloneId,
         gem: &KArc<GemCore<O>>,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         let mut a = UserArg::<uapi::drm_prime_handle>::read(arg)?;
@@ -99,7 +99,7 @@ impl<O: GemObject> SyncCore<O> {
             &self.dev,
             AnonObj::DmaBuf(obj),
             fdf,
-            arg,
+            arg.io(),
             |fd| {
                 // SAFETY: a field assignment.
                 unsafe { a.get_mut() }.fd = fd;
@@ -114,14 +114,14 @@ impl<O: GemObject> SyncCore<O> {
         &self,
         c: CloneId,
         gem: &KArc<GemCore<O>>,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         let mut a = UserArg::<uapi::drm_prime_handle>::read(arg)?;
         if a.get().flags != 0 {
             return Err(Errno::EINVAL);
         }
-        let obj = match self.lookup(a.get().fd, arg, true, ctx)? {
+        let obj = match self.lookup(a.get().fd, arg.io(), true, ctx)? {
             AnonObj::DmaBuf(g) => g,
             o => {
                 o.put(ctx);

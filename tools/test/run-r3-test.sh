@@ -19,6 +19,14 @@
 #   drm_r1_test.c    tools/test/drm_r1_test.c
 #   drm_r3_test.c    tools/test/drm_r3_test.c
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
+#   drm-test-lib.sh  tools/test/drm-test-lib.sh
+#   drm_minor.a      from `cargo xtask build drm_minor`, and drm_minor.mapfile
+#                    (modules/drm-minor/exports.mapfile), unless misc/drm_minor
+#                    is installed already
+#
+# rdrmnull's nodes are card<N> and renderD<128+N> for the device number N
+# it gets from misc/drm_minor (see run-r1-test.sh); modetest opens it by
+# its bus ID, pseudo:rdrmnull@0.
 #
 # modetest is taken from $MODETEST, default /opt/drm-tests/amd64/modetest
 # (package system/test/libdrm, gfx-drm's build of the libdrm 2.4.109
@@ -51,6 +59,8 @@ step() {
 	return $rc
 }
 
+. ./drm-test-lib.sh
+
 ETC="/etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/driver_classes /etc/devlink.tab
     /etc/security/device_policy /etc/path_to_inst"
 
@@ -58,7 +68,9 @@ state() {
 	# $1: before or after
 	digest -a sha256 $ETC > "state-$1.etc"
 	find /devices -print | sort > "state-$1.devices"
-	ls -la /dev/dri > "state-$1.dri" 2>&1
+	# The links only: the directory's own line changes whenever a link
+	# comes and goes, and it may exist before the test (another driver).
+	ls -l /dev/dri 2>&1 | grep -v '^total' > "state-$1.dri"
 	echo "::vmem" | mdb -k 2>&1 | awk 'NR == 1 || /umem_np|rdrmnull/' > "state-$1.vmem"
 	echo "\$ state $1"
 	cat "state-$1.etc"
@@ -97,32 +109,32 @@ modetest_steps() {
 		fail=1
 		return
 	fi
-	if modetest_run list 0 -M rdrmnull &&
+	if modetest_run list 0 -M rdrmnull -D pseudo:rdrmnull@0 &&
 	    grep -q '^Connectors:' modetest-list.out && grep -q 'connected' modetest-list.out &&
 	    grep -q '1024x768' modetest-list.out && grep -q 'IN_FORMATS' modetest-list.out; then
-		echo "PASS modetest -M rdrmnull lists encoders, connectors (1024x768), CRTCs and planes"
+		echo "PASS modetest -M rdrmnull -D pseudo:rdrmnull@0 lists encoders, connectors (1024x768), CRTCs and planes"
 	else
-		echo "FAIL modetest -M rdrmnull listing"
+		echo "FAIL modetest -M rdrmnull -D pseudo:rdrmnull@0 listing"
 		fail=1
 	fi
 	conn=$(awk '/^Connectors:/ {c = 1; next} c && $3 == "connected" {print $1; exit}' modetest-list.out)
 	crtc=$(awk '/^CRTCs:/ {c = 1; next} c && $1 ~ /^[0-9]+$/ {print $1; exit}' modetest-list.out)
 	echo "connector $conn, CRTC $crtc"
-	if modetest_run set 3 -M rdrmnull -s "$conn@$crtc:1024x768" &&
+	if modetest_run set 3 -M rdrmnull -D pseudo:rdrmnull@0 -s "$conn@$crtc:1024x768" &&
 	    grep -q 'setting mode 1024x768' modetest-set.out; then
 		echo "PASS modetest -s sets 1024x768 with a dumb framebuffer"
 	else
 		echo "FAIL modetest -s"
 		fail=1
 	fi
-	if modetest_run vsync 5 -M rdrmnull -s "$conn@$crtc:1024x768" -v &&
+	if modetest_run vsync 5 -M rdrmnull -D pseudo:rdrmnull@0 -s "$conn@$crtc:1024x768" -v &&
 	    awk '/freq:/ {f = $2 + 0; if (f > 55 && f < 65) ok++} END {exit !(ok >= 2)}' modetest-vsync.out; then
 		echo "PASS modetest -v page-flips with vblank events at about 60 Hz"
 	else
 		echo "FAIL modetest -v"
 		fail=1
 	fi
-	if modetest_run atomic 3 -M rdrmnull -a -s "$conn@$crtc:1024x768" -P "$(awk '/^Planes:/ {p = 1; next} p && $1 ~ /^[0-9]+$/ {print $1; exit}' modetest-list.out)@$crtc:1024x768" &&
+	if modetest_run atomic 3 -M rdrmnull -D pseudo:rdrmnull@0 -a -s "$conn@$crtc:1024x768" -P "$(awk '/^Planes:/ {p = 1; next} p && $1 ~ /^[0-9]+$/ {print $1; exit}' modetest-list.out)@$crtc:1024x768" &&
 	    ! grep -qi 'failed' modetest-atomic.out; then
 		echo "PASS modetest -a (atomic) sets the mode and the primary plane"
 	else
@@ -152,6 +164,9 @@ refused_detach_steps() {
 	else
 		echo "PASS modunload refused while rdrmnull holds a GEM object"
 	fi
+	# syslogd writes the refusal to the file some time after modunload
+	# returns.
+	wait_log 'detach refused: GEM state in use' "$refusals"
 	step sh -c 'grep "detach refused" /var/adm/messages | tail -2'
 	if [ "$(grep -c 'detach refused: GEM state in use' /var/adm/messages)" -gt "$refusals" ]; then
 		echo "PASS detach(9E) refused it: GEM state in use"
@@ -162,7 +177,7 @@ refused_detach_steps() {
 	step sh -c 'modinfo | grep rdrmnull'
 	gemstat "after the refused detach"
 	if [ -x "$MODETEST" ]; then
-		if modetest_run refused-list 0 -M rdrmnull &&
+		if modetest_run refused-list 0 -M rdrmnull -D pseudo:rdrmnull@0 &&
 		    grep -q '^Connectors:' modetest-refused-list.out &&
 		    grep -q '1024x768' modetest-refused-list.out; then
 			echo "PASS after the refused detach, modetest lists the display (1024x768)"
@@ -170,7 +185,7 @@ refused_detach_steps() {
 			echo "FAIL after the refused detach, modetest listing"
 			fail=1
 		fi
-		if modetest_run refused-vsync 5 -M rdrmnull -s "$conn@$crtc:1024x768" -v &&
+		if modetest_run refused-vsync 5 -M rdrmnull -D pseudo:rdrmnull@0 -s "$conn@$crtc:1024x768" -v &&
 		    awk '/freq:/ {f = $2 + 0; if (f > 55 && f < 65) ok++} END {exit !(ok >= 2)}' modetest-refused-vsync.out; then
 			echo "PASS after the refused detach, modetest -v page-flips with vblank events at about 60 Hz"
 		else
@@ -202,11 +217,13 @@ step uname -a
 # devfsadm -C.
 step devfsadm -C
 state before
+drm_minor_install || exit 1
 step digest -a sha256 rdrmnull.a
 # -N fs/specfs: makespecvp, for the file descriptors of dma-bufs, sync
 # objects and sync files (illumos-kernel-private-sys), lives in the specfs
 # module, which krtld does not search unless the module depends on it.
-step ld -ztype=kmod -N fs/specfs -z allextract rdrmnull.a -o rdrmnull || exit 1
+# -N misc/drm_minor: the DRM device numbers every driver shares.
+step ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract rdrmnull.a -o rdrmnull || exit 1
 step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo
@@ -251,13 +268,14 @@ if [ $fail -eq 0 ]; then
 	# at boot (after a panic during an earlier run) keeps the default 0600
 	# root root; set what minor_perm says, and rem_drv -C removes the
 	# attribute nodes again at the end.
-	for n in $(find /devices -name 'rdrmnull@*:card0' -o -name 'rdrmnull@*:renderD128'); do
+	for n in $(find /devices -name 'rdrmnull@*:card*' -o -name 'rdrmnull@*:renderD*'); do
 		case $(ls -l "$n" | awk '{print $1, $3, $4}') in
 		"crw-rw-rw- root sys") ;;
 		*) step chmod 0666 "$n"; step chown root:sys "$n" ;;
 		esac
 	done
 	step ls -lL /dev/dri
+	rdrmnull_nodes || fail=1
 	step sh -c 'tail -3 /var/adm/messages'
 	gemstat "after add_drv, before any open"
 	step ./drm_r0_test || fail=1
@@ -277,9 +295,9 @@ if [ $fail -eq 0 ]; then
 	# The module must stay loaded while a file is open: modunload has to
 	# fail, and succeed once the file is closed (as in run-r0-test.sh).
 	echo
-	echo "\$ ./drm_r0_test hold /dev/dri/card0 & (open file held on a fifo)"
+	echo "\$ ./drm_r0_test hold $DRM_CARD & (open file held on a fifo)"
 	rm -f hold.fifo && mkfifo hold.fifo
-	./drm_r0_test hold /dev/dri/card0 < hold.fifo &
+	./drm_r0_test hold "$DRM_CARD" < hold.fifo &
 	holder=$!
 	exec 9> hold.fifo
 	sleep 1
@@ -292,7 +310,7 @@ if [ $fail -eq 0 ]; then
 		echo "FAIL modunload succeeded while a file was open"
 		fail=1
 	else
-		echo "PASS modunload refused while /dev/dri/card0 is open"
+		echo "PASS modunload refused while $DRM_CARD is open"
 	fi
 	exec 9>&-
 	wait $holder
@@ -308,7 +326,7 @@ if [ $fail -eq 0 ]; then
 	step sh -c 'modinfo | grep rdrmnull || echo "rdrmnull not loaded"'
 	step sh -c 'echo "::vmem" | mdb -k | awk "NR == 1 || /rdrmnull/"; echo "(no rdrmnull arenas above: all were destroyed)"'
 	# Load once more so that rem_drv unloads a module that has run.
-	step ./drm_r0_test hold /dev/dri/renderD128 < /dev/null || fail=1
+	step ./drm_r0_test hold "$DRM_RENDER" < /dev/null || fail=1
 	step sh -c 'echo "::prtconf -d rdrmnull" | mdb -k'
 fi
 
@@ -320,13 +338,12 @@ step rm -f /usr/kernel/drv/amd64/rdrmnull /usr/kernel/drv/rdrmnull.conf
 step devfsadm -C
 if [ -d /dev/dri ]; then
 	step ls -la /dev/dri
-	if [ $had_dri = no ]; then
-		# devfsadm -C only removes links that a link module claims; the
-		# directory itself did not exist before the test.
-		step rm -f /dev/dri/card0 /dev/dri/renderD128
-		step rmdir /dev/dri
-	fi
+	# devfsadm -C only removes links that a link module claims: every link
+	# to an rdrmnull node goes, the directory only if the test made it.
+	remove_dri_links rdrmnull@
+	[ $had_dri = no ] && step rmdir /dev/dri
 fi
+drm_minor_remove || fail=1
 state after
 for f in etc devices dri; do
 	if cmp -s "state-before.$f" "state-after.$f"; then

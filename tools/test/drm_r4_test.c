@@ -22,7 +22,10 @@
  * sync object arrays, oversized streams, host-only blobs, sizes of 0) and
  * a fence wait that times out.
  *
- * Usage: drm_r4_test [card] (default /dev/dri/card0). Build on illumos:
+ * Usage: drm_r4_test [card [render]] (default $DRM_CARD and $DRM_RENDER,
+ * else /dev/dri/card0 and /dev/dri/renderD128; with the device numbers
+ * every DRM driver shares, virtio_gpu's nodes are card<N> and
+ * renderD<128+N> for the N it was given). Build on illumos:
  *   gcc -m64 -Wall -I drm -I /usr/include/libdrm -o drm_r4_test \
  *       drm_r4_test.c -L/usr/lib/xorg/amd64 -R/usr/lib/xorg/amd64 -ldrm -lpthread
  * where drm/ holds the headers of tools/uapi/generate.sh (libdrm 2.4.109,
@@ -48,6 +51,10 @@
 #include "drm_mode.h"
 #include "virtgpu_drm.h"
 #include <xf86drm.h>
+
+/* The nodes under test (see the usage above). */
+static const char *card_node = "/dev/dri/card0";
+static const char *render_node = "/dev/dri/renderD128";
 
 /* The older layouts (crates/drm-uapi/src/virtgpu_compat.rs). */
 struct execbuffer_v1 {
@@ -567,7 +574,7 @@ three_d(int blob, int cinit)
 
 	/* PRIME: a second file (the render node) imports the texture. */
 	{
-		int prime = -1, r = open("/dev/dri/renderD128", O_RDWR);
+		int prime = -1, r = open(render_node, O_RDWR);
 		uint32_t h2 = 0;
 
 		check(r >= 0 && drmPrimeHandleToFD(fd, t.bo, DRM_CLOEXEC, &prime) == 0 &&
@@ -643,7 +650,7 @@ three_d(int blob, int cinit)
 
 	/* CONTEXT_INIT on a fresh file. */
 	{
-		int f2 = open("/dev/dri/renderD128", O_RDWR);
+		int f2 = open(render_node, O_RDWR);
 		struct drm_virtgpu_context_set_param p[2] = {
 			{ .param = VIRTGPU_CONTEXT_PARAM_CAPSET_ID, .value = 2 },
 			{ .param = VIRTGPU_CONTEXT_PARAM_NUM_RINGS, .value = 2 },
@@ -689,7 +696,7 @@ static void *
 stress_thread(void *arg)
 {
 	struct worker *w = arg;
-	int f = w->shared ? fd : open((w->id % 2) ? "/dev/dri/card0" : "/dev/dri/renderD128", O_RDWR);
+	int f = w->shared ? fd : open((w->id % 2) ? card_node : render_node, O_RDWR);
 	uint32_t s[64];
 
 	if (f < 0) {
@@ -766,7 +773,7 @@ hold(void)
 	struct drm_mode_create_dumb c = { .width = 64, .height = 64, .bpp = 32 };
 	int prime = -1;
 
-	if ((fd = open("/dev/dri/card0", O_RDWR)) < 0 || xioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &c) != 0 ||
+	if ((fd = open(card_node, O_RDWR)) < 0 || xioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &c) != 0 ||
 	    drmPrimeHandleToFD(fd, c.handle, DRM_CLOEXEC, &prime) != 0) {
 		perror("hold");
 		return (1);
@@ -786,10 +793,20 @@ hold(void)
 int
 main(int argc, char **argv)
 {
-	const char *card = argc > 1 ? argv[1] : "/dev/dri/card0";
+	const char *card;
 
+	if (getenv("DRM_CARD") != NULL && *getenv("DRM_CARD") != '\0')
+		card_node = getenv("DRM_CARD");
+	if (getenv("DRM_RENDER") != NULL && *getenv("DRM_RENDER") != '\0')
+		render_node = getenv("DRM_RENDER");
 	if (argc > 1 && strcmp(argv[1], "hold") == 0)
 		return (hold());
+	if (argc > 1)
+		card_node = argv[1];
+	if (argc > 2)
+		render_node = argv[2];
+	card = card_node;
+	(void) printf("nodes under test: %s %s\n", card_node, render_node);
 	int has3d, blob, cinit;
 	uint64_t mask;
 	drmVersionPtr v;

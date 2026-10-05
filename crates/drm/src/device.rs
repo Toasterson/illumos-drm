@@ -50,14 +50,14 @@ use crate::driver::{BUS_ID_MAX, BusId, Driver, Features};
 use crate::dumb::DumbRequest;
 use crate::fence_dev::SyncCore;
 use crate::gem::{GemCore, registry};
-use crate::ioctl::{self, Entry, Op};
+use crate::ioctl::{self, Entry, Op, SizePlan};
 use crate::karc::KArc;
 use crate::kms::dev::{Caller, Kms};
 use crate::kms::ioctl as kmsioctl;
 use crate::minor::{self, CloneId, MAX_DEVICES, NodeKind};
 use crate::offsets::PAGE_SIZE;
 use crate::state::{DeviceState, IF_MAJOR, IF_MINOR, Opener, SetVersion};
-use crate::uaccess::{UserArg, copy_in_bytes, copy_out_bytes};
+use crate::uaccess::{CoreArg, UserArg, copy_in_bytes, copy_out_bytes};
 
 /// One DRM device: the driver's state, the card and render minor nodes, and
 /// the per-file state.
@@ -82,26 +82,78 @@ pub struct Device<D: Driver> {
     // Dropping these removes the minor nodes.
     _card: MinorNode,
     _render: Option<MinorNode>,
+    // The device number goes back last, after the nodes that carry it.
+    _number: Number,
+}
+
+/// A device number from `misc/drm_minor`, recorded as this module's
+/// instance's (`minor::bind`); dropping it forgets the instance and gives
+/// the number back.
+struct Number {
+    index: u32,
+    inst: Instance,
+    /// The owner token, the device's `dev_info_t`.
+    owner: usize,
+}
+
+impl Number {
+    /// Takes the lowest free device number of the system for `dev`.
+    fn claim(dev: &DevInfo) -> Result<Number, DdiError> {
+        let owner = dev.as_raw() as usize;
+        // SAFETY: drm_minor_alloc treats the pointer as an opaque token and
+        // may be called from any context; the -N misc/drm_minor dependency
+        // keeps the module loaded while this one is.
+        let id = unsafe { drm_minor_sys::drm_minor_alloc(owner as *const core::ffi::c_void) };
+        let Some(index) = u32::try_from(id).ok().filter(|i| *i < MAX_DEVICES) else {
+            if id >= 0 {
+                // A number this core cannot use; give it back.
+                // SAFETY: as above; id was just allocated for owner.
+                unsafe { drm_minor_sys::drm_minor_free(id, owner as *const core::ffi::c_void) };
+            }
+            dev.warn(format_args!("all {MAX_DEVICES} DRM device numbers are in use"));
+            return Err(DdiError);
+        };
+        let n = Number { index, inst: dev.instance(), owner };
+        if !minor::bind(index, n.inst) {
+            // Unreachable while misc/drm_minor hands each number to one
+            // device; refuse rather than share a number.
+            dev.warn(format_args!("device number {index} is already recorded in this driver"));
+            // SAFETY: as above.
+            unsafe { drm_minor_sys::drm_minor_free(id, owner as *const core::ffi::c_void) };
+            return Err(DdiError);
+        }
+        Ok(n)
+    }
+}
+
+impl Drop for Number {
+    fn drop(&mut self) {
+        minor::unbind(self.index, self.inst);
+        // SAFETY: the number was allocated for this owner in claim. A
+        // refusal is logged by drm_minor and changes nothing.
+        unsafe {
+            drm_minor_sys::drm_minor_free(self.index as core::ffi::c_int, self.owner as *const core::ffi::c_void)
+        };
+    }
 }
 
 impl<D: Driver> Device<D> {
     /// Registers a device for the driver instance `node`, the capability for
     /// the driver's own node that `ddi::Driver::attach` received; the GEM
-    /// state keeps it to allocate DMA handles. Creates the
-    /// primary node `card<N>` and, if the driver has [`Features::RENDER`],
-    /// the render node `renderD<128+N>`, where `N` is the instance number.
+    /// state keeps it to allocate DMA handles. Takes the lowest free device
+    /// number `N` of the system from `misc/drm_minor`, shared by every
+    /// driver built on the core, and creates the primary node `card<N>`
+    /// and, if the driver has [`Features::RENDER`], the render node
+    /// `renderD<128+N>`. The number stays the device's until it detaches.
     /// Both nodes have the node type `ddi_display:drm`
     /// (`DDI_NT_DISPLAY_DRM`), for which devfsadm creates the `/dev/dri`
     /// links (see `packaging/devlink.tab`).
     pub fn attach(node: OwnNode, driver: D, ctx: &Sleepable) -> Result<Device<D>, DdiError> {
         let dev = node.dev();
-        let Some(index) = u32::try_from(dev.instance().0).ok().filter(|i| *i < MAX_DEVICES) else {
-            dev.warn(format_args!(
-                "instance {} is above the {MAX_DEVICES} DRM devices a driver can have",
-                dev.instance().0
-            ));
-            return Err(DdiError);
-        };
+        // Taken first and dropped last: every early return below gives it
+        // back after the nodes are gone.
+        let number = Number::claim(&dev)?;
+        let index = number.index;
         let mut bus_id = BusId::new();
         if driver.bus_id(&dev, &mut bus_id).is_err() {
             dev.warn(format_args!("bus ID does not fit in {BUS_ID_MAX} bytes"));
@@ -144,12 +196,6 @@ impl<D: Driver> Device<D> {
                 return Err(DdiError);
             }
         };
-        if let Some(g) = &gem
-            && !registry::insert(index, &**g)
-        {
-            dev.warn(format_args!("device {index} is registered twice"));
-            return Err(DdiError);
-        }
         let kms = match driver.kms() {
             Some(k) if gem.is_some() && D::FEATURES.contains(Features::MODESET) => {
                 let modifiers = D::MODE_CONFIG.fb_modifiers;
@@ -167,6 +213,20 @@ impl<D: Driver> Device<D> {
             }
             None => None,
         };
+        // The devmap callbacks find the GEM state through this registry.
+        // Recording it is the last step that can fail, so that no failed
+        // attach leaves an entry behind: the device number is the lowest
+        // free one of the system, and the next attach of this driver would
+        // usually be handed the same number and find the entry taken.
+        if let Some(g) = &gem
+            && !registry::insert(index, &**g)
+        {
+            dev.warn(format_args!("device {index} is registered twice"));
+            if let Some(k) = &kms {
+                k.teardown(ctx);
+            }
+            return Err(DdiError);
+        }
         dev.report();
         Ok(Device {
             driver,
@@ -180,6 +240,7 @@ impl<D: Driver> Device<D> {
             sync,
             _card: card,
             _render: render,
+            _number: number,
         })
     }
 
@@ -277,7 +338,7 @@ impl<D: Driver> Device<D> {
         c: CloneId,
         perm: crate::state::Perm,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
     ) -> Result<(), Errno> {
         let mut v = UserArg::<uapi::drm_version>::read(arg)?;
         self.state.lock().permit(c, perm, privileged)?;
@@ -297,7 +358,7 @@ impl<D: Driver> Device<D> {
         c: CloneId,
         perm: crate::state::Perm,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
     ) -> Result<(), Errno> {
         let mut u = UserArg::<uapi::drm_unique>::read(arg)?;
         let set = {
@@ -322,7 +383,7 @@ impl<D: Driver> Device<D> {
         c: CloneId,
         perm: crate::state::Perm,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
     ) -> Result<(), Errno> {
         let u = UserArg::<uapi::drm_unique>::read(arg)?;
         // Check permission before touching the string, so that a caller
@@ -350,7 +411,7 @@ impl<D: Driver> Device<D> {
 /// `value` go to the caller's buffer, and `*len` becomes the full length of
 /// `value`. A short buffer is the documented way for libdrm to learn the
 /// length, so the partial copy is the ABI, not a silent truncation.
-fn copy_field(arg: &IoctlArg<'_>, len: &mut usize, addr: usize, value: &[u8]) -> Result<(), Errno> {
+fn copy_field(arg: &CoreArg<'_>, len: &mut usize, addr: usize, value: &[u8]) -> Result<(), Errno> {
     let n = value.len().min(*len);
     copy_out_bytes(arg, addr, value.get(..n).ok_or(Errno::EINVAL)?)?;
     *len = value.len();
@@ -518,12 +579,18 @@ impl<D: Driver> CharDevice for Device<D> {
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
         // drv_priv(9F) is only called when an ioctl's permission needs it.
         let privileged = &|| cred.has_sys_devices_priv();
+        // Core and mode-setting commands match whatever their size bits,
+        // and their argument is copied with Linux's size rule (a shorter
+        // structure is zero-extended, a longer one keeps its extra bytes;
+        // crate::ioctl). Driver commands match on their complete value.
         if let Some(entry) = ioctl::lookup(cmd) {
-            self.core_ioctl(entry, c, privileged, &arg, ctx)?;
+            let a = CoreArg::new(&arg, SizePlan::new(entry.cmd, cmd))?;
+            self.core_ioctl(entry, c, privileged, &a, ctx)?;
             return Ok(0);
         }
         if let Some(entry) = kmsioctl::lookup(cmd) {
-            self.kms_ioctl(entry, c, privileged, &arg, ctx)?;
+            let a = CoreArg::new(&arg, SizePlan::new(entry.cmd, cmd))?;
+            self.kms_ioctl(entry, c, privileged, &a, ctx)?;
             return Ok(0);
         }
         let entry = ioctl::lookup_driver(D::IOCTLS, cmd).ok_or(Errno::ENOTTY)?;
@@ -550,7 +617,7 @@ impl<D: Driver> Device<D> {
         entry: &kmsioctl::KmsEntry,
         c: CloneId,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         let (caps, master) = {
@@ -582,7 +649,7 @@ impl<D: Driver> Device<D> {
         entry: &Entry,
         c: CloneId,
         privileged: &dyn Fn() -> bool,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         let perm = entry.perm;

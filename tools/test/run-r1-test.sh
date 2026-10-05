@@ -21,6 +21,15 @@
 #                    $MODETEST, default /opt/drm-tests/amd64/modetest,
 #                    package system/test/libdrm)
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
+#   drm-test-lib.sh  tools/test/drm-test-lib.sh
+#   drm_minor.a      from `cargo xtask build drm_minor`, and drm_minor.mapfile
+#                    (modules/drm-minor/exports.mapfile), unless misc/drm_minor
+#                    is installed already
+#
+# rdrmnull's nodes are card<N> and renderD<128+N> for the device number N
+# it gets from misc/drm_minor, which other DRM drivers attached at the same
+# time (virtio_gpu) share; the script finds them through /dev/dri and hands
+# them to the tests in DRM_CARD, DRM_RENDER and DRM_CARD1.
 #
 # RDRMNULL_CONF names another .conf to install instead of rdrmnull.conf:
 # tools/test/rdrmnull-two.conf (two devices, for the R2 cross-device
@@ -51,6 +60,8 @@ step() {
 	return $rc
 }
 
+. ./drm-test-lib.sh
+
 ETC="/etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/driver_classes /etc/devlink.tab
     /etc/security/device_policy /etc/path_to_inst"
 
@@ -58,7 +69,9 @@ state() {
 	# $1: before or after
 	digest -a sha256 $ETC > "state-$1.etc"
 	find /devices -print | sort > "state-$1.devices"
-	ls -la /dev/dri > "state-$1.dri" 2>&1
+	# The links only: the directory's own line changes whenever a link
+	# comes and goes, and it may exist before the test (another driver).
+	ls -l /dev/dri 2>&1 | grep -v '^total' > "state-$1.dri"
 	echo "::vmem" | mdb -k 2>&1 | awk 'NR == 1 || /umem_np|rdrmnull/' > "state-$1.vmem"
 	echo "\$ state $1"
 	cat "state-$1.etc"
@@ -102,6 +115,10 @@ refused_detach_steps() {
 	else
 		echo "PASS modunload refused while rdrmnull holds a buffer with a pending fence"
 	fi
+	# syslogd writes the refusal to the file some time after modunload
+	# returns.
+	wait_log 'detach refused' "$refusals"
+	wait_log "detach cancelled 1 pending test fences" "$cancels"
 	step sh -c 'grep "detach" /var/adm/messages | tail -3'
 	if [ "$(grep -c 'detach refused: GEM state in use' /var/adm/messages)" -gt 0 ] &&
 	    [ "$(grep -c 'detach refused' /var/adm/messages)" -gt "$refusals" ]; then
@@ -121,7 +138,7 @@ refused_detach_steps() {
 	if [ ! -x "$MODETEST" ]; then
 		echo "FAIL modetest not found at $MODETEST"
 		fail=1
-	elif step sh -c "$MODETEST -M rdrmnull -c > modetest-refused.out 2>&1" &&
+	elif step sh -c "$MODETEST -M rdrmnull -D pseudo:rdrmnull@0 -c > modetest-refused.out 2>&1" &&
 	    grep -q '^Connectors:' modetest-refused.out && grep -q 'connected' modetest-refused.out &&
 	    grep -q '1024x768' modetest-refused.out; then
 		echo "PASS after the refused detach, modetest lists the connector and its modes"
@@ -146,11 +163,13 @@ step uname -a
 # devfsadm -C.
 step devfsadm -C
 state before
+drm_minor_install || exit 1
 step digest -a sha256 rdrmnull.a
 # -N fs/specfs: makespecvp, for the file descriptors of dma-bufs, sync
 # objects and sync files (illumos-kernel-private-sys), lives in the specfs
 # module, which krtld does not search unless the module depends on it.
-step ld -ztype=kmod -N fs/specfs -z allextract rdrmnull.a -o rdrmnull || exit 1
+# -N misc/drm_minor: the DRM device numbers every driver shares.
+step ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract rdrmnull.a -o rdrmnull || exit 1
 step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo
@@ -199,13 +218,14 @@ if [ $fail -eq 0 ]; then
 	# at boot (after a panic during an earlier run) keeps the default 0600
 	# root root; set what minor_perm says, and rem_drv -C removes the
 	# attribute nodes again at the end.
-	for n in $(find /devices -name 'rdrmnull@*:card0' -o -name 'rdrmnull@*:renderD128'); do
+	for n in $(find /devices -name 'rdrmnull@*:card*' -o -name 'rdrmnull@*:renderD*'); do
 		case $(ls -l "$n" | awk '{print $1, $3, $4}') in
 		"crw-rw-rw- root sys") ;;
 		*) step chmod 0666 "$n"; step chown root:sys "$n" ;;
 		esac
 	done
 	step ls -lL /dev/dri
+	rdrmnull_nodes || fail=1
 	step sh -c 'tail -3 /var/adm/messages'
 	gemstat "after add_drv, before any open"
 	step ./drm_r0_test || fail=1
@@ -223,9 +243,9 @@ if [ $fail -eq 0 ]; then
 	# The module must stay loaded while a file is open: modunload has to
 	# fail, and succeed once the file is closed (as in run-r0-test.sh).
 	echo
-	echo "\$ ./drm_r0_test hold /dev/dri/card0 & (open file held on a fifo)"
+	echo "\$ ./drm_r0_test hold $DRM_CARD & (open file held on a fifo)"
 	rm -f hold.fifo && mkfifo hold.fifo
-	./drm_r0_test hold /dev/dri/card0 < hold.fifo &
+	./drm_r0_test hold "$DRM_CARD" < hold.fifo &
 	holder=$!
 	exec 9> hold.fifo
 	sleep 1
@@ -238,7 +258,7 @@ if [ $fail -eq 0 ]; then
 		echo "FAIL modunload succeeded while a file was open"
 		fail=1
 	else
-		echo "PASS modunload refused while /dev/dri/card0 is open"
+		echo "PASS modunload refused while $DRM_CARD is open"
 	fi
 	exec 9>&-
 	wait $holder
@@ -261,6 +281,7 @@ if [ $fail -eq 0 ]; then
 		fail=1
 	fi
 	if [ $R2 = yes ]; then
+		wait_log "detach cancelled 1 pending test fences" "$cancels"
 		if [ "$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)" -gt "$cancels" ]; then
 			echo "PASS the detach cancelled the pending fence"
 		else
@@ -270,8 +291,11 @@ if [ $fail -eq 0 ]; then
 	fi
 	step sh -c 'modinfo | grep rdrmnull || echo "rdrmnull not loaded"'
 	step sh -c 'echo "::vmem" | mdb -k | awk "NR == 1 || /rdrmnull/"; echo "(no rdrmnull arenas above: all were destroyed)"'
-	# Load once more so that rem_drv unloads a module that has run.
-	step ./drm_r0_test hold /dev/dri/renderD128 < /dev/null || fail=1
+	# Load once more so that rem_drv unloads a module that has run: the
+	# link still names the device's node, whose open attaches it again
+	# (with the lowest free device number, the one it had if no other
+	# device took it meanwhile).
+	step ./drm_r0_test hold "$DRM_RENDER" < /dev/null || fail=1
 	step sh -c 'echo "::prtconf -d rdrmnull" | mdb -k'
 fi
 
@@ -283,19 +307,12 @@ step rm -f /usr/kernel/drv/amd64/rdrmnull /usr/kernel/drv/rdrmnull.conf
 step devfsadm -C
 if [ -d /dev/dri ]; then
 	step ls -la /dev/dri
-	if [ $had_dri = no ]; then
-		# devfsadm -C only removes links that a link module claims; the
-		# directory itself did not exist before the test.
-		# Every link to an rdrmnull node (card1 and renderD129 too with
-		# rdrmnull-two.conf).
-		for l in /dev/dri/*; do
-			case $(ls -l "$l" 2>/dev/null) in
-			*"-> "*/rdrmnull@*) step rm -f "$l" ;;
-			esac
-		done
-		step rmdir /dev/dri
-	fi
+	# devfsadm -C only removes links that a link module claims: every link
+	# to an rdrmnull node goes, the directory only if the test made it.
+	remove_dri_links rdrmnull@
+	[ $had_dri = no ] && step rmdir /dev/dri
 fi
+drm_minor_remove || fail=1
 state after
 for f in etc devices dri; do
 	if cmp -s "state-before.$f" "state-after.$f"; then

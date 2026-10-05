@@ -10,6 +10,13 @@
 #   rdrmnull.conf    examples/rdrmnull/rdrmnull.conf
 #   drm_r0_test.c    tools/test/drm_r0_test.c
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
+#   drm-test-lib.sh  tools/test/drm-test-lib.sh
+#   drm_minor.a      from `cargo xtask build drm_minor`, and drm_minor.mapfile
+#                    (modules/drm-minor/exports.mapfile), unless misc/drm_minor
+#                    is installed already
+#
+# rdrmnull's nodes are card<N> and renderD<128+N> for the device number N
+# it gets from misc/drm_minor (see run-r1-test.sh).
 #
 # The machine needs gcc and the libdrm 2.4.109 library in /usr/lib/xorg/amd64
 # (x11/library/libdrm). The script changes nothing outside this directory
@@ -29,16 +36,20 @@ step() {
 	return $rc
 }
 
+. ./drm-test-lib.sh
+
 fail=0
 had_dri=no
 [ -d /dev/dri ] && had_dri=yes
 
 step uname -a
+drm_minor_install || exit 1
 step digest -a sha256 rdrmnull.a
 # -N fs/specfs: makespecvp, for the file descriptors of dma-bufs, sync
 # objects and sync files (illumos-kernel-private-sys), lives in the specfs
 # module, which krtld does not search unless the module depends on it.
-step ld -ztype=kmod -N fs/specfs -z allextract rdrmnull.a -o rdrmnull || exit 1
+# -N misc/drm_minor: the DRM device numbers every driver shares.
+step ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract rdrmnull.a -o rdrmnull || exit 1
 step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo
@@ -69,6 +80,7 @@ if [ $fail -eq 0 ]; then
 	step ls -l /devices/pseudo/ | grep rdrmnull
 	step ls -l /dev/dri
 	step ls -lL /dev/dri
+	rdrmnull_nodes || fail=1
 	step sh -c 'tail -3 /var/adm/messages'
 	step ./drm_r0_test || fail=1
 	step ./drm_r0_probe32 || fail=1
@@ -79,9 +91,9 @@ if [ $fail -eq 0 ]; then
 	# rem_drv itself is not used for the refusal because it removes the
 	# /etc entries even when the unload fails.
 	echo
-	echo "\$ ./drm_r0_test hold /dev/dri/card0 & (open file held on a fifo)"
+	echo "\$ ./drm_r0_test hold $DRM_CARD & (open file held on a fifo)"
 	rm -f hold.fifo && mkfifo hold.fifo
-	./drm_r0_test hold /dev/dri/card0 < hold.fifo &
+	./drm_r0_test hold "$DRM_CARD" < hold.fifo &
 	holder=$!
 	exec 9> hold.fifo
 	sleep 1
@@ -94,7 +106,7 @@ if [ $fail -eq 0 ]; then
 		echo "FAIL modunload succeeded while a file was open"
 		fail=1
 	else
-		echo "PASS modunload refused while /dev/dri/card0 is open"
+		echo "PASS modunload refused while $DRM_CARD is open"
 	fi
 	step sh -c 'modinfo | grep rdrmnull'
 	exec 9>&-
@@ -110,7 +122,7 @@ if [ $fail -eq 0 ]; then
 	step sh -c 'modinfo | grep rdrmnull || echo "rdrmnull not loaded"'
 	# Open the device once more so that the driver attaches again, and
 	# unload through rem_drv below.
-	step ./drm_r0_test hold /dev/dri/renderD128 < /dev/null || fail=1
+	step ./drm_r0_test hold "$DRM_RENDER" < /dev/null || fail=1
 	step sh -c 'modinfo | grep rdrmnull'
 	step sh -c 'echo "::prtconf -d rdrmnull" | mdb -k'
 fi
@@ -121,13 +133,12 @@ step rm -f /usr/kernel/drv/amd64/rdrmnull /usr/kernel/drv/rdrmnull.conf
 step devfsadm -C
 if [ -d /dev/dri ]; then
 	step ls -la /dev/dri
-	if [ $had_dri = no ]; then
-		# devfsadm -C only removes links that a link module claims; the
-		# directory itself did not exist before the test.
-		step rm -f /dev/dri/card0 /dev/dri/renderD128
-		step rmdir /dev/dri
-	fi
+	# devfsadm -C only removes links that a link module claims: every link
+	# to an rdrmnull node goes, the directory only if the test made it.
+	remove_dri_links rdrmnull@
+	[ $had_dri = no ] && step rmdir /dev/dri
 fi
+drm_minor_remove || fail=1
 step sh -c 'ls -la /dev/dri 2>&1; grep -n rdrmnull /etc/name_to_major /etc/minor_perm /etc/driver_aliases /etc/devlink.tab || echo "no rdrmnull entries in /etc"'
 echo
 echo "run-r0-test: fail=$fail"

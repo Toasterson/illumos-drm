@@ -245,10 +245,12 @@ mod imp {
     }
 
     impl<O: GemObject> AnonFiles<O> {
-        /// The table of device `index` of the driver of `dev`.
+        /// The table of device number `index`, the device of `dev`. The
+        /// identifier space is named after the driver instance, like the
+        /// device's other arenas and its kstats.
         pub(crate) fn new(dev: &DevInfo, index: u32, ctx: &Sleepable) -> Result<AnonFiles<O>, Errno> {
             let drv = dev.driver_name().to_str().map_err(|_| Errno::EINVAL)?;
-            let name = NameBuf::new(format_args!("{drv}{index}.anon"))?;
+            let name = NameBuf::new(format_args!("{drv}{}.anon", dev.instance().0))?;
             let ids = KIdSpace::with_range(name.as_cstr(), 1, super::ID_MASK as i32 + 1, ctx)?;
             Ok(AnonFiles { index, table: KMutex::new(super::AnonTable::new(ids)) })
         }
@@ -561,6 +563,12 @@ mod tests {
         }
         assert_eq!(decode(ANON_BIT), None, "number 0 is never used");
         assert_eq!(decode(m | (1 << 31)), None);
-        assert_eq!(minor::instance_of_minor(ddi::Minor(m)), Some(ddi::Instance(3)));
+        // The instance comes from the device number's holder in this
+        // driver (number 10: no other test uses it).
+        let m = minor(10, 77).unwrap();
+        assert_eq!(minor::instance_of_minor(ddi::Minor(m)), None);
+        assert!(minor::bind(10, ddi::Instance(2)));
+        assert_eq!(minor::instance_of_minor(ddi::Minor(m)), Some(ddi::Instance(2)));
+        assert!(minor::unbind(10, ddi::Instance(2)));
     }
 }

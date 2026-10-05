@@ -8,9 +8,12 @@
 //! the same as `ddi_sys::ioccom`, repeated here so that the crate has no
 //! kernel dependency and can serve userland code as well.
 //!
-//! The size is truncated to eight bits by the encoding. The kernel therefore
-//! cannot learn the argument size from the command number, and the DRM core
-//! dispatches on the complete command value instead (see the `drm` crate).
+//! The size is truncated to eight bits by the encoding, so the kernel can
+//! learn an argument size from the command number only for structures of
+//! fewer than 256 bytes. Every structure of the DRM core and its mode
+//! setting is smaller than that, and the `drm` crate takes the caller's
+//! size from the command for those ioctls as Linux's `drm_ioctl()` does
+//! (see `drm::ioctl`); the `drm` crate's tests check the bound.
 
 /// The group letter of every DRM ioctl (`DRM_IOCTL_BASE`).
 pub const DRM_IOCTL_BASE: u8 = b'd';
@@ -25,6 +28,8 @@ pub const IOC_OUT: u32 = 0x4000_0000;
 pub const IOC_IN: u32 = 0x8000_0000;
 /// Both directions (`IOC_INOUT`).
 pub const IOC_INOUT: u32 = IOC_IN | IOC_OUT;
+/// The direction bits of a command (`IOC_VOID`, `IOC_OUT`, `IOC_IN`).
+pub const IOC_DIRMASK: u32 = IOC_VOID | IOC_OUT | IOC_IN;
 
 const fn encode(dir: u32, nr: u8, size: usize) -> u32 {
     dir | (((size as u32) & IOCPARM_MASK) << 16) | ((DRM_IOCTL_BASE as u32) << 8) | nr as u32
@@ -55,6 +60,21 @@ pub const fn ioc_nr(cmd: u32) -> u8 {
 pub const fn ioc_group(cmd: u32) -> u8 {
     ((cmd >> 8) & 0xff) as u8
 }
+/// The argument size a command carries (`(cmd >> 16) & IOCPARM_MASK`): the
+/// size of the caller's structure for structures below 256 bytes.
+pub const fn ioc_size(cmd: u32) -> usize {
+    ((cmd >> 16) & IOCPARM_MASK) as usize
+}
+/// The direction bits of a command.
+pub const fn ioc_dir(cmd: u32) -> u32 {
+    cmd & IOC_DIRMASK
+}
+/// Returns `cmd` with its size bits replaced by `size` (masked as the C
+/// macros mask it), which is how a caller with an older or newer structure
+/// encodes the same command.
+pub const fn with_size(cmd: u32, size: usize) -> u32 {
+    (cmd & !(IOCPARM_MASK << 16)) | (((size as u32) & IOCPARM_MASK) << 16)
+}
 
 #[cfg(test)]
 mod tests {
@@ -71,5 +91,10 @@ mod tests {
         assert_eq!(drm_iowr::<[u8; 0x104]>(0x01), 0xc004_6401);
         assert_eq!(ioc_nr(0xc040_6400), 0);
         assert_eq!(ioc_group(0xc040_6400), b'd');
+        assert_eq!(ioc_size(0xc040_6400), 64);
+        assert_eq!(ioc_dir(0xc040_6400), IOC_INOUT);
+        assert_eq!(ioc_dir(drm_io(0x1e)), IOC_VOID);
+        assert_eq!(with_size(0xc040_6400, 24), 0xc018_6400);
+        assert_eq!(with_size(0xc040_6400, 0x104), 0xc004_6400);
     }
 }

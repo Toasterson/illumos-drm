@@ -1,0 +1,22 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The symbols misc/drm_minor exports: the module entry points and the C
+# interface of crates/drm-minor-sys. Every other symbol (the Rust core
+# library, compiler builtins) is reduced to local scope by ld -B reduce,
+# so that no other module can resolve against it.
+#
+$mapfile_version 2
+
+SYMBOL_SCOPE {
+	global:
+		_init;
+		_fini;
+		_info;
+		drm_minor_alloc;
+		drm_minor_free;
+	local:
+		*;
+};

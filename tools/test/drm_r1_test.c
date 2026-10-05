@@ -43,8 +43,33 @@
 #include "drm.h"
 #include "drm_mode.h"
 
-#define	CARD	"/dev/dri/card0"
-#define	RENDER	"/dev/dri/renderD128"
+/*
+ * The nodes under test. Device numbers are shared by every DRM driver
+ * (misc/drm_minor), so rdrmnull's devices are card<N> and renderD<128+N>
+ * for whatever N they were given; the run scripts pass them in DRM_CARD
+ * and DRM_RENDER, and the driver instance (for the kstats) in
+ * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.
+ */
+static const char *card_path __attribute__((unused)) = "/dev/dri/card0";
+static const char *render_path __attribute__((unused)) = "/dev/dri/renderD128";
+static int drm_instance __attribute__((unused));
+
+static void nodes_from_env(void) __attribute__((constructor));
+static void
+nodes_from_env(void)
+{
+	const char *s;
+
+	if ((s = getenv("DRM_CARD")) != NULL && *s != '\0')
+		card_path = s;
+	if ((s = getenv("DRM_RENDER")) != NULL && *s != '\0')
+		render_path = s;
+	if ((s = getenv("DRM_INSTANCE")) != NULL && *s != '\0')
+		drm_instance = atoi(s);
+}
+
+#define	CARD	card_path
+#define	RENDER	render_path
 #define	NOBODY	60001
 #define	PAGE	4096
 /* DRM_FILE_PAGE_OFFSET_START on 64-bit Linux, and so here. */
@@ -98,7 +123,7 @@ main(void)
 	struct rdrmnull_move mv;
 	int fd = open(CARD, O_RDWR);
 
-	check(fd >= 0, "32-bit open " CARD);
+	check(fd >= 0, "32-bit open of the card node");
 	if (fd < 0)
 		return (1);
 	(void) memset(&gc, 0, sizeof (gc));
@@ -152,7 +177,7 @@ gem_stats(struct gem *g)
 	(void) memset(g, 0xff, sizeof (*g));
 	if ((kc = kstat_open()) == NULL)
 		return (0);
-	ksp = kstat_lookup(kc, "rdrmnull", 0, "gem");
+	ksp = kstat_lookup(kc, "rdrmnull", drm_instance, "gem");
 	if (ksp != NULL && kstat_read(kc, ksp, NULL) != -1) {
 		ok = 1;
 		for (i = 0; i < (int)(sizeof (names) / sizeof (names[0])); i++) {
@@ -968,7 +993,7 @@ main(int argc, char **argv)
 	(void) argv;
 	check(gem_idle("at start"), "kstat rdrmnull:0:gem exists and is idle");
 	fd = open(CARD, O_RDWR);
-	check(fd >= 0, "open " CARD);
+	check(fd >= 0, "open the card node");
 	if (fd < 0)
 		return (failures);
 	test_caps(fd, "card0");

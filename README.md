@@ -161,6 +161,40 @@ with the final code, including the close of a file that set a cursor on
 a dark CRTC, passed the driver test, the R0 to R3 suites and both virgl
 tests again (Xorg was not rerun).
 
+G6 (one device numbering across drivers, Linux's ioctl argument sizes),
+1 October 2026, on a disposable Hipster guest with illumos `7e802e88a3`
+(osnet 23295) in QEMU 6.2 with `-device virtio-gpu-gl-pci`, and gfx-drm's
+libdrm 2.4.134 (gfx-drm pull request 8, `1e68727`) installed in the
+guest: `tools/test/run-g6-test.sh` passed with 354 checks and none
+failed. With `virtio_gpu` attached first and then two `rdrmnull`
+devices, the devices were `card0`/`renderD128`, `card1`/`renderD129`
+and `card2`/`renderD130` (node minors 0, 1, 2 and 128, 129, 130);
+with the two `rdrmnull` devices first, `rdrmnull` had 0 and 1 and
+`virtio_gpu` 2. libdrm's `drmdevice` and gfx-drm's `getsundev` listed
+all three devices (getsundev: 73 checks passed), two and one after
+unloads. With all three attached, the R0 to R3 tests passed on both
+`rdrmnull` devices (R0 106 and 107 checks, R1 153, R2 216 including the
+cross-device checks between the two, R3 184, and the 32-bit probes),
+`drm_r4_test` on `virtio_gpu` (63 checks) as `card0` and as `card2`,
+`drm_g6_test` (27 checks) on each device, and `modetest` listed every
+display. The drivers unloaded in both orders, a device kept its number
+while the other driver unloaded and came back, a reloaded driver got
+its old numbers back and a driver attached into a gap got the lowest
+free one, `misc/drm_minor` refused to unload while a driver was loaded
+and unloaded after both, loading `rdrmnull` loaded it, and nothing
+panicked. `run-r4-test.sh` (kept attached), `run-r1-test.sh` with two
+`rdrmnull` devices and `run-r3-test.sh` then passed beside the attached
+`virtio_gpu` (513, 477 and 72 checks), with `/etc`, `/devices` and
+their own `/dev/dri` links as before. Under `truss`, libdrm 2.4.134
+sent each of the four grown sync object commands once, at its new size,
+and the kernel answered 0; its retry at the 2.4.109 size never ran.
+The run used the kernel code of commit `0155ded`; the later changes to
+the kernel code (the GEM registry entry is recorded as the last step of
+attach, and the anonymous-file id space is named after the instance)
+were tested on the host and linked on illumos, and wait for the next
+guest run, as does `cargo xtask kernel-check` with `misc/drm_minor`
+loaded.
+
 ## What is in the repository
 
 `crates/drm-uapi` is the DRM userland interface as Rust types: the
@@ -213,6 +247,15 @@ EDID test blobs and `gen_edid.py`, which synthesizes them.
 `docs/anon-fd.md` records how file descriptors are made for dma-bufs,
 sync objects and sync files.
 `packaging/devlink.tab` is the `/dev/dri` link rule for packages.
+
+`modules/drm-minor` is the kernel module `misc/drm_minor`, the table of
+DRM device numbers every driver shares (see *Device numbers across
+drivers*), and `crates/drm-minor-sys` declares its two C functions for
+the core; `packaging/drm-minor.p5m` packages the module.
+`tools/test/run-g6-test.sh` attaches two `rdrmnull` devices and
+`virtio_gpu` together and runs everything on each, `drm_g6_test.c`
+checks the argument size rule, and `drm-test-lib.sh` holds the shell
+functions the run scripts share.
 
 `drivers/virtio-gpu` is the virtio-gpu driver of R4 (see *R4* under
 *Decisions*): `gpu` (requests, completions, fences, contexts), `object`
@@ -302,7 +345,10 @@ other kernel modules is deferred to R5, because exporting Rust symbols
 across kernel modules needs a stable, versioned C ABI (mangled Rust
 symbols and generic code do not cross module boundaries), and designing
 that ABI is exactly the R5 C-facade work. With one Rust driver planned
-before R5, static linking costs nothing.
+before R5, static linking costs nothing. The one exception since G6 is
+the table of device numbers, `misc/drm_minor`, which every driver module
+depends on (see *Device numbers across drivers*); it is the first piece
+of that C interface.
 
 **Node type (deviation from the plan).** The minor nodes have the node type
 `ddi_display:drm` (`DDI_NT_DISPLAY_DRM`), not plain `ddi_display`. The
@@ -316,12 +362,80 @@ has the equivalent `/etc/devlink.tab` rule. On the test machine the module
 was present, so no `devlink.tab` change was needed.
 
 **Minor numbers.** Node minors are `N` for `card<N>` and `128 + N` for
-`renderD<128+N>` in the low nine bits, as in gfx-drm. Every open is a clone
+`renderD<128+N>` in the low nine bits, as in gfx-drm, where `N` is the
+device number (below). Every open is a clone
 open with a clone id from 1 to 511 in bits 9 to 17, the bits the illumos
 libdrm patch strips (`0x3fe00`) to map an open file back to its `/dev/dri`
 node. A device therefore has at most 511 open files at a time; the next
-open fails with `EMFILE`. The driver instance number is the device index,
-up to 63.
+open fails with `EMFILE`.
+
+**Device numbers across drivers (G6).** Until G6 the device number was the
+driver's instance number, so every driver's first device was `card0` and
+`renderD128`, and `rdrmnull` and `virtio_gpu` attached together claimed
+the same `/dev/dri` links. Now every device of every driver built on the
+core takes the lowest free number of 64 from one table when it attaches
+and gives it back when it detaches. The table lives in the small kernel
+module `misc/drm_minor` (`modules/drm-minor`), which exports two C
+functions, `drm_minor_alloc(owner)` and `drm_minor_free(id, owner)`
+(declared for Rust by `crates/drm-minor-sys`); every driver module is
+linked with `-N misc/drm_minor` (the `[package.metadata.kmod]` table of
+`drm-minor-sys` gives it to `cargo xtask link`). A number stays with its
+device while it is attached, whatever else attaches and detaches; a
+driver that unloads and loads again gets the lowest free numbers, its old
+ones if nobody took them. Each driver module records which of its
+instances holds which number (`drm::minor::bind`), and
+`drm::minor::instance_of_minor` reads that record, so the instance
+number is free (no longer limited to 63). The table is 64 atomic words
+holding the owner (the device's `dev_info_t`) or 0: both calls are
+lock-free and never block or allocate, and a free by the wrong owner, of
+a free number or out of range changes nothing and is logged, where an
+`id_space(9F)` `id_free` of an unallocated number would be a kernel
+panic. `misc/drm_minor` is linked with an exports mapfile and
+`ld -B reduce`, so it exports only `_init`, `_fini`, `_info` and its two
+functions (checked by CI and the test scripts). The kernel keeps a
+module loaded while a module that depends on it is loaded, so the table
+outlives every number in it for any order of loads and unloads;
+`_fini` also refuses while a number is taken, which only a driver that
+leaked one could cause.
+
+Alternatives: a registry that the first driver module creates and
+publishes through a well-known symbol does not work, because a module
+resolves symbols only from `unix`, `genunix`, itself and its `-N`
+dependencies (illumos-ddi `docs/DESIGN.md` section 4: a symbol resolves
+from the module that exports it), so the others would have to look it up
+at run time (`ddi_modopen(9F)`), and it would die with the module that
+made it while other drivers still hold numbers from it. Fixed ranges per
+driver (virtio from 0, rdrmnull from 32) waste the 64 numbers and
+collide with the next driver; scanning the device tree for existing
+`card<N>` minor names at attach time races between concurrent attaches.
+A separate module is also what Linux does (the numbers belong to
+`drm.ko`), and it is the first piece of the C interface R5 needs.
+
+Deviations from Linux: Linux 7.3's `drm_minor_alloc` takes the lowest
+free index of one global table for each node type separately (primary
+0 to 63, render 128 to 191, then an extended range from 192), so a
+Linux device's card and render numbers need not agree. Here a device has
+one number for both, `card<N>` and `renderD<128+N>` (the illumos libdrm
+pairs a device's nodes by `/devices` path, so it does not depend on
+this); and there is no extended range, because the clone
+layout gives a node minor nine bits, so a 65th DRM device fails to attach
+("all 64 DRM device numbers are in use"). gfx-drm's C drivers (`drm`,
+`i915`) still name their nodes after the instance number and do not use
+this table, so an i915 and an illumos-drm driver attached together can
+still both claim `card0`; that ends when gfx-drm calls
+`drm_minor_alloc` too (R5).
+
+A device's `/dev/dri` links outlive a detach (until `devfsadm -C`), and
+opening one attaches the device again through devfs, which then takes the
+lowest free number: its old one unless another device took it in the
+meantime, in which case the link names a minor node that no longer
+exists. The same holds when the system detaches idle devices on its own
+(the drivers do not set `ddi-no-autodetach`): if two idle devices are
+detached and come back in the other order, their numbers are swapped
+until devfsadm renews the links. Linux numbers devices once per driver
+bind as well; a stable name for a particular device is its
+`/devices` path (libdrm's `drmGetDevice2` reports it), not `card<N>`.
+Whether the drivers should keep their devices attached is open.
 
 **GEM objects and references (R1).** A driver's buffer type implements
 `drm::gem::GemObject` (size, the `ddi_umem` cookie its mappings show,
@@ -594,11 +708,46 @@ path only for ioctls whose permission needs it (`SET_UNIQUE`, and
 `SET_MASTER`/`DROP_MASTER` by a file that is not a former master of the
 same process). Render
 nodes never need authentication and cannot use the primary-only ioctls
-(`EACCES`). Commands are matched on their complete 32-bit value, because
-the illumos encoding keeps only eight bits of the argument size; any other
-command is `ENOTTY`. A core command from a 32-bit process (recognised by
+(`EACCES`). A core command from a 32-bit process (recognised by
 group and number, whatever its size) is `ENOTSUP`, because only the LP64
 ABI exists; other commands from 32-bit processes are `ENOTTY` as usual.
+
+**Argument sizes (G6).** Linux's `drm_ioctl()` (read at v7.3-rc5) finds a
+core or driver ioctl by its number alone and copies the argument with
+the caller's size `U` (from the command) and its own size `K`: it copies
+`U` bytes in if both commands have `IOC_IN`, zeroes the rest of a buffer
+of `max(U, K)` bytes, hands the handler the first `K`, and copies `U`
+bytes out if both have `IOC_OUT`. A structure shorter than the kernel's
+is therefore zero-extended and gets only its own bytes back. A structure
+longer than the kernel's is not refused, whatever its extra bytes hold:
+they are copied in (an unreadable byte is `EFAULT`) and copied back out
+unchanged by an `_IOWR` command, come back as zeros from an `_IOR`
+command, and are ignored by an `_IOW` command. Since G6 the core does
+exactly this for the core and mode-setting ioctls
+(`drm::ioctl::SizePlan`, checked against a restatement of Linux's code
+for every table entry, direction and size; `drm::uaccess::CoreArg` applies
+it), where it used to match the complete command value and answer any
+other size with `ENOTTY`. The size field of an illumos command has eight
+bits, so a size is known exactly below 256 bytes; every core and
+mode-setting structure is smaller (the tests check each handler's
+structure against the size its command carries). What stays
+different from Linux: a command must have the table's direction (Linux
+uses the intersection of both, here another direction is `ENOTTY`), an
+unused number is `ENOTTY` (Linux: `EINVAL`), the handlers copy their
+result out when they have one (Linux copies its buffer back after every
+call, also a failed one; the handlers here undo work whose result cannot
+reach the caller), and driver-private commands keep the exact match on
+the complete value, each accepted size listed by the driver
+(`virtio_gpu`'s `EXECBUFFER` and transfers, see *R4: uAPI*). The four
+commands whose structures grew between the libdrm 2.4.109 headers this
+uAPI comes from and libdrm 2.4.134 (`SYNCOBJ_HANDLE_TO_FD` and
+`FD_TO_HANDLE`, 16 to 24 bytes, `SYNCOBJ_WAIT`, 32 to 40,
+`SYNCOBJ_TIMELINE_WAIT`, 40 to 48) are served at both sizes with the
+same results; the added `point` and `deadline_nsec` are carried through
+unread, and the flags that would use them are unknown flags (`EINVAL`),
+as on a Linux kernel from before them. libdrm 2.4.134's `drmIoctl()`
+retries these four at the old size after `ENOTTY`; against this core the
+retry never runs.
 
 **Concurrency.** All mutable device state of R0 is one `DeviceState` behind one
 `ddi::Mutex`. Each entry point performs its permission check and its state
@@ -841,7 +990,7 @@ rustup target add x86_64-unknown-illumos
 cargo check --workspace --target x86_64-unknown-illumos
 cargo clippy --workspace --target x86_64-unknown-illumos -- -D warnings
 cargo fmt --all -- --check
-cargo test -p drm -p drm-uapi        # host target
+cargo test -p drm -p drm-uapi -p drm_minor   # host target
 ```
 
 The kernel module needs the pinned nightly with `rust-src`, because `core`
@@ -849,14 +998,24 @@ and `alloc` are rebuilt without SSE for `targets/x86_64-illumos-kmod.json`.
 Compiling works on any host; linking needs the illumos linker:
 
 ```sh
+cargo xtask build drm_minor          # target/x86_64-illumos-kmod/release/drm_minor.a
 cargo xtask build rdrmnull           # target/x86_64-illumos-kmod/release/rdrmnull.a
-ld -ztype=kmod -N fs/specfs -z allextract rdrmnull.a -o rdrmnull    # on illumos, or: cargo xtask link rdrmnull
+# on illumos, or: cargo xtask link drm_minor; cargo xtask link rdrmnull
+ld -ztype=kmod -B reduce -M modules/drm-minor/exports.mapfile -z allextract drm_minor.a -o drm_minor
+ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract rdrmnull.a -o rdrmnull
 ```
+
+`misc/drm_minor` must be installed (`/kernel/misc/amd64/drm_minor`, or
+the package `driver/graphics/drm-minor` of `packaging/drm-minor.p5m`)
+before any driver loads; the test scripts install it from `drm_minor.a`
+and `drm_minor.mapfile` (a copy of `modules/drm-minor/exports.mapfile`)
+when it is missing and remove it again.
 
 `tools/test/run-r1-test.sh` does the rest on a disposable illumos VM, as
 root, in a directory with `rdrmnull.a`, `rdrmnull.conf`,
 `tools/test/drm_r0_test.c`, `tools/test/drm_r1_test.c`,
-`tools/test/drm_r2_test.c` and the patched headers as `drm/`: it records
+`tools/test/drm_r2_test.c`, `tools/test/drm-test-lib.sh`, `drm_minor.a`
+and `drm_minor.mapfile` and the patched headers as `drm/`: it records
 the driver files in `/etc` and the `/devices` tree, links the module,
 checks that the running kernel exports every symbol the module imports,
 builds the test programs (64-bit with libdrm and libkstat, and 32-bit
@@ -866,19 +1025,23 @@ records the `gem` and `sync` kstats and the device's vmem arenas, checks
 that the module refuses to unload while a file is open and unloads once
 it is closed, removes everything again with `rem_drv -C`, and fails
 unless `/etc` and `/devices` are as before. `tools/test/run-r0-test.sh`
-runs the R0 test alone.
+runs the R0 test alone. The scripts find the device's nodes through the
+`/dev/dri` links (a device is `card<N>` for whatever `N` it got) and hand
+them to the tests in `DRM_CARD`, `DRM_RENDER`, `DRM_CARD1` and
+`DRM_INSTANCE`; without them the tests use `card0` and `renderD128`.
 
 The virtio-gpu driver is built the same way and linked against the
 virtio framework too:
 
 ```sh
 cargo xtask build virtio_gpu
-ld -ztype=kmod -N misc/virtio -N fs/specfs -z allextract virtio_gpu.a -o virtio_gpu   # on illumos
+ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_minor -z allextract virtio_gpu.a -o virtio_gpu   # on illumos
 ```
 
 `tools/test/run-r4-test.sh` links, installs (`add_drv -i
 '"pci1af4,1050"'`), tests and removes it on a guest with a virtio-gpu
-device.
+device. `tools/test/run-g6-test.sh` runs `virtio_gpu` and two `rdrmnull`
+devices together (see its header for the files it needs).
 
 ## Checks
 
@@ -891,8 +1054,9 @@ gcc -m64 -DV1 -I<libdrm 2.4.109 include/drm> -o c1 tools/uapi/virtgpu_compat_lay
 gcc -m64 -DV2 -I<mesa include/drm-uapi> -I<include/drm> -o c2 tools/uapi/virtgpu_compat_layout.c && ./c2 >> out
 cargo xtask uapi-check out
 
-# DDI layouts and symbols of the pinned ddi-sys and the private crates
-# against a running kernel
+# DDI layouts and symbols of the pinned ddi-sys and the private crates,
+# and the two functions of drm-minor-sys, against a running kernel
+# (misc/drm_minor must be loaded: modload -p misc/drm_minor)
 cargo xtask kernel-check --emit | ssh root@host 'mdb -k 2>&1' | cargo xtask kernel-check --verify -
 ```
 
@@ -901,8 +1065,10 @@ cargo xtask kernel-check --emit | ssh root@host 'mdb -k 2>&1' | cargo xtask kern
 `.forgejo/workflows/ci.yml` follows illumos-ddi's Solstice CI setup: one
 job type-checks, lints, checks formatting, builds the documentation and
 runs the host tests against the hosted illumos target; a second job builds
-`rdrmnull` and `virtio_gpu` for the kernel target natively on illumos and
-links them with `ld -ztype=kmod`. Neither loads the module, which needs root on a kernel
+`drm_minor`, `rdrmnull` and `virtio_gpu` for the kernel target natively on
+illumos and links them with `ld -ztype=kmod` (`drm_minor` with its exports
+mapfile, whose global symbols it checks; the drivers with
+`-N misc/drm_minor`). Neither loads the module, which needs root on a kernel
 that may panic (an R1 trial did panic the test machine, see *System memory
 and DMA*).
 

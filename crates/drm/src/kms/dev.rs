@@ -69,7 +69,7 @@ use crate::gem::{GemCore, GemObject, GemRef};
 use crate::karc::KArc;
 use crate::minor::{CloneId, MAX_FILES};
 use crate::objects::ObjRef;
-use crate::uaccess::{Plain, UserArg, copy_in_bytes, copy_out_bytes};
+use crate::uaccess::{CoreArg, Plain, UserArg, copy_in_bytes, copy_out_bytes};
 
 // SAFETY: integer fields only (see the bindings in drm-uapi); the union
 // drm_wait_vblank has two integer-only members of the same size.
@@ -552,7 +552,7 @@ impl<O: GemObject> Kms<O> {
         &self,
         op: KmsOp,
         who: &Caller<'_>,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         gem: Option<&KArc<GemCore<O>>>,
         drv: Drv<'_, O>,
         ctx: &Sleepable,
@@ -566,7 +566,7 @@ impl<O: GemObject> Kms<O> {
         &self,
         op: KmsOp,
         who: &Caller<'_>,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         gem: Option<&KArc<GemCore<O>>>,
         drv: Drv<'_, O>,
         ctx: &Sleepable,
@@ -1071,7 +1071,7 @@ impl<O: GemObject> Kms<O> {
         Ok(core.add_fb(FbOwner::File(file.get()), r, objs, (0, 0), master, ctx)?.id)
     }
 
-    fn setcrtc(&self, who: &Caller<'_>, arg: &IoctlArg<'_>, drv: Drv<'_, O>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn setcrtc(&self, who: &Caller<'_>, arg: &CoreArg<'_>, drv: Drv<'_, O>, ctx: &Sleepable) -> Result<(), Errno> {
         let a = UserArg::<uapi::drm_mode_crtc>::read(arg)?;
         let v = *a.get();
         if v.x & 0xffff_0000 != 0 || v.y & 0xffff_0000 != 0 {
@@ -1195,7 +1195,7 @@ impl<O: GemObject> Kms<O> {
         Ok(())
     }
 
-    fn atomic(&self, who: &Caller<'_>, arg: &IoctlArg<'_>, drv: Drv<'_, O>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn atomic(&self, who: &Caller<'_>, arg: &CoreArg<'_>, drv: Drv<'_, O>, ctx: &Sleepable) -> Result<(), Errno> {
         let a = UserArg::<uapi::drm_mode_atomic>::read(arg)?;
         let v = *a.get();
         if !self.atomic {
@@ -1255,7 +1255,7 @@ impl<O: GemObject> Kms<O> {
         self.run_commit(&mut core, st, who.file, want_event.then_some(v.user_data), test_only, drv, ctx)
     }
 
-    fn wait_vblank(&self, file: CloneId, master: bool, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn wait_vblank(&self, file: CloneId, master: bool, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         const TYPES: u32 = uapi::_DRM_VBLANK_ABSOLUTE | uapi::_DRM_VBLANK_RELATIVE;
         const FLAGS: u32 = uapi::_DRM_VBLANK_EVENT
             | uapi::_DRM_VBLANK_SIGNAL
@@ -1386,17 +1386,17 @@ unsafe impl NoPadding for uapi::drm_mode_modeinfo {}
 
 /// Copies at most `room` IDs to a user array (the partial copy of Linux's
 /// `GETRESOURCES` and friends).
-fn copy_ids(arg: &IoctlArg<'_>, ptr: u64, ids: &[u32], room: u32) -> Result<(), Errno> {
+fn copy_ids(arg: &CoreArg<'_>, ptr: u64, ids: &[u32], room: u32) -> Result<(), Errno> {
     let n = ids.len().min(room as usize);
     copy_out_bytes(arg, ptr as usize, as_bytes(ids.get(..n).unwrap_or(&[])))
 }
 
-fn copy_modes(arg: &IoctlArg<'_>, ptr: u64, modes: &[uapi::drm_mode_modeinfo]) -> Result<(), Errno> {
+fn copy_modes(arg: &CoreArg<'_>, ptr: u64, modes: &[uapi::drm_mode_modeinfo]) -> Result<(), Errno> {
     copy_out_bytes(arg, ptr as usize, as_bytes(modes))
 }
 
 /// Copies at most `room` property IDs and values.
-fn copy_props(arg: &IoctlArg<'_>, ids_ptr: u64, vals_ptr: u64, props: &[(u32, u64)], room: u32) -> Result<(), Errno> {
+fn copy_props(arg: &CoreArg<'_>, ids_ptr: u64, vals_ptr: u64, props: &[(u32, u64)], room: u32) -> Result<(), Errno> {
     let n = props.len().min(room as usize);
     let ids: Vec<u32> = props.iter().take(n).map(|p| p.0).collect();
     let vals: Vec<u64> = props.iter().take(n).map(|p| p.1).collect();

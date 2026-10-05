@@ -10,9 +10,10 @@
 //! answers the core ioctls that libdrm uses to find and open a device:
 //! `VERSION`, `GET_CAP`, `SET_CLIENT_CAP`, `GET_UNIQUE`, `SET_UNIQUE`,
 //! `SET_VERSION`, `GET_MAGIC`, `AUTH_MAGIC`, `GET_CLIENT`, `SET_MASTER` and
-//! `DROP_MASTER`. Unknown commands fail with `ENOTTY`, and core commands
-//! from a 32-bit process fail with `ENOTSUP`, because only the LP64 ABI is
-//! supported.
+//! `DROP_MASTER`. A caller's argument structure may be shorter or longer
+//! than the kernel's, as with Linux's `drm_ioctl()` ([`ioctl`]). Unknown
+//! commands fail with `ENOTTY`, and core commands from a 32-bit process
+//! fail with `ENOTSUP`, because only the LP64 ABI is supported.
 //!
 //! Since milestone R1 it also has GEM buffer objects ([`gem`]): per-file
 //! handles, FLINK names, fake mmap offsets and `mmap(2)` through
@@ -38,7 +39,11 @@
 //!
 //! The crate is a `no_std` library on top of the `ddi` crate and is linked
 //! statically into each driver module; there is no separate `misc/drm`
-//! module yet (see the README for why). A driver implements [`Driver`],
+//! module yet (see the README for why). The one piece every module shares
+//! is the table of device numbers, the small module `misc/drm_minor`
+//! (`drm-minor-sys`), so that the devices of all drivers are numbered
+//! `card0`, `card1`, ... without collisions ([`minor`]); every driver
+//! module is linked with `-N misc/drm_minor`. A driver implements [`Driver`],
 //! uses [`Device`] as the instance type of its `ddi::Driver`, and maps
 //! minor numbers with [`minor::instance_of_minor`]:
 //!

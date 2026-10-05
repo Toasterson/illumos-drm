@@ -46,8 +46,33 @@
 #include "drm.h"
 #include "drm_mode.h"
 
-#define	CARD	"/dev/dri/card0"
-#define	RENDER	"/dev/dri/renderD128"
+/*
+ * The nodes under test. Device numbers are shared by every DRM driver
+ * (misc/drm_minor), so rdrmnull's devices are card<N> and renderD<128+N>
+ * for whatever N they were given; the run scripts pass them in DRM_CARD
+ * and DRM_RENDER, and the driver instance (for the kstats) in
+ * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.
+ */
+static const char *card_path __attribute__((unused)) = "/dev/dri/card0";
+static const char *render_path __attribute__((unused)) = "/dev/dri/renderD128";
+static int drm_instance __attribute__((unused));
+
+static void nodes_from_env(void) __attribute__((constructor));
+static void
+nodes_from_env(void)
+{
+	const char *s;
+
+	if ((s = getenv("DRM_CARD")) != NULL && *s != '\0')
+		card_path = s;
+	if ((s = getenv("DRM_RENDER")) != NULL && *s != '\0')
+		render_path = s;
+	if ((s = getenv("DRM_INSTANCE")) != NULL && *s != '\0')
+		drm_instance = atoi(s);
+}
+
+#define	CARD	card_path
+#define	RENDER	render_path
 
 static int failures;
 
@@ -70,7 +95,7 @@ main(void)
 	struct drm_mode_atomic a;
 	int fd = open(CARD, O_RDWR);
 
-	check(fd >= 0, "32-bit open " CARD);
+	check(fd >= 0, "32-bit open of the card node");
 	if (fd < 0)
 		return (1);
 	(void) memset(&r, 0, sizeof (r));
@@ -125,7 +150,7 @@ kstat_get(const char *name, const char **fields, uint64_t *out, int n)
 
 	if ((kc = kstat_open()) == NULL)
 		return (0);
-	ksp = kstat_lookup(kc, "rdrmnull", 0, (char *)name);
+	ksp = kstat_lookup(kc, "rdrmnull", drm_instance, (char *)name);
 	if (ksp != NULL && kstat_read(kc, ksp, NULL) != -1) {
 		ok = 1;
 		for (i = 0; i < n; i++) {
@@ -1329,7 +1354,7 @@ hold_mode(int hold)
 	int fd;
 
 	fd = open(CARD, O_RDWR);
-	check(fd >= 0, "open " CARD);
+	check(fd >= 0, "open the card node");
 	if (fd < 0)
 		return (failures);
 	(void) memset(&h, 0, sizeof (h));
@@ -1369,7 +1394,7 @@ main(int argc, char **argv)
 		return (hold_mode(0));
 	check(kms_idle("at start"), "kstat rdrmnull:0:kms exists and is idle");
 	fd = open(CARD, O_RDWR);
-	check(fd >= 0, "open " CARD " (becomes master)");
+	check(fd >= 0, "open the card node (becomes master)");
 	fd2 = open(CARD, O_RDWR);
 	rfd = open(RENDER, O_RDWR);
 	check(fd2 >= 0 && rfd >= 0, "a second primary file and a render file");

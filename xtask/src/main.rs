@@ -11,6 +11,10 @@
 // * `uapi-dump` and `uapi-check` are new and belong to this repository.
 // * `build` accepts `--features <list>`, for the test-only `panic-drill`
 //   feature of rdrmnull.
+// * `link` reads an `exports` mapfile from the package's
+//   `[package.metadata.kmod]` table and links with `-B reduce -M <file>`,
+//   so that a module other modules depend on (misc/drm_minor) exports only
+//   the symbols the mapfile names; `deps` prints it.
 //
 // Keep build, link, deps and kernel-check in step with upstream when the
 // pinned illumos-ddi revision moves.
@@ -56,6 +60,7 @@ fn main() -> ExitCode {
             println!("-N: {:?}", d.needed);
             println!("mapfiles: {:?}", d.mapfiles);
             println!("class: {}", d.class);
+            println!("exports: {:?}", d.exports);
         }),
         [cmd, rest @ ..] if cmd == "kernel-check" => kernel_check::run(rest),
         [cmd] if cmd == "uapi-dump" => {
@@ -84,6 +89,8 @@ struct KmodDeps {
     mapfiles: BTreeSet<String>,
     class: String,
     conf: Option<PathBuf>,
+    /// The package's own symbol-scope mapfile (`exports`), if it has one.
+    exports: Option<PathBuf>,
 }
 
 fn workspace_root() -> PathBuf {
@@ -151,7 +158,8 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
             stack.extend(nodes.get(id).into_iter().flatten().copied());
         }
     }
-    let mut d = KmodDeps { needed: BTreeSet::new(), mapfiles: BTreeSet::new(), class: "drv".into(), conf: None };
+    let mut d =
+        KmodDeps { needed: BTreeSet::new(), mapfiles: BTreeSet::new(), class: "drv".into(), conf: None, exports: None };
     for id in seen {
         let Some(p) = by_id.get(id) else { continue };
         let kmod = &p["metadata"]["kmod"];
@@ -168,9 +176,12 @@ fn deps(pkg: &str) -> Result<KmodDeps, String> {
             if let Some(c) = kmod["class"].as_str() {
                 d.class = c.to_string();
             }
+            let dir = Path::new(p["manifest_path"].as_str().unwrap_or_default()).parent().ok_or("manifest")?;
             if let Some(c) = kmod["conf"].as_str() {
-                let dir = Path::new(p["manifest_path"].as_str().unwrap_or_default()).parent().ok_or("manifest")?;
                 d.conf = Some(dir.join(c));
+            }
+            if let Some(m) = kmod["exports"].as_str() {
+                d.exports = Some(dir.join(m));
             }
         }
     }
@@ -220,6 +231,10 @@ fn link(pkg: &str) -> Result<(), String> {
             cmd.arg("-M").arg(format!("{gate}/usr/src/uts/common/mapfiles/{m}.mapfile"));
         }
     }
+    if let Some(m) = &d.exports {
+        // Everything the mapfile does not name becomes local.
+        cmd.args(["-B", "reduce", "-M"]).arg(m);
+    }
     cmd.args(["-z", "allextract"]).arg(&archive).arg("-o").arg(&out);
     println!("{cmd:?}");
     let st = cmd.status().map_err(|e| e.to_string())?;
@@ -233,6 +248,8 @@ fn link(pkg: &str) -> Result<(), String> {
             c.display(),
             d.class
         );
+    } else {
+        println!("install the module as /usr/kernel/{}/amd64/{pkg} (or /kernel/{}/amd64/{pkg})", d.class, d.class);
     }
     Ok(())
 }

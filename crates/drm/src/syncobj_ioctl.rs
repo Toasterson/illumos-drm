@@ -33,6 +33,17 @@
 //!
 //! Arrays of handles and points are copied in with at most
 //! [`MAX_ARRAY`](crate::uaccess::MAX_ARRAY) entries; more is `EINVAL`.
+//!
+//! The argument structures are those of libdrm 2.4.109. Later headers grew
+//! three of them (`drm_syncobj_handle` by `point`, `drm_syncobj_wait` and
+//! `drm_syncobj_timeline_wait` by `deadline_nsec`), which gives
+//! `HANDLE_TO_FD`, `FD_TO_HANDLE`, `WAIT` and `TIMELINE_WAIT` new command
+//! values; they reach these handlers through Linux's size rule
+//! ([`crate::ioctl`]): the added fields are copied in and back unchanged
+//! and never read, as on a Linux kernel from before them, and the flags
+//! that would give them a meaning (`HANDLE_TO_FD_FLAGS_TIMELINE`,
+//! `FD_TO_HANDLE_FLAGS_TIMELINE`, `WAIT_FLAGS_WAIT_DEADLINE`) are unknown
+//! flags, `EINVAL`.
 
 use ddi::prelude::*;
 use ddi::private::fd::FdFlags;
@@ -49,7 +60,7 @@ use crate::ioctl::Op;
 use crate::kvec::KVec;
 use crate::minor::CloneId;
 use crate::syncobj::{self, Syncobj, WAIT_ALL, WAIT_AVAILABLE, WAIT_FOR_SUBMIT};
-use crate::uaccess::{Plain, UserArg, copy_in_array, copy_out_array};
+use crate::uaccess::{ArgIo, CoreArg, Plain, UserArg, copy_in_array, copy_out_array};
 
 // SAFETY: integer fields only; see the bindings in drm-uapi.
 unsafe impl Plain for uapi::drm_syncobj_create {}
@@ -89,7 +100,7 @@ impl<O: GemObject> SyncCore<O> {
         op: Op,
         c: CloneId,
         features: Features,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
         if !features.contains(Features::SYNCOBJ) {
@@ -151,7 +162,7 @@ impl<O: GemObject> SyncCore<O> {
         })
     }
 
-    fn so_create(&self, c: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn so_create(&self, c: CloneId, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         let mut a = UserArg::<uapi::drm_syncobj_create>::read(arg)?;
         let flags = a.get().flags;
         if flags & !CREATE_SIGNALED != 0 {
@@ -171,7 +182,7 @@ impl<O: GemObject> SyncCore<O> {
         Ok(())
     }
 
-    fn so_destroy(&self, c: CloneId, arg: &IoctlArg<'_>) -> Result<(), Errno> {
+    fn so_destroy(&self, c: CloneId, arg: &CoreArg<'_>) -> Result<(), Errno> {
         let a = UserArg::<uapi::drm_syncobj_destroy>::read(arg)?;
         if a.get().pad != 0 {
             return Err(Errno::EINVAL);
@@ -182,7 +193,7 @@ impl<O: GemObject> SyncCore<O> {
         Ok(())
     }
 
-    fn so_handle_to_fd(&self, c: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn so_handle_to_fd(&self, c: CloneId, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         let mut a = UserArg::<uapi::drm_syncobj_handle>::read(arg)?;
         let (flags, handle) = (a.get().flags, a.get().handle);
         if a.get().pad != 0 || (flags != 0 && flags != EXPORT_SYNC_FILE) {
@@ -200,21 +211,22 @@ impl<O: GemObject> SyncCore<O> {
         if flags == EXPORT_SYNC_FILE {
             let f = s.find_fence(0, false, ctx);
             drop(s);
-            return self.export_sync_file(f?, b"", arg, write, ctx);
+            return self.export_sync_file(f?, b"", arg.io(), write, ctx);
         }
         let flags = FdFlags { write: false, cloexec: true };
-        self.anon.export(&self.dev, AnonObj::Syncobj(s), flags, arg, write, &self.domain.stats, ctx)
+        self.anon.export(&self.dev, AnonObj::Syncobj(s), flags, arg.io(), write, &self.domain.stats, ctx)
     }
 
-    fn so_fd_to_handle(&self, c: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn so_fd_to_handle(&self, c: CloneId, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         let mut a = UserArg::<uapi::drm_syncobj_handle>::read(arg)?;
         let (flags, fd) = (a.get().flags, a.get().fd);
         if a.get().pad != 0 || (flags != 0 && flags != IMPORT_SYNC_FILE) {
             return Err(Errno::EINVAL);
         }
         if flags == IMPORT_SYNC_FILE {
-            let fence =
-                self.sync_file_fence(fd, arg, ctx).map_err(|e| if e == Errno::EBADF { Errno::EINVAL } else { e })?;
+            let fence = self
+                .sync_file_fence(fd, arg.io(), ctx)
+                .map_err(|e| if e == Errno::EBADF { Errno::EINVAL } else { e })?;
             let Some(s) = self.so_find(c, a.get().handle)? else {
                 fence.put(Ctx::Sleep(ctx));
                 return Err(Errno::ENOENT);
@@ -222,7 +234,10 @@ impl<O: GemObject> SyncCore<O> {
             s.replace_fence(Some(fence), ctx);
             return Ok(());
         }
-        let s = match self.lookup(fd, arg, false, ctx).map_err(|e| if e == Errno::EBADF { Errno::EINVAL } else { e })? {
+        let s = match self
+            .lookup(fd, arg.io(), false, ctx)
+            .map_err(|e| if e == Errno::EBADF { Errno::EINVAL } else { e })?
+        {
             AnonObj::Syncobj(s) => s,
             o => {
                 o.put(ctx);
@@ -242,7 +257,7 @@ impl<O: GemObject> SyncCore<O> {
     }
 
     /// The common part of `WAIT` and `TIMELINE_WAIT`.
-    fn so_wait_common(&self, c: CloneId, arg: &IoctlArg<'_>, w: WaitArgs, ctx: &Sleepable) -> Result<u32, Errno> {
+    fn so_wait_common(&self, c: CloneId, arg: &CoreArg<'_>, w: WaitArgs, ctx: &Sleepable) -> Result<u32, Errno> {
         let WaitArgs { handles: handles_addr, points: points_addr, count, flags, timeout_nsec } = w;
         if count == 0 {
             return Err(Errno::EINVAL);
@@ -267,7 +282,7 @@ impl<O: GemObject> SyncCore<O> {
         syncobj::wait_many(&pairs, flags, timeout_nsec, &self.domain, ctx)
     }
 
-    fn so_wait(&self, c: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn so_wait(&self, c: CloneId, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         let mut a = UserArg::<uapi::drm_syncobj_wait>::read(arg)?;
         let v = *a.get();
         if v.flags & !(WAIT_ALL | WAIT_FOR_SUBMIT) != 0 {
@@ -286,7 +301,7 @@ impl<O: GemObject> SyncCore<O> {
         a.write(arg)
     }
 
-    fn so_timeline_wait(&self, c: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn so_timeline_wait(&self, c: CloneId, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         let mut a = UserArg::<uapi::drm_syncobj_timeline_wait>::read(arg)?;
         let v = *a.get();
         if v.flags & !(WAIT_ALL | WAIT_FOR_SUBMIT | WAIT_AVAILABLE) != 0 {
@@ -309,7 +324,7 @@ impl<O: GemObject> SyncCore<O> {
     fn so_array(
         &self,
         c: CloneId,
-        arg: &IoctlArg<'_>,
+        arg: &CoreArg<'_>,
         ctx: &Sleepable,
         f: impl Fn(&syncobj::SyncobjInner, &Sleepable) -> Result<(), Errno>,
     ) -> Result<(), Errno> {
@@ -326,7 +341,7 @@ impl<O: GemObject> SyncCore<O> {
         Ok(())
     }
 
-    fn so_timeline_signal(&self, c: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn so_timeline_signal(&self, c: CloneId, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         let a = UserArg::<uapi::drm_syncobj_timeline_array>::read(arg)?;
         let v = *a.get();
         if v.flags != 0 || v.count_handles == 0 {
@@ -342,7 +357,7 @@ impl<O: GemObject> SyncCore<O> {
         Ok(())
     }
 
-    fn so_query(&self, c: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn so_query(&self, c: CloneId, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         let a = UserArg::<uapi::drm_syncobj_timeline_array>::read(arg)?;
         let v = *a.get();
         if v.flags & !LAST_SUBMITTED != 0 || v.count_handles == 0 {
@@ -358,7 +373,7 @@ impl<O: GemObject> SyncCore<O> {
         copy_out_array(arg, v.points as usize, &points)
     }
 
-    fn so_transfer(&self, c: CloneId, arg: &IoctlArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
+    fn so_transfer(&self, c: CloneId, arg: &CoreArg<'_>, ctx: &Sleepable) -> Result<(), Errno> {
         let a = UserArg::<uapi::drm_syncobj_transfer>::read(arg)?;
         let v = *a.get();
         if v.pad != 0 || v.flags & !WAIT_FOR_SUBMIT != 0 {
