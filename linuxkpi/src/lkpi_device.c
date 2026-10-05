@@ -59,6 +59,27 @@ static const ddi_dma_attr_t lkpi_default_dma_attr = {
 	.dma_attr_flags = 0
 };
 
+/*
+ * The kobject of a layer device. Linux's device_initialize() and
+ * dev_set_name() leave it initialised and named dev_name(); drivers hang
+ * their own kobjects under it and read its name (i915:
+ * kobject_create_and_add("gt", &kdev->kobj) and is_object_gt(), whose
+ * strncmp() of a NULL name was a panic at the first attach on a ThinkPad
+ * X230). The device's lifetime is lkpi_refs (get_device()/put_device()),
+ * so the kobject itself releases nothing: lkpi_device_fini() drops the
+ * reference kobject_init() took, and kobject_release() frees the name.
+ */
+static void
+lkpi_device_kobj_release(struct kobject *kobj)
+{
+	(void) kobj;
+}
+
+static const struct kobj_type lkpi_device_ktype = {
+	.release = lkpi_device_kobj_release,
+	.sysfs_ops = &kobj_sysfs_ops
+};
+
 void
 lkpi_device_init(struct device *dev, dev_info_t *dip, const char *name)
 {
@@ -71,6 +92,8 @@ lkpi_device_init(struct device *dev, dev_info_t *dip, const char *name)
 	(mutex_init)(&dev->lkpi_devres_lock, NULL, MUTEX_DRIVER, NULL);
 	INIT_LIST_HEAD(&dev->lkpi_devres);
 	dev->lkpi_refs = 1;
+	kobject_init(&dev->kobj, &lkpi_device_ktype);
+	dev->kobj.name = kstrdup(dev->lkpi_name, GFP_KERNEL);
 }
 
 struct device *
@@ -117,6 +140,9 @@ lkpi_device_fini(struct device *dev)
 	lkpi_devres_release_all(dev);
 	(mutex_destroy)(&dev->lkpi_devres_lock);
 	dev->lkpi_devres.next = dev->lkpi_devres.prev = NULL;
+	/* A kobject still holding the device's as its parent keeps the name. */
+	if (dev->kobj.state_initialized)
+		kobject_put(&dev->kobj);
 }
 
 dev_info_t *
