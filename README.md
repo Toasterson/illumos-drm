@@ -58,16 +58,16 @@ R5e (the Linux DRM helpers C drivers need; see *R5e* under *Decisions*):
 `drm_cache`'s `drm_clflush_virt_range` (one patch of conditionals), on MIT
 reimplementations of the Linux interfaces they need (`linuxkpi/`), and
 exports exactly the eleven functions of them i915's headless build imports.
-On 4 October 2026, at `b5670f9`, it was built on illumos (gcc 14.3, the
+On 5 October 2026, at `65afae7`, it was built on illumos (gcc 14.3, the
 gate's kernel flags, `-z defs`; 14 global symbols, as its scope mapfile)
 and tested on a fresh guest of `golden-20260930` (illumos `7e802e88a3`)
-with `tools/test/run-r5e-test.sh` (of `46366a7`, which changed only that
-script): 27 checks passed, none failed. The module loaded and unloaded
+with `tools/test/run-r5e-test.sh`: 27 checks passed, none failed (as on
+4 October at `b5670f9`). The module loaded and unloaded
 alone; the test driver `drm_helpers_test`, linked with
 `-N misc/drm_helpers` against the exported functions only, ran the 16
 self-tests (14 `drm_mm`, 2 `drm_cache`) at attach for five seeds up to
 scale 50 (130,876 checks at scale 1, 6,464,544 at scale 50, none failed,
-8.7 s); `misc/drm_helpers` refused to unload under it and unloaded after
+9.1 s); `misc/drm_helpers` refused to unload under it and unloaded after
 `rem_drv`; an injected failing check was counted and logged with the attach
 still succeeding; `/etc` and `/devices/pseudo` were as before; and the
 package (`packaging/drm-helpers.p5m`, published, pkglint-clean, as a p5p)
@@ -143,6 +143,30 @@ below). Nothing panicked. The first guest runs found
 that both guards counted a core left in memory by a failed dependency
 `_init` (fixed in both, illumos-ddi `g7-module-busy`), that `update_drv -d`
 with a list of aliases removes nothing, and that `r` is a ksh93 alias.
+
+G10 (device node permissions): the packaged drivers' nodes were
+`0600 root root` after a boot because console-login's ttymon applies the
+`/etc/logindevperm` rule `/dev/dri/*` and devfs keeps the result (see
+*Packaging*). On 3 October 2026, on three fresh guests of
+`golden-20260930` with the G7 packages, an anonymous DTrace of the first
+boot after the installation showed ttymon as the only process that
+changed the nodes; the new `run-g10-test.sh coldboot` failed 19 checks on
+those packages. With the fix (`drmadm perms` and the service
+`svc:/system/graphics/drm-perms`) every phase passed on the last guest
+(`logs/hephaistos/illumos-drm/20261003-g10-run3-*`): a boot with the
+packaged rule traced by anonymous DTrace (drm-perms replaced the file
+1.3 s before ttymon read it; ttymon changed no DRM node; 29 checks), the
+boots after `drmadm select new` (25) and `select legacy` (8), `noload`,
+`minorperm`, `rewrite` (20 concurrent runs), `driver-filter`, `repair`
+(the fault reproduced and repaired, 17) and `upgrade` (15); G7's
+`select-new`, `after-new`, `select-legacy`, `after-legacy`, `i915n`,
+`select-root` and `rollback` phases; and `run-r5a-test.sh` with the
+packaged drivers removed (75 checks, `nobody` opening the card nodes
+included). The second guest's `select-new` phase had found that the first
+`drmadm status` attached the drivers by following the `/dev/dri` links.
+A fourth guest at the final revision passed the first boot after the
+installation (25), a traced boot with the packaged rule (29), `noload`,
+G7's `select-new` (13) and `repair` (17) (`...-g10-run4-*`).
 
 R5a (`misc/drm_core` and the C facade): since 1 October 2026 the core is one
 kernel module, `misc/drm_core`, that exports a C interface (the headers in
@@ -469,8 +493,11 @@ bindings, both mapfiles and the layout tables, and holds the C half of the
 layout check; `modules/drm_core/ctf` the CTF shadow of the facade structures.
 `packaging/drm-core.p5m` packages the module, `packaging/cdrmnull.p5m` the C
 driver. `tools/drmadm` holds `drmadm(8)`, which selects the legacy or this
-stack for boot (`packaging/drmadm.p5m`), and `tools/test/run-g7-test.sh`
-tests both stacks on one machine; `docs/x230.md` is the operator note for
+stack for boot and keeps the new stack's device nodes at their
+`minor_perm` permissions (`packaging/drmadm.p5m`, with the service
+`packaging/drm-perms.xml`), and `tools/test/run-g7-test.sh`
+tests both stacks on one machine, `run-g10-test.sh` the node permissions
+after a cold boot; `docs/x230.md` is the operator note for
 the ThinkPad X230.
 `tools/test/run-g6-test.sh` attaches two `rdrmnull` devices and
 `virtio_gpu` together and runs everything on each, `drm_g6_test.c`
@@ -1592,9 +1619,8 @@ and dual-licensed files may be vendored, GPL-only ones may not (the script
 refuses them, and files `SOURCES` does not list). `drm_mm` builds without
 a change: `CONFIG_DRM_DEBUG_MM` is off (its stack depot is GPL-2.0-only),
 and every difference from Linux lives in the compatibility headers.
-`drm_cache` has one patch, which only adds conditionals: its page,
-scatterlist, swiotlb and write-combining-copy functions need R5c's
-`struct page`, `sg_table` and `iosys_map`, so they and their headers are
+`drm_cache` has one patch, which only adds conditionals: its page and
+scatterlist functions need R5c's `struct page` and `sg_table` and are
 built only with `CONFIG_LKPI_STRUCT_PAGE`, which R5c's layer defines once
 those exist; then `drm_clflush_sg` (which i915 imports) compiles
 unchanged, joins the mapfiles and the patch can go. (R5c did that:
@@ -2044,17 +2070,174 @@ operator note for the ThinkPad X230.
 **Open issues.** The reverse guard and the link rule are in gfx-drm's
 branch `drm-coexist`, which must be merged and a `driver/graphics/drm`
 with it installed before a machine loads both stacks; OpenIndiana's
-current `misc/drm` loads beside `misc/drm_core`. The nodes of the packaged
-`virtio_gpu` and `cdrmnull`, attached at boot, are `0600 root root`
-although `minor_perm` says `0666 root sys`, so unprivileged processes
-cannot open them (seen on the G7 guest, as before for test drivers
-registered at boot: `notes/hosts.md`); `devfsadm -i` and a reload do not
-change them, `rem_drv -C` clears them; a packaging question beyond G7.
+current `misc/drm` loads beside `misc/drm_core`. (The `0600 root root`
+nodes the G7 guest found for the packaged drivers attached at boot are
+fixed since G10; see *Packaging*.)
 `drmadm select` refuses while a DRM module is loaded, so on a machine
 whose display uses `i915` the display manager must stop first (or select
 with `-R`). The busy part of the guard rule is tested deterministically
 only with DTrace (`overlap`); the 100 concurrent loads never overlapped
 their `_init` calls.
+
+## Packaging
+
+`packaging/*.p5m` are the IPS manifests (each says how to publish it):
+`drm-core` (`misc/drm_core`), `drmadm` (`drmadm(8)` and the service
+`svc:/system/graphics/drm-perms`, `packaging/drm-perms.xml`), `virtio-gpu`
+and the test driver `cdrmnull`. Every driver package requires `drm-core`,
+which requires `drmadm`.
+
+**Device node permissions (G10).** The rule for every DRM driver package
+of this repository:
+
+1. its `driver` action gives all minor nodes `perms="* 0666 root sys"`,
+   card and render nodes alike;
+2. its driver is in `NEW_MODULES` of `tools/drmadm/drmadm` (as
+   `drv/<name>`), so that `drmadm perms` looks after its nodes;
+3. after a cold boot of a machine with the package installed,
+   `tools/test/run-g10-test.sh coldboot` passes: every `/dev/dri` node of
+   the driver is `0666 root sys` and an unprivileged process opens it.
+
+Why `0666` for both kinds of node: this is the R0 security model. A
+render node accepts only the render ioctls (no mode setting, no
+authentication), so any process may use the GPU through it, as Mesa
+expects. On a card node the core decides who may do what (see *Ioctl
+semantics*): the first opener becomes master while there is none, mode
+setting needs the master, `SET_MASTER` and `DROP_MASTER` need
+`PRIV_SYS_DEVICES` or a former master of the same process, and
+`GEM_FLINK`/`GEM_OPEN` need an authenticated file. gfx-drm's `i915`
+declares `0644 root sys`, which would refuse `open(O_RDWR)` to an
+unprivileged process; its nodes are `0600 root root` after a boot anyway
+(below), and only the console user and root use them.
+
+Why `minor_perm` alone is not enough. The G7 guest found the packaged
+drivers' nodes at `0600 root root` after a boot although `/etc/minor_perm`
+said `virtio_gpu:* 0666 root sys`. G10 traced it on a fresh guest
+(anonymous DTrace on `devfs_setattr`/`devfs_setsecattr` from the first
+instruction of the boot, `logs/hephaistos/illumos-drm/20261003-g10-run1-coldboot-repro.log`):
+the only process that changed a DRM node was `ttymon` of
+`svc:/system/console-login:default`, 1.5 seconds after
+`svc:/system/device/local` had attached the drivers, from
+`ttymon_express` → `open_device` → `di_devperm_logout` → `logindevperm` →
+`dir_dev_acc` → `setdevaccess`: a `chown` to uid 0 gid 0 and an
+`acl_strip` to mode 0600, for all four nodes. `/etc/logindevperm` (from
+illumos-gate, package `SUNWcs`) has the rule
+
+```
+/dev/vt/console_user	0600	/dev/dri/*		# dri devices
+```
+
+`/dev/vt/console_user` points to `/dev/console` while no virtual console
+is active, which is ttymon's device (`-d /dev/console`), so ttymon applies
+the logout half of the rule each time it opens the console: at every boot
+and after every console logout, root's owner and group from
+`/etc/passwd` (`root`, `root`) and mode 0600 for every `/dev/dri` node
+whose node exists; a console login (`login(1)`) gives them to the user
+instead. devfs keeps a changed owner, group or mode in a shadow node of the
+on-disk `/devices` directory (the G10 guest's root file system snapshot
+had `cdrmnull@0:card0` as `crw------- root root`); `dv_shadow_node`
+prefers it to `minor_perm`, `devfs_reset_perm` (what `update_drv -m`
+triggers) skips shadowed nodes, and only `rem_drv -C` deletes it (IPS
+removes a driver action with `rem_drv -b <root> <name>`, without `-C`).
+So the nodes stay `0600 root root` across reboots, `devfsadm -i`, module
+reloads and `rem_drv`/`add_drv` without `-C`, which is what R0 saw on
+oibldofgate for test drivers registered at boot, and why G7's first suite
+run, whose `add_drv cdrmnull` followed `pkg uninstall cdrmnull`, failed 16
+checks: 8 opens of `cdrmnull`'s card node by `nobody` and what followed
+from them. Drivers the test scripts add after the boot escaped,
+because ttymon had run already.
+
+The fix: `drmadm perms`, which the service `svc:/system/graphics/drm-perms`
+runs at every boot after `svc:/system/device/local` and before every
+`svc:/system/console-login` instance (an `optional_all` dependent, so a
+failure of the service does not keep the console from starting), and
+right after the package is installed or updated (`restart_fmri` of
+`manifest-import`):
+
+1. It restricts each `/etc/logindevperm` rule with a device under
+   `/dev/dri` and no driver list to the legacy drivers with the rule's
+   documented driver list (`logindevperm(5)`: "Drivers can also be
+   specified to limit the permission changes to minor nodes owned by the
+   specified drivers"): the `/dev/dri` devices move to a rule of their own
+   with `driver=i915,radeon`, after a comment line that says so; the other
+   devices of the rule stay where they were. The console user keeps the
+   legacy stack's nodes as before; the new stack's nodes keep their
+   `minor_perm` permissions. It reads the file as libdevinfo does (comment
+   from the first `#`, "driver" anywhere before it makes a driver list)
+   and refuses, leaving the file alone, if a rewritten rule would exceed
+   the 254 bytes libdevinfo reads per line (`fgets` into 256 bytes; the
+   rest of a longer line would be read as another rule). Rules with a
+   driver list are left as written (one that names a new-stack driver is
+   reported), and so are rules that reach `/dev/dri` only through a
+   pattern such as `/dev/*/*`, which it reports as applying to every
+   driver. The file is replaced by `rename(2)`, so ttymon and `login(1)`
+   read the old or the new file; concurrent runs write their own
+   temporary files from the same input and give the same result, and a
+   second run changes nothing.
+2. It resets every `/dev/dri` node of a new-stack driver whose owner, group
+   or mode differs from its `minor_perm` entry to that entry, which repairs
+   nodes an earlier boot left at `0600 root root`. The entry is the one the
+   kernel applies: `add_minorperm()` builds a driver's list in file order,
+   inserting each new pattern at the head (a repeated pattern replaces the
+   old one in place, a later `*` the earlier one), and `dev_minorperm()`
+   takes the first matching pattern, else `*`; of two different matching
+   patterns the later one wins. The nodes of a new-stack driver that an
+   `/etc/logindevperm` rule names are left alone, and so are the nodes of
+   drivers that are not loaded: drmadm finds a link's driver in
+   `/etc/path_to_inst` (a pseudo device's from its node name; of several
+   drivers listed for one path, the loaded one, and a link with more than
+   one loaded is reported and skipped) and follows the link only if the
+   driver is loaded,
+   because a lookup in `/devices` attaches the driver (and a loaded DRM
+   module makes `drmadm select` refuse; the first version did this from
+   `drmadm status`, which G7's `select-new` phase caught).
+
+The alternatives were weaker. Per-minor `perms` or `clone_perms` in the
+driver actions change nothing: `minor_perm` was right. A service that runs
+`chmod` after console-login races ttymon (console-login is online as soon
+as ttymon is started) and loses at the next console logout or login.
+Privilege-only minor nodes (`ddi_create_priv_minor_node` with
+`PRIVONLY_DEV` in `misc/drm_core`) refuse `chown` and `chmod` with `EPERM`,
+but they move the policy into the kernel, make `minor_perm` and the
+administrator's `chmod` meaningless, and make `login(1)` log a
+`LOG_CRIT` "failed to chown device" for each node at every console login.
+The rule is illumos-gate's; restricting it there (to the legacy drivers,
+or to the card nodes) would make the edit unnecessary.
+
+Consequences. `/etc/logindevperm` is an editable file of `SUNWcs`
+(`preserve=true`): IPS keeps the edit across updates, and `pkg verify`
+reports it only with `-v` ("editable file has been changed"); the other
+side is that a later `SUNWcs` with a changed `/etc/logindevperm` does not
+install its version over the edited file. To take it, run
+`pkg revert /etc/logindevperm`; the next boot (or `drmadm perms`)
+restricts the new file's rule again. The
+restriction stays when `driver/graphics/drmadm` is removed, which is
+right for the legacy drivers; a DRM driver other than `i915` and `radeon`
+from elsewhere would no longer be given to the console user. The service
+resets a new-stack node changed with `chmod` at the next boot: change the
+permissions with `update_drv -m` and `drmadm perms`. `drmadm status`
+shows the rules and every node with its `minor_perm` entry where they
+differ. `run-g10-test.sh driver-filter` checks that a driver list still
+reaches the nodes of the drivers it names. (libdevinfo's
+`check_driver_match()` compares the driver list with a driver name it
+reads after `di_fini()` has freed the snapshot that holds it; it works,
+as the test shows, but it is a use after free in illumos-gate that this
+fix now depends on for the legacy drivers' rule.)
+
+The tests: `run-g10-test.sh arm` (optionally with `REVERT=1`, which
+restores the packaged `/etc/logindevperm` with `pkg revert` as on the
+first boot after an installation) arms anonymous DTrace for the next
+boot; `coldboot` then checks from the trace that console-login's ttymon
+changed no DRM node and read `/etc/logindevperm` only after drm-perms had
+replaced it, that every new-stack node is `0666 root sys` and opens for
+`nobody`, and that a console-login restart changes nothing; `rewrite`
+checks the rewrite on scratch roots (split rules, left rules, owner and
+mode, idempotence, 20 concurrent runs, the line-length refusal);
+`minorperm` checks drmadm's choice of `minor_perm` entry against the
+kernel's; `noload` that `drmadm status` and `drmadm perms` load no DRM
+module; `repair` reproduces the fault (packaged rule, console-login
+restart) and checks that drm-perms repairs it; `upgrade` checks that installing the package repairs nodes left
+at `0600 root root` without a reboot.
 
 ## Building
 

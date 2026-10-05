@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+<!--
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+svc:/system/graphics/drm-perms runs "drmadm perms" (drmadm(8)) at every
+boot, before console-login. ttymon(8) of console-login applies the
+/etc/logindevperm rule for /dev/dri when it opens the console and would
+set the device nodes of the illumos-drm drivers to 0600 root root, which
+devfs then keeps across reboots; drmadm perms restricts that rule to the
+legacy DRM drivers first and resets nodes left so by an earlier boot to
+their /etc/minor_perm permissions. The dependent is optional_all: a
+failure of this service does not keep console-login from starting.
+Delivered by driver/graphics/drmadm (packaging/drmadm.p5m).
+-->
+<service_bundle type='manifest' name='driver/graphics/drmadm:drm-perms'>
+
+<service name='system/graphics/drm-perms' type='service' version='1'>
+
+	<create_default_instance enabled='true' />
+
+	<single_instance />
+
+	<!-- /etc is writable and /tmp, /var are mounted. -->
+	<dependency name='fs' grouping='require_all' restart_on='none'
+	    type='service'>
+		<service_fmri value='svc:/system/filesystem/minimal' />
+	</dependency>
+
+	<!-- The boot's devfsadm has made the /dev/dri links. -->
+	<dependency name='devices' grouping='optional_all' restart_on='none'
+	    type='service'>
+		<service_fmri value='svc:/system/device/local' />
+	</dependency>
+
+	<!-- Before every console-login instance's ttymon opens its console. -->
+	<dependent name='drm-perms_console-login' grouping='optional_all'
+	    restart_on='none'>
+		<service_fmri value='svc:/system/console-login' />
+	</dependent>
+
+	<exec_method type='method' name='start' exec='/usr/sbin/drmadm perms'
+	    timeout_seconds='60' />
+
+	<exec_method type='method' name='stop' exec=':true'
+	    timeout_seconds='0' />
+
+	<property_group name='startd' type='framework'>
+		<propval name='duration' type='astring' value='transient' />
+	</property_group>
+
+	<stability value='Unstable' />
+
+	<template>
+		<common_name>
+			<loctext xml:lang='C'>
+				DRM device node permissions of the illumos-drm drivers
+			</loctext>
+		</common_name>
+		<documentation>
+			<manpage title='drmadm' section='8'
+			    manpath='/usr/share/man' />
+		</documentation>
+	</template>
+</service>
+
+</service_bundle>

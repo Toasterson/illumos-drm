@@ -17,6 +17,9 @@
 .Op Fl R Ar root
 .Cm select
 .Cm legacy | new
+.Nm
+.Op Fl R Ar root
+.Cm perms
 .Sh DESCRIPTION
 Two Direct Rendering Manager (DRM) driver stacks can be installed on the
 same system:
@@ -148,6 +151,129 @@ It also refuses while another
 .Nm
 runs.
 Selecting the stack that is already selected changes nothing.
+.Ss Device node permissions
+The packages of the new stack give the card and render nodes of their
+drivers the permissions
+.Sy 0666 root sys
+in
+.Pa /etc/minor_perm :
+any process may open a render node, and the DRM core decides which file
+of a card node may change the display (the DRM master).
+The rule
+.Bd -literal -offset indent
+/dev/vt/console_user  0600  /dev/dri/*
+.Ed
+.Pp
+of
+.Pa /etc/logindevperm
+.Pq see Xr logindevperm 5
+gives every
+.Pa /dev/dri
+node to the user logged in on the console and back to root with mode
+0600 at the logout.
+.Xr ttymon 8
+of
+.Sy svc:/system/console-login
+applies the logout half each time it opens the console, at every boot
+and after every console logout, so the nodes of every DRM driver attached
+by then become
+.Sy 0600 root root .
+.Xr devfs 4FS
+keeps a changed owner, group or mode of a device node in a shadow node on
+the root file system, which takes precedence over
+.Pa /etc/minor_perm
+from then on, also after a reboot or a reload of the driver.
+.Pp
+.Nm Cm perms
+undoes this for the new stack:
+.Bl -enum
+.It
+It restricts each rule of
+.Pa /etc/logindevperm
+with a device under
+.Pa /dev/dri
+and no driver list to the drivers of the legacy stack: the
+.Pa /dev/dri
+devices move to a rule of their own with
+.Sy driver=i915,radeon ,
+after a comment line that says so, and the other devices of the rule stay
+where they were.
+For the legacy drivers nothing changes; the nodes of the new stack's
+drivers are no longer given to the console user.
+Rules with a driver list are left as they are, and reported if they name
+a driver of the new stack; so are rules that reach
+.Pa /dev/dri
+only through a pattern, such as
+.Pa /dev/*/* ,
+which are reported as applying to every driver.
+If a rewritten rule would be longer than the 254 bytes per line that
+.Xr logindevperm 5
+is read with,
+.Nm
+changes nothing and fails.
+The file is replaced with
+.Xr rename 2 ;
+running
+.Nm Cm perms
+again changes nothing.
+.It
+On the running system, it resets every
+.Pa /dev/dri
+node of a driver of the new stack
+.Pq Sy i915n , virtio_gpu , cdrmnull , rdrmnull
+whose owner, group or mode differs from its
+.Pa /etc/minor_perm
+entry to that entry, and reports each node it resets.
+The entry is the one the kernel applies: of two different patterns of the
+driver that match the minor name the later in the file, else the
+.Sy *
+entry.
+The nodes of a driver that a rule of
+.Pa /etc/logindevperm
+names are left alone, and so are those of drivers that are not loaded:
+.Nm
+finds a node's driver in
+.Pa /etc/path_to_inst ,
+or for a pseudo device from its node name,
+and does not look the node up otherwise
+.Pq a node for whose path several loaded drivers are listed is reported and skipped, since a lookup would load the
+driver.
+.El
+.Pp
+The service
+.Sy svc:/system/graphics/drm-perms ,
+which
+.Sy driver/graphics/drmadm
+delivers, runs
+.Nm Cm perms
+at every boot after
+.Sy svc:/system/device/local
+and before
+.Sy svc:/system/console-login ,
+and when the package is installed or updated.
+To give a new-stack driver's nodes other permissions, change its
+.Pa /etc/minor_perm
+entry with
+.Nm update_drv Fl m
+and run
+.Nm Cm perms ;
+the service resets a node changed with
+.Xr chmod 1
+or
+.Xr chown 1
+at the next boot.
+To keep the console-user assignment for these nodes, disable the service
+and remove the driver list from the rule.
+.Pp
+.Pa /etc/logindevperm
+is an editable file of the package
+.Sy SUNWcs :
+while it is edited, an update of that package does not replace it.
+To take the packaged version, run
+.Nm pkg Cm revert Pa /etc/logindevperm ;
+the next boot, or
+.Nm Cm perms ,
+restricts its rule again.
 .Ss Status
 .Nm Cm status
 prints the selected stack and whether it is in effect since the last boot
@@ -158,7 +284,15 @@ and to
 .Sy i915n
 and how many are unbound, the number of
 .Pa /dev/dri
-links, and every
+links, the
+.Pa /etc/logindevperm
+rules for
+.Pa /dev/dri
+and, on the running system, the mode, owner and group of each
+.Pa /dev/dri
+node of a loaded driver with its
+.Pa /etc/minor_perm
+entry where they differ, and every
 .Sy exclude
 line of
 .Pa /etc/system
@@ -180,6 +314,12 @@ runs with
 and the boot archive of
 .Ar root
 is updated.
+.Cm perms
+edits only the
+.Pa /etc/logindevperm
+of
+.Ar root ;
+its nodes are reset by the service when it boots.
 .El
 .Sh FILES
 .Bl -tag -width Ds
@@ -191,6 +331,19 @@ The alias bindings that
 .Nm
 changes through
 .Xr update_drv 8 .
+.It Pa /etc/logindevperm
+The console-user rules whose
+.Pa /dev/dri
+entries
+.Nm Cm perms
+restricts to the legacy drivers.
+.It Pa /etc/minor_perm
+The permissions of the device nodes, which
+.Nm Cm perms
+restores.
+.It Pa /lib/svc/manifest/system/drm-perms.xml
+The service
+.Sy svc:/system/graphics/drm-perms .
 .El
 .Sh EXIT STATUS
 .Ex -std
@@ -229,7 +382,12 @@ changed directly:
 .Sh INTERFACE STABILITY
 .Sy Uncommitted
 .Sh SEE ALSO
+.Xr chmod 1 ,
+.Xr chown 1 ,
 .Xr pkg 1 ,
+.Xr rename 2 ,
+.Xr devfs 4FS ,
+.Xr logindevperm 5 ,
 .Xr system 5 ,
 .Xr i915 7D ,
 .Xr beadm 8 ,
@@ -237,6 +395,7 @@ changed directly:
 .Xr devfsadm 8 ,
 .Xr modinfo 8 ,
 .Xr modunload 8 ,
+.Xr ttymon 8 ,
 .Xr update_drv 8
 .Sh NOTES
 While the new stack is selected,

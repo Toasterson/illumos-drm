@@ -25,6 +25,14 @@
 
 #define	ST_CACHE_BUF	(3 * 4096 + 192)
 #define	ST_CACHE_WORKERS	4
+/*
+ * Linux's drm_clflush_virt_range(addr, len) also flushes the line of
+ * addr + len - 1, even for len 0, where that is the byte before addr. The
+ * test buffers therefore start ST_CACHE_SLACK bytes into their
+ * allocation, so that an empty range at offset 0 flushes memory the test
+ * owns.
+ */
+#define	ST_CACHE_SLACK	256
 
 static uint8_t
 st_pattern(size_t i, unsigned int round)
@@ -64,12 +72,13 @@ st_cache_ranges(struct st_ctx *ctx)
 		{ 0, ST_CACHE_BUF }, { ST_CACHE_BUF - 1, 1 },
 		{ 4096 - 32, 64 }, { 2 * 4096, 4096 + 192 },
 	};
-	uint8_t *buf;
+	uint8_t *mem, *buf;
 	unsigned int i, round;
 
-	buf = st_zalloc(ST_CACHE_BUF);
-	if (!ST_CHECK(ctx, buf != NULL, "no memory"))
+	mem = st_zalloc(ST_CACHE_SLACK + ST_CACHE_BUF);
+	if (!ST_CHECK(ctx, mem != NULL, "no memory"))
 		return;
+	buf = mem + ST_CACHE_SLACK;
 	for (round = 0; round < 4 * ctx->scale; round++) {
 		st_fill(buf, ST_CACHE_BUF, round);
 		for (i = 0; i < ARRAY_SIZE(r); i++) {
@@ -90,7 +99,7 @@ st_cache_ranges(struct st_ctx *ctx)
 		ST_CHECK(ctx, st_intact(buf, ST_CACHE_BUF, round),
 		    "round %u: contents changed after random flushes", round);
 	}
-	st_free(buf, ST_CACHE_BUF);
+	st_free(mem, ST_CACHE_SLACK + ST_CACHE_BUF);
 }
 
 struct st_cache_worker {
@@ -125,13 +134,15 @@ st_cache_parallel(struct st_ctx *ctx)
 {
 	struct st_cache_worker *w;
 	void *args[ST_CACHE_WORKERS];
-	uint8_t *shared;
+	uint8_t *mem, *shared = NULL;
 	size_t sz = ST_CACHE_WORKERS * sizeof (*w);
 	unsigned int i;
 
 	w = st_zalloc(sz);
-	shared = st_zalloc(ST_CACHE_BUF);
-	if (!ST_CHECK(ctx, w != NULL && shared != NULL, "no memory"))
+	mem = st_zalloc(ST_CACHE_SLACK + ST_CACHE_BUF);
+	if (mem != NULL)
+		shared = mem + ST_CACHE_SLACK;
+	if (!ST_CHECK(ctx, w != NULL && mem != NULL, "no memory"))
 		goto out;
 	st_fill(shared, ST_CACHE_BUF, 0);
 	for (i = 0; i < ST_CACHE_WORKERS; i++) {
@@ -162,8 +173,8 @@ out:
 		}
 		st_free(w, sz);
 	}
-	if (shared != NULL)
-		st_free(shared, ST_CACHE_BUF);
+	if (mem != NULL)
+		st_free(mem, ST_CACHE_SLACK + ST_CACHE_BUF);
 }
 
 const struct st_test drm_cache_selftests[] = {

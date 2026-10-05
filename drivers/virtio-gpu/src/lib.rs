@@ -73,6 +73,10 @@ use crate::gpu::{Caps, CmdRef, Gpu, MAX_SEGS, dev_note, dev_warn};
 use crate::kms::GpuKms;
 use crate::object::{Create, DevRef};
 
+// The module linkage and its _init, _fini and _info entry points. Not in
+// host unit tests: a test binary is a host executable whose C runtime
+// (crti.o on Linux) already defines _init and _fini.
+#[cfg(not(test))]
 ddi::module! {
     driver: VirtioGpuModule,
     cb_ops: unsafe drm_facade::CB_OPS.get(),
