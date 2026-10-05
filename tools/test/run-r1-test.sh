@@ -13,9 +13,18 @@
 #   rdrmnull.conf    examples/rdrmnull/rdrmnull.conf
 #   drm_r0_test.c    tools/test/drm_r0_test.c
 #   drm_r1_test.c    tools/test/drm_r1_test.c
+#   drm_r2_test.c    tools/test/drm_r2_test.c (optional: the R2 test runs
+#                    when it is present; fences, sync objects, sync files,
+#                    PRIME, with the sync kstat recorded before unload,
+#                    and a refused detach that must leave the display and
+#                    the sync paths working, checked with modetest from
+#                    $MODETEST, default /opt/drm-tests/amd64/modetest,
+#                    package system/test/libdrm)
 #   drm/             the patched libdrm 2.4.109 headers (tools/uapi/generate.sh)
 #
 # RDRMNULL_CONF names another .conf to install instead of rdrmnull.conf:
+# tools/test/rdrmnull-two.conf (two devices, for the R2 cross-device
+# checks), or
 # the DMA drill variants tools/test/rdrmnull-dma-self.conf and
 # rdrmnull-dma-root-node.conf (see examples/rdrmnull/src/lib.rs). With
 # dma-mode "self" or "root-node" the R1 test expects every object to be
@@ -62,6 +71,8 @@ gemstat() {
 	echo
 	echo "\$ kstat -p rdrmnull:0:gem ($1)"
 	kstat -p rdrmnull:0:gem
+	echo "\$ kstat -p rdrmnull:0:sync ($1)"
+	kstat -p rdrmnull:0:sync
 }
 
 CONF=${RDRMNULL_CONF:-rdrmnull.conf}
@@ -70,6 +81,58 @@ case $(sed -e 's/#.*//' "$CONF" | tr -d ' \t') in
 *) RDRMNULL_DMA=0 ;;
 esac
 export RDRMNULL_DMA
+
+MODETEST=${MODETEST:-/opt/drm-tests/amd64/modetest}
+
+# A refused detach must leave the device working (R2). drm_r2_test
+# pending-hold leaves a 10 s fence pending in the reservation of a buffer
+# that rdrmnull keeps a reference to after every file is closed; the detach
+# cancels the fence (ECANCELED), then is refused, because the buffer and
+# the fence are alive. Every detach check runs before anything is torn
+# down, so the display (modetest, from package system/test/libdrm) and the
+# sync paths (drm_r2_test after-refusal) must still work; drm_r2_test
+# release then drops the buffer.
+refused_detach_steps() {
+	step ./drm_r2_test pending-hold || fail=1
+	refusals=$(grep -c 'detach refused' /var/adm/messages)
+	cancels=$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)
+	if step modunload -i "$id"; then
+		echo "FAIL modunload succeeded while rdrmnull held a buffer with a pending fence"
+		fail=1
+	else
+		echo "PASS modunload refused while rdrmnull holds a buffer with a pending fence"
+	fi
+	step sh -c 'grep "detach" /var/adm/messages | tail -3'
+	if [ "$(grep -c 'detach refused: GEM state in use' /var/adm/messages)" -gt 0 ] &&
+	    [ "$(grep -c 'detach refused' /var/adm/messages)" -gt "$refusals" ]; then
+		echo "PASS detach(9E) refused it: GEM state in use"
+	else
+		echo "FAIL no detach(9E) refusal was logged"
+		fail=1
+	fi
+	if [ "$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)" -gt "$cancels" ]; then
+		echo "PASS the refused detach cancelled the pending fence first"
+	else
+		echo "FAIL the refused detach did not cancel the pending fence"
+		fail=1
+	fi
+	step sh -c 'modinfo | grep rdrmnull'
+	gemstat "after the refused detach"
+	if [ ! -x "$MODETEST" ]; then
+		echo "FAIL modetest not found at $MODETEST"
+		fail=1
+	elif step sh -c "$MODETEST -M rdrmnull -c > modetest-refused.out 2>&1" &&
+	    grep -q '^Connectors:' modetest-refused.out && grep -q 'connected' modetest-refused.out &&
+	    grep -q '1024x768' modetest-refused.out; then
+		echo "PASS after the refused detach, modetest lists the connector and its modes"
+	else
+		cat modetest-refused.out
+		echo "FAIL after the refused detach, modetest listing"
+		fail=1
+	fi
+	step ./drm_r2_test after-refusal || fail=1
+	step ./drm_r2_test release || fail=1
+}
 
 fail=0
 had_dri=no
@@ -84,7 +147,10 @@ step uname -a
 step devfsadm -C
 state before
 step digest -a sha256 rdrmnull.a
-step ld -ztype=kmod -z allextract rdrmnull.a -o rdrmnull || exit 1
+# -N fs/specfs: makespecvp, for the file descriptors of dma-bufs, sync
+# objects and sync files (illumos-kernel-private-sys), lives in the specfs
+# module, which krtld does not search unless the module depends on it.
+step ld -ztype=kmod -N fs/specfs -z allextract rdrmnull.a -o rdrmnull || exit 1
 step digest -a sha256 rdrmnull
 step elfdump -d rdrmnull
 echo
@@ -108,6 +174,13 @@ step gcc -m32 -Wall -DPROBE32 -I drm -o drm_r0_probe32 drm_r0_test.c || exit 1
 step gcc -m64 -Wall -I drm -o drm_r1_test drm_r1_test.c \
     -L/usr/lib/xorg/amd64 -R/usr/lib/xorg/amd64 -ldrm -lkstat -lpthread || exit 1
 step gcc -m32 -Wall -DPROBE32 -I drm -o drm_r1_probe32 drm_r1_test.c || exit 1
+R2=no
+if [ -f drm_r2_test.c ]; then
+	R2=yes
+	step gcc -m64 -Wall -I drm -o drm_r2_test drm_r2_test.c \
+	    -L/usr/lib/xorg/amd64 -R/usr/lib/xorg/amd64 -ldrm -lkstat -lpthread -lsocket || exit 1
+	step gcc -m32 -Wall -DPROBE32 -I drm -o drm_r2_probe32 drm_r2_test.c || exit 1
+fi
 
 step cp rdrmnull /usr/kernel/drv/amd64/rdrmnull || exit 1
 echo
@@ -139,6 +212,10 @@ if [ $fail -eq 0 ]; then
 	step ./drm_r0_probe32 || fail=1
 	step ./drm_r1_test || fail=1
 	step ./drm_r1_probe32 || fail=1
+	if [ $R2 = yes ]; then
+		step ./drm_r2_test || fail=1
+		step ./drm_r2_probe32 || fail=1
+	fi
 	gemstat "after the tests"
 	step sh -c 'echo "::vmem" | mdb -k | awk "NR == 1 || /rdrmnull|umem_np/"'
 	step sh -c 'tail -5 /var/adm/messages'
@@ -167,12 +244,29 @@ if [ $fail -eq 0 ]; then
 	wait $holder
 	echo "holder exited with $?"
 	rm -f hold.fifo
+	if [ $R2 = yes ] && [ -n "$id" ]; then
+		refused_detach_steps
+	fi
+	if [ $R2 = yes ]; then
+		# A fence left pending with no file open: the detach must cancel
+		# it (ECANCELED) instead of waiting 10 s or refusing.
+		step ./drm_r2_test pending || fail=1
+	fi
+	cancels=$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)
 	gemstat "before unload"
 	if [ -n "$id" ] && step modunload -i "$id"; then
 		echo "PASS modunload succeeded after the file was closed"
 	else
 		echo "FAIL modunload failed after the file was closed"
 		fail=1
+	fi
+	if [ $R2 = yes ]; then
+		if [ "$(grep -c "detach cancelled 1 pending test fences" /var/adm/messages)" -gt "$cancels" ]; then
+			echo "PASS the detach cancelled the pending fence"
+		else
+			echo "FAIL no cancelled fence was reported by the detach"
+			fail=1
+		fi
 	fi
 	step sh -c 'modinfo | grep rdrmnull || echo "rdrmnull not loaded"'
 	step sh -c 'echo "::vmem" | mdb -k | awk "NR == 1 || /rdrmnull/"; echo "(no rdrmnull arenas above: all were destroyed)"'
@@ -192,7 +286,13 @@ if [ -d /dev/dri ]; then
 	if [ $had_dri = no ]; then
 		# devfsadm -C only removes links that a link module claims; the
 		# directory itself did not exist before the test.
-		step rm -f /dev/dri/card0 /dev/dri/renderD128
+		# Every link to an rdrmnull node (card1 and renderD129 too with
+		# rdrmnull-two.conf).
+		for l in /dev/dri/*; do
+			case $(ls -l "$l" 2>/dev/null) in
+			*"-> "*/rdrmnull@*) step rm -f "$l" ;;
+			esac
+		done
 		step rmdir /dev/dri
 	fi
 fi

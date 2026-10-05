@@ -14,12 +14,12 @@ nodes, authentication, capabilities, GEM, PRIME, syncobj, KMS), and a Rust
 virtio-gpu driver on top of it. Existing vendor drivers stay in C and would
 be carried later through a C interface of the core. The milestones are R0
 (uAPI, device registration, per-file state, core ioctls), R1 (GEM and dumb
-buffers), both done, R2 (fences, syncobj, PRIME), R3 (KMS and atomic),
-R4 (virtio-gpu) and R5 (C interface).
+buffers), R2 (fences, syncobj, PRIME), all three done, R3 (KMS and
+atomic), R4 (virtio-gpu) and R5 (C interface).
 
 ## Where things stand
 
-Milestones R0, R1 and R3 work.
+Milestones R0, R1, R2 and R3 work.
 
 R0 (uAPI, device registration, per-file state, core ioctls): on 28
 September 2026 the test driver `rdrmnull` was built for the kernel target,
@@ -58,6 +58,40 @@ per-device (64 MiB) memory limits of `rdrmnull` hold. The `gem` kstat
 mapping and byte of object memory back at zero before the module unloads,
 and the vmem arenas and identifier spaces of the device disappear with it.
 The refault experiment below worked.
+
+R2 (fences, reservations, sync objects with timelines, sync files, PRIME
+with anonymous file descriptors), on 29 September 2026 on a disposable
+guest with the same kernel: a dumb buffer exported with
+`drmPrimeHandleToFD` travels over `SCM_RIGHTS` to an exec'd child, which
+imports it with `drmPrimeFDToHandle` on its card and render files, maps
+it through the handle and through the dma-buf descriptor, sees the
+parent's contents and changes them for the parent; exporting an object
+twice gives one dma-buf (one device number), importing it on the
+exporting file gives the file's own handle, close-on-exec survives
+`exec`, a read-only export refuses writable mappings, and the object
+lives on through its dma-buf after every handle is closed. Binary and
+timeline sync objects behave as libdrm expects (`drmSyncobj*`: create,
+signal, reset, wait any and all, `WAIT_FOR_SUBMIT`, `WAIT_AVAILABLE`,
+timeline signal, query, transfer both ways, export and import as sync
+object files and as sync files) with fences that `rdrmnull`'s test
+timeline signals from a soft interrupt: points signalled out of order
+complete the timeline in order, and `poll(2)` of a sync file is woken by
+`pollwakeup(9F)` in the soft interrupt (DTrace: at PIL 1, from the
+timeline's handler). A sync object and a sync file passed to another
+process work there; reservation waits distinguish writers from readers;
+a signal interrupts a wait with `EINTR`; eight threads do all of it at
+once. The `sync` kstat (`kstat -p rdrmnull:0:sync`) shows every fence,
+callback, sync object, sync file, dma-buf and anonymous file gone after
+each step, and the module unloads. A detach attempted while `rdrmnull`
+holds a buffer with a pending fence in its reservation cancels the fence,
+is refused, and leaves the display (`modetest` lists it) and the sync
+paths (a sync object signalled by the test timeline, a sync file waking
+`poll(2)`) working; once the buffer is released the module unloads. The
+first run panicked the machine in
+the devmap framework on the first `mmap(2)` of a dma-buf; the analysis
+and the fix, which made that impossible in illumos-ddi, are in
+[docs/anon-fd.md](docs/anon-fd.md) and illumos-ddi's `docs/DESIGN.md`
+section 5.12.
 
 R3 (kernel mode setting), on 29 September 2026 on a disposable Hipster
 guest with the same kernel (`illumos-cda5b9a49f`): `rdrmnull` has one
@@ -103,26 +137,37 @@ maps objects through `devmap(9E)`. The decision logic (`state`, `caps`,
 `dumb`, and the reference counting in `karc` and `defer`) is plain data and
 is unit-tested on the host, the reference counting and the handle and name
 rules from eight threads; `device`, `gem` and `uaccess` are the kernel
-layer.
+layer. Since R2 the core also has fences, fence arrays and fence chains
+(`fence`), wound/wait mutexes (`wwmutex`), reservation objects (`resv`),
+sync objects (`syncobj`) and the merge rules of sync files (`sync_file`),
+all plain logic over `ksync` (which is `ddi` in the kernel and `std` in
+host tests) and tested on the host with real threads; the kernel layer
+of R2 is `fence_dev` (the device's synchronisation state and the `sync`
+kstat), `anon_fd` (file descriptors for dma-bufs, sync object files and
+sync files, over illumos-ddi's private tier), `syncobj_ioctl` and
+`prime`.
 
 `examples/rdrmnull` is a DRM driver without hardware. It registers one
-device with a card and a render node, has dumb buffers in system memory
-and three test-only private ioctls (movable objects for the refault
-experiment, and a reference dropped from a timer), and is the kernel
-module the core is tested with, as well as the template for a real driver.
-Since R3 it also has a virtual display (`examples/rdrmnull/src/kms.rs`)
-and two more test-only ioctls: one reports what its software scanout
-shows, the other keeps a reference to an object across the close of every
-file, so that the R3 test can check that a refused detach leaves the
-device working.
+device with a card and a render node, has dumb buffers in system memory,
+sync objects with timelines, and test-only private ioctls (movable
+objects for the refault experiment, a reference dropped from a timer,
+since R2 fences on a test timeline that a soft interrupt signals after a
+delay and a reservation wait), and is the kernel module the core is
+tested with, as well as the template for a real driver. Since R3 it also
+has a virtual display (`examples/rdrmnull/src/kms.rs`) and two more
+test-only ioctls: one reports what its software scanout shows, the other
+keeps a reference to an object across the close of every file, so that
+the tests can check that a refused detach leaves the device working.
 
 `xtask` builds and links kernel modules and checks interfaces (see below).
 `tools/uapi` regenerates `drm-uapi` and holds the C half of the layout
-check. `tools/test` holds the libdrm test programs of R0, R1 and R3 and the
+check. `tools/test` holds the libdrm test programs of R0 to R3 and the
 scripts that link, load, test and unload `rdrmnull` on an illumos machine
-(`run-r1-test.sh` runs R0 and R1, `run-r3-test.sh` runs those, the R3 test
-and `modetest`). `crates/drm/tests/edid` holds the EDID test blobs and
-`gen_edid.py`, which synthesizes them.
+(`run-r1-test.sh` runs the R0, R1 and R2 tests, `run-r3-test.sh` runs the
+R0, R1 and R3 tests and `modetest`). `crates/drm/tests/edid` holds the
+EDID test blobs and `gen_edid.py`, which synthesizes them.
+`docs/anon-fd.md` records how file descriptors are made for dma-bufs,
+sync objects and sync files.
 `packaging/devlink.tab` is the `/dev/dri` link rule for packages.
 
 ## Decisions
@@ -144,6 +189,22 @@ else the safe `ddi` crate does not wrap yet (copying ioctl structures that
 contain pointers, the `devmap_callback_ctl(9S)` callbacks, `ddi_umem`,
 `vmem` and `id_space`) is done with `ddi-sys` inside the core
 (`drm::uaccess`, `drm::gem`).
+
+**The private tier (R2).** File descriptors for dma-bufs, sync objects and
+sync files need kernel interfaces without a manual page (`falloc`, `setf`,
+`getf`, `makespecvp`, `VOP_OPEN`, ...). They come from illumos-ddi's
+private tier, the crate `illumos-kernel-private-sys` pinned to gate commit
+`cda5b9a49f`, through the safe wrapper `ddi::private::fd`; the `drm`
+crate enables the `ddi` feature `unstable-gate-cda5b9a49f` for it, and no
+private symbol is declared anywhere else. R2 also needs from illumos-ddi
+the `segmap(9E)` check (`CharDevice::segmap_check`), and, like R3, the
+`chpoll(9E)` entry point: a sync file keeps its `pollhead` in a
+`ddi::PollBox`, registered with `PollHead::registration_unchecked`
+because the file, not the device, owns it, and sync object files, which
+are always ready, register a head of the device that is never woken.
+`makespecvp` lives in the specfs module, so a driver module is linked with
+`-N fs/specfs` (`cargo xtask link` takes it from the private crate's kmod
+metadata; the test scripts and CI name it).
 
 **xtask is vendored.** `xtask/src/main.rs` and `xtask/src/kernel_check.rs`
 are copied from illumos-ddi at `eb18ab93b7`, with a header comment that
@@ -257,10 +318,13 @@ The framework can free a mapping handle after a successful `devmap(9E)`
 without calling back (a private mapping fails that way), so the reference
 is parked by handle and thread and dropped by the next entry point of the
 same thread or by `close(9E)`. A mapping keeps its file open, so objects
-cannot outlive their device. Differences from Linux: every refused
-`mmap(2)` is `ENXIO`, because `devmap_setup(9F)` reports all driver errors
-as `ENXIO` (Linux: `EINVAL` for a bad offset, `EACCES` for a file without
-a handle); mappings are cached, write-combining needs the private tier.
+cannot outlive their device. Since R2 the core refuses a mapping in `segmap(9E)`
+(`CharDevice::segmap_check`), before the devmap framework creates a
+segment, with Linux's errors: `EINVAL` for a private mapping or an offset
+that is not an object's, `EACCES` for a file without a handle. (In R1 the
+refusal came from `devmap_map(9E)`, which `devmap_setup(9F)` reports as
+`ENXIO` and which leaves the segment in the process until it exits.)
+Mappings are cached; write-combining needs the private tier.
 
 **System memory and DMA (R1).** `drm::gem::SysMem` is locked kernel memory
 from `ddi_umem_alloc(9F)` with `DDI_UMEM_SLEEP` (there is no
@@ -354,13 +418,96 @@ fails with `EINVAL` for GEM offsets; a piece split off by a partial
 remaps it. The test covers a head and a middle `munmap(2)` of a movable
 mapping with per-page patterns, before and after the pieces settle.
 
+**Fences (R2).** `drm::fence` is Linux's `dma_fence`: a fence on a
+context with a sequence number, compared wraparound-safe per context,
+signalled once with an optional error and a timestamp. Signalling never
+allocates and runs the callbacks, which are allocated ahead of time
+(`FenceCb`), outside the fence lock in the signaller's context; a callback
+may return a fence to signal next, and the loop runs such cascades
+iteratively, so the chain of a long timeline cannot overflow the kernel
+stack. `remove_callback` unlinks a callback that has not started or waits
+until it has finished. Waits take an absolute `CLOCK_MONOTONIC` deadline
+(the clock of `gethrtime(9F)`) and end with `ETIME` or `EINTR` as on
+Linux. Fence arrays (all or any, the first error) and fence chains (the
+points of a timeline) complete through such callbacks; a chain point
+drops its link to the previous one as soon as that has signalled. The
+context rules are types: signalling and dropping take `defer::Ctx`
+(`Sleepable` or `Atomic`), waiting takes `Sleepable`, and a fence whose
+last reference goes in interrupt context is parked on its domain's list
+and destroyed by a task queue, because `mutex_destroy(9F)` is only
+allowed in user or kernel context. Every lock a signal takes is created
+with the interrupt priority the driver declares
+(`Driver::fence_priority`; `rdrmnull` uses its soft interrupt's), and
+high-level priorities are refused. As on Linux, every fence must
+eventually signal: arrays and chain points are kept alive by the
+callbacks on their members, and a driver signals what is left when the
+device detaches (`rdrmnull` with `ECANCELED`, in `before_detach`). Detach
+is refused while fences remain; like every detach check, this one runs
+before anything is torn down, so a refused device keeps its display and
+its fence timeline.
+
+**Reservations and wound/wait mutexes (R2).** Every GEM object has a
+reservation (`drm::resv`, Linux's `dma_resv`) holding fences with the
+usages kernel, write, read and bookkeep. Adding a fence needs the
+reservation's wound/wait mutex (`drm::wwmutex`), and readers iterate
+under a short internal mutex (no RCU). The wound/wait mutex follows the
+wait-die rule of Linux's reservation class: a transaction waits for
+younger holders and backs off with `EDEADLK` from older ones while it
+holds other mutexes of the class, then sleeps on the contended one with
+`lock_slow` and starts over; `lock_all` implements the loop, and a host
+test has two threads lock two mutexes in opposite orders at the same
+moment.
+
+**Sync objects (R2).** `drm::syncobj` is Linux's `drm_syncobj`: a binary
+fence slot or a timeline of chain points, with Linux's point lookup and
+query. `SYNCOBJ_WAIT` and `SYNCOBJ_TIMELINE_WAIT` wait for all or any of
+several objects, for submissions (`WAIT_FOR_SUBMIT`) or only for them
+(`WAIT_AVAILABLE`), with fence callbacks and submission waiters pointing
+at one waiter on the waiting thread's stack that the cleanup removes
+before it goes. The ioctls check their arguments and answer with the
+errnos Linux does (`drm::syncobj_ioctl` lists the rules: which `pad`
+fields are checked, which unknown handles are `ENOENT` and which
+`EINVAL`). Deviations from Linux in R2, all refusals of input Linux
+ignores or cannot allocate for: `TRANSFER` refuses flags other than
+`WAIT_FOR_SUBMIT`, `PRIME_FD_TO_HANDLE` refuses non-zero `flags`, and
+arrays of handles are limited to 65536 entries (`EINVAL` above; Linux
+tries the allocation). Each file has its own handle table, freed at
+`close(9E)`. Sync object files and sync files of one device can be
+imported into another device of the same driver, which shares this code,
+if both signal their fences at the same interrupt priority
+(`Driver::fence_priority`; `ENOTSUP` otherwise, since the locks waiting
+on the fences are created with the importer's); the imported objects keep
+their device from detaching until they are gone. Files of other drivers, even ones built on this core, are `EINVAL`:
+each driver module links its own copy of the core, and sharing objects
+between copies needs the C interface of R5.
+
+**File descriptors, PRIME and sync files (R2).** A dma-buf, an exported
+sync object and a sync file are specfs files of an *anonymous minor* of
+the driver, created inside the ioctl as `pipe(2)` makes its descriptors;
+`close(9E)` of the minor drops the object, `chpoll(9E)` polls a sync
+file, `devmap(9E)` maps a dma-buf, and imports find the object by minor.
+[docs/anon-fd.md](docs/anon-fd.md) gives the design, the alternatives
+and why. `PRIME_HANDLE_TO_FD` honours `DRM_CLOEXEC` and `DRM_RDWR` and
+gives one dma-buf per object; `PRIME_FD_TO_HANDLE` returns the calling
+file's existing handle or creates one, for dma-bufs of the same device
+(`ENOTSUP` for another device of the driver, because importing across
+devices needs an attach and a scatter/gather mapping no driver has yet;
+`EINVAL` for other files). Sync files answer `SYNC_IOC_MERGE` and
+`SYNC_IOC_FILE_INFO`, dma-bufs `DMA_BUF_IOCTL_SYNC`: the start of CPU
+access waits, interruptibly, for the object's reservation (the writers
+before reading, everyone before writing), as Linux does; there is no
+cache to flush, the memory is coherent. Polling a
+dma-buf for its reservation is not implemented yet (`ENOTSUP`); nothing in
+R2 needs it, and a compositor using implicit synchronisation will.
+
+
 **Ioctl semantics.** The permission flags and the behaviour follow Linux
 (`drm_ioctls[]`, `drm_auth.c`, `drm_getcap`, `drm_setclientcap`):
 
 | Ioctl | Allowed for | Notes |
 | --- | --- | --- |
 | `VERSION` | all files, render too | strings copied up to the caller's lengths, full lengths returned |
-| `GET_CAP` | all files, render too | `TIMESTAMP_MONOTONIC` 1; `PRIME`, `SYNCOBJ`, `SYNCOBJ_TIMELINE` 0 until R2; `DUMB_BUFFER` 1 with `GEM` and `DUMB`; `VBLANK_HIGH_CRTC` and `CRTC_IN_VBLANK_EVENT` 1, `ASYNC_PAGE_FLIP` and `PAGE_FLIP_TARGET` 0 (R3); `CURSOR_WIDTH/HEIGHT`, `DUMB_PREFERRED_DEPTH`, `DUMB_PREFER_SHADOW` and `ADDFB2_MODIFIERS` from the driver's `ModeConfig`; everything else `EOPNOTSUPP` for a driver without `MODESET`, unknown `EINVAL` otherwise |
+| `GET_CAP` | all files, render too | `TIMESTAMP_MONOTONIC` 1; `PRIME` `IMPORT|EXPORT` for GEM drivers; `SYNCOBJ` and `SYNCOBJ_TIMELINE` 1 with `Features::SYNCOBJ` (and `SYNCOBJ_TIMELINE`); `DUMB_BUFFER` 1 with `GEM` and `DUMB`; `VBLANK_HIGH_CRTC` and `CRTC_IN_VBLANK_EVENT` 1, `ASYNC_PAGE_FLIP` and `PAGE_FLIP_TARGET` 0 (R3); `CURSOR_WIDTH/HEIGHT`, `DUMB_PREFERRED_DEPTH`, `DUMB_PREFER_SHADOW` and `ADDFB2_MODIFIERS` from the driver's `ModeConfig`; everything else `EOPNOTSUPP` for a driver without `MODESET`, unknown `EINVAL` otherwise |
 | `SET_CLIENT_CAP` | primary | `STEREO_3D`, `UNIVERSAL_PLANES`, `ATOMIC` (needs `Features::ATOMIC`, also sets universal planes and aspect ratio, values 0 to 2), `ASPECT_RATIO`, `WRITEBACK_CONNECTORS` (needs `ATOMIC` first), values 0 or 1; Linux's refusal of `ATOMIC` = 1 to processes named `X*` needs the process name, which no committed DDI interface provides; not implemented |
 | `GET_UNIQUE` | primary | empty until the master sets interface 1.1 or later or calls `SET_UNIQUE`, as `drmOpenByName` expects |
 | `SET_UNIQUE` | authenticated master with `PRIV_SYS_DEVICES` | only the device's own bus ID, once (`EBUSY` after) |
@@ -377,6 +524,10 @@ mapping with per-page patterns, before and after the pieces settle.
 | `MODE_MAP_DUMB` | primary | any GEM handle; unknown `ENOENT`; the object's one fake offset |
 | `MODE_DESTROY_DUMB` | primary | closes the handle; unknown `EINVAL` |
 | mode setting (R3) | see *Mode setting (R3)* | `SETCRTC`, `CURSOR`, `CURSOR2`, `SETGAMMA`, `SETPROPERTY`, `OBJ_SETPROPERTY`, `PAGE_FLIP`, `DIRTYFB`, `SETPLANE`, `ATOMIC`, `ATTACHMODE`, `DETACHMODE` need the master; the others (getters, `ADDFB`, `ADDFB2`, `RMFB`, blobs, `WAIT_VBLANK`, CRTC sequences, `MODESET_CTL`) any primary file; none is allowed on render nodes (`EACCES`), as in Linux's `drm_ioctls[]`; `EOPNOTSUPP` for a device without `Driver::kms` |
+| `PRIME_HANDLE_TO_FD` | all files, render too | see *File descriptors, PRIME and sync files*; flags other than `DRM_CLOEXEC`, `DRM_RDWR` `EINVAL`; unknown handle `ENOENT`; `ENOSYS` without `GEM` |
+| `PRIME_FD_TO_HANDLE` | all files, render too | same device only; `flags` must be 0 |
+| `SYNCOBJ_CREATE`, `DESTROY`, `HANDLE_TO_FD`, `FD_TO_HANDLE`, `WAIT`, `RESET`, `SIGNAL` | all files, render too | `EOPNOTSUPP` without `Features::SYNCOBJ`; Linux's argument checks and errnos (`drm::syncobj_ioctl`) |
+| `SYNCOBJ_TIMELINE_WAIT`, `QUERY`, `TRANSFER`, `TIMELINE_SIGNAL` | all files, render too | also `EOPNOTSUPP` without `Features::SYNCOBJ_TIMELINE` |
 | driver range `0x40`-`0x9f` | per `Driver::IOCTLS` | matched on the whole command value; the core checks the flags, then calls `Driver::ioctl` |
 
 The first file opened on a card node while the device has no master
@@ -407,8 +558,21 @@ never drops a reference with one held; `crates/drm/src/gem.rs` and
 `crates/drm/src/objects.rs` give the argument, the host tests drive the
 handle and name rules and the reference counting from eight threads, and
 `tools/test/drm_r1_test.c` runs eight threads of GEM ioctls and mappings
-against the kernel. Mode setting has two more locks, the mode-setting lock
-and the event lock, described below.
+against the kernel. R2's state has its own locks, taken inside, never
+around, the GEM and device locks: a file's sync object table and the
+anonymous-file table (leaves), sync objects (whose chain points are built
+under their lock), reservations (a wound/wait mutex, then an internal
+mutex), and each fence's state mutex, taken from interrupt context at the
+domain's priority. Fence callbacks run with no fence lock held. A file's
+clone id is freed only after its GEM and sync object tables are gone, so
+a concurrent open that reuses the id cannot find them (the R0 stress test
+caught that race when R2 made `close(9E)` longer). The host tests drive
+signalling against callback registration and removal, sync object waits
+against submissions, and wound/wait locking from eight threads;
+`tools/test/drm_r2_test.c` runs eight threads of sync object, fence, sync
+file and PRIME round trips against the kernel.
+Mode setting has two more locks, the mode-setting lock and the event
+lock, described below.
 
 **Mode setting (R3): structure.** KMS lives in `crates/drm/src/kms/`:
 `modes` (the mode type, its uAPI conversion and validation, the VESA DMT
@@ -492,8 +656,8 @@ from the device-wide bounds (its per-file bounds still apply), so that
 other clients cannot starve the display server. One `MODE_ATOMIC` names at
 most 1024 objects and 16384 properties (`EINVAL`). The fence properties
 `IN_FENCE_FD` and `OUT_FENCE_PTR` exist so that their IDs are known, but
-no object carries them and setting them is `EINVAL` until fences exist
-(R2). Not implemented: leases, asynchronous and targeted page flips, the
+no object carries them and setting them is `EINVAL`; connecting them to
+R2's sync files is open. Not implemented: leases, asynchronous and targeted page flips, the
 atomic colour-management properties (legacy `GETGAMMA`/`SETGAMMA` work),
 `VRR_ENABLED`, writeback connectors, rotation, `zpos`, `TILE`, damage
 clips, and `DIRTYFB` (`ENOSYS`, as Linux answers for a driver without
@@ -502,7 +666,8 @@ damage tracking). The event lock has no interrupt priority, so
 level-0 periodic context); a driver with a hardware vblank interrupt needs a
 priority-aware lock and an `Atomic` entry point, which come with the first
 such driver. `detach` checks everything before it tears anything down
-(open files, framebuffers still referenced, GEM objects left, after the
+(open files, framebuffers still referenced, GEM objects left, since R2
+fences and sync objects alive, after the
 driver's `before_detach` has dropped what it holds for itself); a refused
 device keeps its mode-setting state and its vblank source and works on.
 Only when every check has passed does the driver stop its sources
@@ -527,22 +692,23 @@ Compiling works on any host; linking needs the illumos linker:
 
 ```sh
 cargo xtask build rdrmnull           # target/x86_64-illumos-kmod/release/rdrmnull.a
-ld -ztype=kmod -z allextract rdrmnull.a -o rdrmnull    # on illumos, or: cargo xtask link rdrmnull
+ld -ztype=kmod -N fs/specfs -z allextract rdrmnull.a -o rdrmnull    # on illumos, or: cargo xtask link rdrmnull
 ```
 
 `tools/test/run-r1-test.sh` does the rest on a disposable illumos VM, as
 root, in a directory with `rdrmnull.a`, `rdrmnull.conf`,
-`tools/test/drm_r0_test.c`, `tools/test/drm_r1_test.c` and the patched
-headers as `drm/`: it records the driver files in `/etc` and the `/devices`
-tree, links the module, checks that the running kernel exports every
-symbol the module imports, builds the test programs (64-bit with libdrm and
-libkstat, and 32-bit probes), installs the module under `/usr/kernel/drv`,
-runs `add_drv -m '* 0666 root sys' rdrmnull`, runs the R0 and R1 tests,
-records the `gem` kstat and the device's vmem arenas, checks that the
-module refuses to unload while a file is open and unloads once it is
-closed, removes everything again with `rem_drv -C`, and fails unless `/etc`
-and `/devices` are as before. `tools/test/run-r0-test.sh` runs the R0 test
-alone.
+`tools/test/drm_r0_test.c`, `tools/test/drm_r1_test.c`,
+`tools/test/drm_r2_test.c` and the patched headers as `drm/`: it records
+the driver files in `/etc` and the `/devices` tree, links the module,
+checks that the running kernel exports every symbol the module imports,
+builds the test programs (64-bit with libdrm and libkstat, and 32-bit
+probes), installs the module under `/usr/kernel/drv`, runs
+`add_drv -m '* 0666 root sys' rdrmnull`, runs the R0, R1 and R2 tests,
+records the `gem` and `sync` kstats and the device's vmem arenas, checks
+that the module refuses to unload while a file is open and unloads once
+it is closed, removes everything again with `rem_drv -C`, and fails
+unless `/etc` and `/devices` are as before. `tools/test/run-r0-test.sh`
+runs the R0 test alone.
 
 ## Checks
 
@@ -552,7 +718,8 @@ ILLUMOS_GATE=~/illumos-gate tools/uapi/generate.sh     # regenerate (bindgen)
 gcc -m64 -I<include/drm> -o drm_layout tools/uapi/drm_layout.c && ./drm_layout > out   # on illumos
 cargo xtask uapi-check out
 
-# DDI layouts and symbols of the pinned ddi-sys against a running kernel
+# DDI layouts and symbols of the pinned ddi-sys and illumos-kernel-private-sys
+# against a running kernel
 cargo xtask kernel-check --emit | ssh root@host 'mdb -k 2>&1' | cargo xtask kernel-check --verify -
 ```
 

@@ -67,6 +67,27 @@
 //!   stand-in for a buffer a real driver still uses. `detach(9E)` is then
 //!   refused, and the test checks that the device still works.
 //!
+//! Since milestone R2 it has a test timeline: a fence context of the
+//! device whose fences are signalled from a soft interrupt, as a GPU
+//! driver signals them from its completion interrupt. Two more test-only
+//! ioctls use it (`tools/test/drm_r2_test.c`):
+//!
+//! * `RDRMNULL_IOCTL_FENCE` creates a fence on the timeline that signals
+//!   after `delay_ms` milliseconds (optionally with an error), and puts it
+//!   into a sync object at a point, into a buffer's reservation (as a
+//!   writer or a reader), and/or into a new sync file whose descriptor it
+//!   returns. A `timeout(9F)` callback triggers the soft interrupt, whose
+//!   handler signals every fence that is due; the fence's callbacks
+//!   (`pollwakeup(9F)` of a sync file, the wake-up of a sync object wait)
+//!   run there, in interrupt context.
+//! * `RDRMNULL_IOCTL_BO_WAIT` waits for a buffer's reservation, as a
+//!   driver's wait ioctl (virtio-gpu's `WAIT`) does.
+//!
+//! A detach attempt cancels the timers and signals the fences that are
+//! left with `ECANCELED` (`before_detach`), because every fence must
+//! signal. The timeline itself stays connected until the detach is sure to
+//! complete (`before_teardown`), so a refused detach leaves it working.
+//!
 //! It is the kernel module the core is tested with, and the template for a
 //! real driver: implement [`drm::Driver`], use [`drm::Device`] as the
 //! instance, and map minor numbers with [`drm::minor::instance_of_minor`].
@@ -76,16 +97,22 @@ extern crate alloc;
 
 mod kms;
 
+use alloc::boxed::Box;
+
 use core::ffi::{CStr, c_int, c_void};
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 use ddi::DmaAttr;
 use ddi::prelude::*;
 use ddi::sys;
+use drm::defer::Ctx;
+use drm::fence::Fence;
 use drm::gem::{Fault, GemCore, GemDma, GemObject, GemRef, Mapping, SysMem, UmemCookie};
 use drm::ioctl::DriverIoctl;
+use drm::kvec::KVec;
 use drm::minor::CloneId;
+use drm::resv::Usage;
 use drm::state::Perm;
 use drm::uaccess::{Plain, UserArg};
 use drm::{Features, ModeConfig};
@@ -149,6 +176,59 @@ pub struct Hold {
     pub hold: u32,
 }
 
+/// `RDRMNULL_IOCTL_FENCE`: see the crate documentation.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NullFence {
+    /// Milliseconds until the fence signals, 0 to 10000.
+    pub delay_ms: u32,
+    /// `FENCE_*` flags.
+    pub flags: u32,
+    /// With [`FENCE_SYNCOBJ`]: the sync object.
+    pub syncobj: u32,
+    /// With [`FENCE_BO_WRITE`] or [`FENCE_BO_READ`]: the buffer handle.
+    pub bo: u32,
+    /// With [`FENCE_SYNCOBJ`]: the timeline point, 0 to replace the fence.
+    pub point: u64,
+    /// With [`FENCE_SYNC_FILE`]: the new sync file descriptor (out).
+    pub fd: i32,
+    /// 0, or a positive errno the fence signals with.
+    pub error: i32,
+    /// The fence's sequence number on the timeline (out).
+    pub seqno: u64,
+}
+
+/// `RDRMNULL_IOCTL_BO_WAIT`: waits for a buffer's reservation.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BoWait {
+    /// The buffer handle.
+    pub handle: u32,
+    /// [`BO_WAIT_WRITERS`]: only kernel and write fences (before reading);
+    /// otherwise all but bookkeeping fences (before writing).
+    pub flags: u32,
+    /// Relative timeout in nanoseconds; negative waits for ever, 0 polls.
+    pub timeout_ns: i64,
+}
+
+/// Put the fence into the sync object `syncobj` at `point`.
+pub const FENCE_SYNCOBJ: u32 = 1 << 0;
+/// Add the fence to the reservation of `bo` as a writer.
+pub const FENCE_BO_WRITE: u32 = 1 << 1;
+/// Add the fence to the reservation of `bo` as a reader.
+pub const FENCE_BO_READ: u32 = 1 << 2;
+/// Return a sync file of the fence in `fd`.
+pub const FENCE_SYNC_FILE: u32 = 1 << 3;
+const FENCE_FLAGS: u32 = FENCE_SYNCOBJ | FENCE_BO_WRITE | FENCE_BO_READ | FENCE_SYNC_FILE;
+/// Wait only for the writers of the buffer.
+pub const BO_WAIT_WRITERS: u32 = 1 << 0;
+
+// SAFETY: integer fields only, no padding.
+unsafe impl Plain for NullFence {}
+// SAFETY: as above.
+unsafe impl Plain for BoWait {}
+const _: () = assert!(size_of::<NullFence>() == 40 && size_of::<BoWait>() == 16);
+
 // SAFETY: integer fields only, no padding.
 unsafe impl Plain for CreateMovable {}
 // SAFETY: as above.
@@ -178,10 +258,18 @@ pub const RDRMNULL_IOCTL_PUT_LATER: u32 = ioc::drm_iow::<PutLater>(0x42);
 pub const RDRMNULL_IOCTL_SCANOUT: u32 = ioc::drm_ior::<kms::ScanoutInfo>(0x43);
 /// `DRM_IOW(DRM_COMMAND_BASE + 4, struct rdrmnull_hold)`.
 pub const RDRMNULL_IOCTL_HOLD: u32 = ioc::drm_iow::<Hold>(0x44);
+/// `DRM_IOWR(DRM_COMMAND_BASE + 5, struct rdrmnull_fence)`.
+pub const RDRMNULL_IOCTL_FENCE: u32 = ioc::drm_iowr::<NullFence>(0x45);
+/// `DRM_IOW(DRM_COMMAND_BASE + 6, struct rdrmnull_bo_wait)`.
+pub const RDRMNULL_IOCTL_BO_WAIT: u32 = ioc::drm_iow::<BoWait>(0x46);
 
 // SAFETY: integer fields only, no padding (asserted below).
 unsafe impl Plain for kms::ScanoutInfo {}
 const _: () = assert!(size_of::<kms::ScanoutInfo>() == 56);
+
+/// Render nodes too: the R2 test runs its sync object and PRIME steps on
+/// both kinds of node.
+const TEST_ONLY_RENDER: Perm = Perm { auth: false, master: false, root_only: false, render_allow: true };
 
 /// Primary node, no authentication: the tests run as root on `card0`.
 const TEST_ONLY: Perm = Perm { auth: false, master: false, root_only: false, render_allow: false };
@@ -317,6 +405,71 @@ impl GemObject for NullObject {
     }
 }
 
+// --- the test timeline ------------------------------------------------------------
+
+/// A fence of the test timeline and when it is due.
+struct Due {
+    fence: Fence,
+    at: i64,
+}
+
+/// The state of the soft interrupt that signals the test timeline.
+pub struct Timeline {
+    /// Fences waiting for their time; taken by the soft interrupt handler,
+    /// so the mutex has its priority.
+    due: Mutex<KVec<Due>>,
+    /// Fences signalled from the soft interrupt so far.
+    signaled: AtomicU64,
+}
+
+impl SoftInterruptHandler for Timeline {
+    /// Signals every fence that is due, one at a time, without allocating;
+    /// callbacks run here, in interrupt context.
+    fn handle(&self, ctx: &Atomic) -> Claimed {
+        let now = HrTime::now().as_nanos();
+        let mut any = false;
+        loop {
+            let d = {
+                let mut l = self.due.lock();
+                let i = l.iter().position(|d| d.at <= now);
+                i.and_then(|i| l.swap_remove(i))
+            };
+            let Some(d) = d else { break };
+            d.fence.signal(Ctx::Atomic(ctx));
+            d.fence.put(Ctx::Atomic(ctx));
+            self.signaled.fetch_add(1, Ordering::Relaxed);
+            any = true;
+        }
+        if any { Claimed::Yes } else { Claimed::No }
+    }
+}
+
+/// The soft interrupt of each device, by instance, for the timer
+/// callbacks: a timer outlives no device (before_detach cancels them), but
+/// the slot also lets a refused detach reconnect the timeline.
+static SOFTS: [AtomicPtr<SoftInterrupt<Timeline>>; 64] = [const { AtomicPtr::new(ptr::null_mut()) }; 64];
+
+/// The timer of a test fence: a boxed closure (the module's global
+/// allocator, `KM_SLEEP` in the ioctl) naming its device's instance.
+type FenceTimer = Timeout<Box<dyn FnOnce(&Atomic) + Send>>;
+
+/// The timer callback (a callout): triggers the soft interrupt of device
+/// `index` only, whose handler finds the fences that are due.
+fn fence_timer(index: usize) {
+    let Some(s) = SOFTS.get(index) else { return };
+    let p = s.load(Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: set in attach from the driver's boxed soft interrupt and
+        // cleared in before_detach after every timer is cancelled.
+        let _ = unsafe { &*p }.trigger();
+    }
+}
+
+/// Logs how many pending test fences a detach signalled with `ECANCELED`.
+fn dev_note_cancelled(index: usize, n: u32) {
+    ddi::knote!("rdrmnull{index}: detach cancelled {n} pending test fences (ECANCELED)");
+}
+
 // --- the driver -------------------------------------------------------------------
 
 /// The reference `RDRMNULL_IOCTL_PUT_LATER` hands to its timer.
@@ -423,6 +576,15 @@ pub struct NullDriver {
     /// The reference `RDRMNULL_IOCTL_HOLD` keeps; not dropped by
     /// `before_detach`, so that the detach is refused while it exists.
     held: Mutex<Option<GemRef<NullObject>>>,
+    /// The soft interrupt that signals the test timeline, boxed so that
+    /// the timers can point at it.
+    soft: KBox<SoftInterrupt<Timeline>>,
+    /// The test timeline's fence context and next sequence number.
+    context: AtomicU64,
+    seqno: AtomicU64,
+    /// The timers of pending test fences.
+    fence_timers: Mutex<KVec<FenceTimer>>,
+    index: usize,
     dma: DmaDrill,
     /// The DMA attributes of the drill, from [`drill_dma_attr`].
     dma_attr: DmaAttr,
@@ -567,15 +729,152 @@ impl NullDriver {
     }
 }
 
+impl NullDriver {
+    fn fence(
+        &self,
+        dev: &drm::Device<NullDriver>,
+        file: CloneId,
+        arg: &IoctlArg<'_>,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        let mut a = UserArg::<NullFence>::read(arg)?;
+        let v = *a.get();
+        if v.flags & !FENCE_FLAGS != 0
+            || v.delay_ms > 10_000
+            || v.error < 0
+            || (v.flags & FENCE_BO_WRITE != 0 && v.flags & FENCE_BO_READ != 0)
+        {
+            return Err(Errno::EINVAL);
+        }
+        let err = if v.error != 0 { Some(Errno::new(v.error).ok_or(Errno::EINVAL)?) } else { None };
+        let sync = dev.sync();
+        let domain = sync.domain();
+        if self.context.load(Ordering::Acquire) == 0 {
+            let _ = self.context.compare_exchange(0, domain.alloc_contexts(1), Ordering::AcqRel, Ordering::Acquire);
+        }
+        // Everything that can fail on the caller's input is checked before
+        // the fence exists.
+        let so = if v.flags & FENCE_SYNCOBJ != 0 { Some(sync.syncobj(file, v.syncobj)?) } else { None };
+        let bo = if v.flags & (FENCE_BO_WRITE | FENCE_BO_READ) != 0 {
+            Some(dev.gem().ok_or(Errno::ENXIO)?.lookup(file, v.bo)?)
+        } else {
+            None
+        };
+        let seqno = self.seqno.fetch_add(1, Ordering::AcqRel) + 1;
+        let f = Fence::new(domain, self.context.load(Ordering::Acquire), seqno, ctx)?;
+        if let Some(e) = err {
+            f.set_error(e);
+        }
+        let r = self.fence_attach(dev, &f, so, bo, &v, &mut a, arg, ctx);
+        // Arm the fence whatever happened, so that it signals.
+        let at = HrTime::now().as_nanos().saturating_add(i64::from(v.delay_ms) * 1_000_000);
+        let pushed = self.soft.state().due.lock().push(Due { fence: f.clone(), at }, ctx);
+        if pushed.is_err() {
+            f.signal(Ctx::Sleep(ctx));
+        }
+        f.put(Ctx::Sleep(ctx));
+        // timeout(9F) counts from the current tick, so it can fire up to one
+        // tick before `delay_ms` has passed on the monotonic clock; one tick
+        // more makes sure the fence is due when the soft interrupt runs.
+        let tick_us = Ticks::from_micros(1).as_micros();
+        let after = Ticks::from_micros(u64::from(v.delay_ms) * 1000 + tick_us);
+        let index = self.index;
+        let f: Box<dyn FnOnce(&Atomic) + Send> = Box::new(move |_: &Atomic| fence_timer(index));
+        let t = Timeout::new(after, f, ctx);
+        let old = {
+            let mut ts = self.fence_timers.lock();
+            // Timers that have fired are only freed here.
+            let mut done = KVec::new();
+            while let Some(i) = ts.iter().position(Timeout::has_fired) {
+                if let Some(t) = ts.swap_remove(i) {
+                    let _ = done.push(t, ctx);
+                }
+            }
+            ts.push(t, ctx)?;
+            done
+        };
+        drop(old);
+        r?;
+        // SAFETY: a field assignment.
+        unsafe { a.get_mut() }.seqno = seqno;
+        a.write(arg)
+    }
+
+    #[allow(clippy::too_many_arguments, reason = "one step of the fence ioctl")]
+    fn fence_attach(
+        &self,
+        dev: &drm::Device<NullDriver>,
+        f: &Fence,
+        so: Option<drm::syncobj::Syncobj>,
+        bo: Option<GemRef<NullObject>>,
+        v: &NullFence,
+        a: &mut UserArg<NullFence>,
+        arg: &IoctlArg<'_>,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        let mut r = Ok(());
+        if let Some(s) = so {
+            r = s.add_point(f.clone(), v.point, ctx);
+        }
+        if let Some(b) = bo {
+            if r.is_ok() {
+                let usage = if v.flags & FENCE_BO_WRITE != 0 { Usage::Write } else { Usage::Read };
+                let g = b.resv().lock().lock_plain(ctx);
+                r = b.resv().add_fence(&g, f.clone(), usage, ctx);
+            }
+            b.put(ctx);
+        }
+        if r.is_ok() && v.flags & FENCE_SYNC_FILE != 0 {
+            r = dev.sync().export_sync_file(
+                f.clone(),
+                b"rdrmnull",
+                arg,
+                |fd| {
+                    // SAFETY: a field assignment.
+                    unsafe { a.get_mut() }.fd = fd;
+                    a.write(arg)
+                },
+                ctx,
+            );
+        }
+        r
+    }
+
+    fn bo_wait(
+        &self,
+        dev: &drm::Device<NullDriver>,
+        file: CloneId,
+        arg: &IoctlArg<'_>,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        let a = UserArg::<BoWait>::read(arg)?;
+        let v = *a.get();
+        if v.flags & !BO_WAIT_WRITERS != 0 {
+            return Err(Errno::EINVAL);
+        }
+        let b = dev.gem().ok_or(Errno::ENXIO)?.lookup(file, v.handle)?;
+        let usage = if v.flags & BO_WAIT_WRITERS != 0 { Usage::Write } else { Usage::Read };
+        let deadline = (v.timeout_ns >= 0).then(|| HrTime::now().as_nanos().saturating_add(v.timeout_ns));
+        let r = b.resv().wait(usage, true, deadline, ctx);
+        b.put(ctx);
+        r
+    }
+}
+
 impl drm::Driver for NullDriver {
     const NAME: &'static CStr = c"rdrmnull";
     const DATE: &'static CStr = c"20260928";
-    const DESC: &'static CStr = c"Rust DRM null driver (illumos-drm R1)";
+    const DESC: &'static CStr = c"Rust DRM null driver (illumos-drm R2)";
     const MAJOR: i32 = 1;
     const MINOR: i32 = 0;
     const PATCHLEVEL: i32 = 0;
-    const FEATURES: Features =
-        Features::MODESET.union(Features::ATOMIC).union(Features::RENDER).union(Features::GEM).union(Features::DUMB);
+    const FEATURES: Features = Features::MODESET
+        .union(Features::ATOMIC)
+        .union(Features::RENDER)
+        .union(Features::GEM)
+        .union(Features::DUMB)
+        .union(Features::SYNCOBJ)
+        .union(Features::SYNCOBJ_TIMELINE);
     const MODE_CONFIG: ModeConfig =
         ModeConfig { preferred_depth: 24, prefer_shadow: true, fb_modifiers: true, ..ModeConfig::DEFAULT };
     // Small limits, so that the tests reach them without exhausting the
@@ -589,6 +888,8 @@ impl drm::Driver for NullDriver {
         DriverIoctl { cmd: RDRMNULL_IOCTL_PUT_LATER, perm: TEST_ONLY },
         DriverIoctl { cmd: RDRMNULL_IOCTL_SCANOUT, perm: TEST_ONLY },
         DriverIoctl { cmd: RDRMNULL_IOCTL_HOLD, perm: TEST_ONLY },
+        DriverIoctl { cmd: RDRMNULL_IOCTL_FENCE, perm: TEST_ONLY_RENDER },
+        DriverIoctl { cmd: RDRMNULL_IOCTL_BO_WAIT, perm: TEST_ONLY_RENDER },
     ];
     type Object = NullObject;
 
@@ -613,6 +914,8 @@ impl drm::Driver for NullDriver {
                 *unsafe { a.get_mut() } = info;
                 a.write(arg)
             }
+            RDRMNULL_IOCTL_FENCE => self.fence(dev, file, arg, ctx),
+            RDRMNULL_IOCTL_BO_WAIT => self.bo_wait(dev, file, arg, ctx),
             _ => Err(Errno::ENOTTY),
         }
     }
@@ -636,10 +939,32 @@ impl drm::Driver for NullDriver {
         Some(&self.kms)
     }
 
+    fn fence_priority(&self) -> Option<IntrPriority> {
+        Some(self.soft.priority())
+    }
+
     fn before_detach(&self, ctx: &Sleepable) {
-        // Only references the driver holds for itself go here; the display
-        // keeps running, because the detach may still be refused. The
-        // reference of RDRMNULL_IOCTL_HOLD stays, so that it is.
+        // Only references and work the driver holds for itself go here; the
+        // display and the test timeline keep running, because the detach
+        // may still be refused. The reference of RDRMNULL_IOCTL_HOLD stays,
+        // so that it is.
+        // Cancel the fence timers and signal the fences that are left: every
+        // fence must signal, and pending ones would keep the fence domain
+        // busy.
+        let ts = core::mem::take(&mut *self.fence_timers.lock());
+        drop(ts);
+        let mut cancelled = 0u32;
+        loop {
+            let d = self.soft.state().due.lock().swap_remove(0);
+            let Some(d) = d else { break };
+            d.fence.signal_with_error(Errno::ECANCELED, Ctx::Sleep(ctx));
+            d.fence.put(Ctx::Sleep(ctx));
+            cancelled += 1;
+        }
+        if cancelled != 0 {
+            // The kernel test looks for this line.
+            dev_note_cancelled(self.index, cancelled);
+        }
         // Cancel or finish the timer, then drop a reference it never got to.
         let t = self.timer.lock().take();
         drop(t);
@@ -651,22 +976,56 @@ impl drm::Driver for NullDriver {
 
     fn before_teardown(&self, _ctx: &Sleepable) {
         self.kms.shutdown();
+        // The detach completes: no timer may reach the soft interrupt any
+        // more, which goes with the driver.
+        if let Some(s) = SOFTS.get(self.index) {
+            s.store(ptr::null_mut(), Ordering::Release);
+        }
     }
 }
 
 impl Driver for RDrmNull {
     type Instance = drm::Device<NullDriver>;
-    const LINKINFO: &'static CStr = c"Rust DRM null driver r1";
+    const LINKINFO: &'static CStr = c"Rust DRM null driver r2";
 
     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
         let dma = DmaDrill::from_conf(&node, ctx)?;
         let dma_attr = drill_dma_attr(&node, dma, ctx)?;
         let kms = kms::NullKms::new(ctx).map_err(|_| DdiError)?;
-        let dev = drm::Device::attach(
-            node,
-            NullDriver { kms, timer: Mutex::new(None), held: Mutex::new(None), dma, dma_attr },
+        let index = usize::try_from(node.instance().0).map_err(|_| DdiError)?;
+        let slot = SOFTS.get(index).ok_or(DdiError)?;
+        let soft = SoftInterrupt::add(
+            &node,
+            SoftInterrupt::<Timeline>::DEFAULT_PRIORITY,
+            |pri| Timeline { due: Mutex::with_priority(KVec::new(), pri), signaled: AtomicU64::new(0) },
             ctx,
-        )?;
+        )
+        .map_err(|e| {
+            node.warn(format_args!("cannot add the timeline soft interrupt: {e:?}"));
+            DdiError
+        })?;
+        let soft = KBox::new(soft, ctx);
+        let p = &*soft as *const SoftInterrupt<Timeline> as *mut SoftInterrupt<Timeline>;
+        let driver = NullDriver {
+            kms,
+            timer: Mutex::new(None),
+            held: Mutex::new(None),
+            soft,
+            context: AtomicU64::new(0),
+            seqno: AtomicU64::new(0),
+            fence_timers: Mutex::new(KVec::new()),
+            index,
+            dma,
+            dma_attr,
+        };
+        slot.store(p, Ordering::Release);
+        let dev = match drm::Device::attach(node, driver, ctx) {
+            Ok(dev) => dev,
+            Err(e) => {
+                slot.store(ptr::null_mut(), Ordering::Release);
+                return Err(e);
+            }
+        };
         if let Some(k) = dev.kms() {
             dev.driver().kms.set_vblank(k.vblank_handle());
         }

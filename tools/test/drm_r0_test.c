@@ -144,9 +144,10 @@ test_caps(int fd, const char *node)
 {
 	static const struct { uint64_t cap; uint64_t want; const char *name; } caps[] = {
 		{ DRM_CAP_TIMESTAMP_MONOTONIC, 1, "TIMESTAMP_MONOTONIC" },
-		{ DRM_CAP_PRIME, 0, "PRIME" },
-		{ DRM_CAP_SYNCOBJ, 0, "SYNCOBJ" },
-		{ DRM_CAP_SYNCOBJ_TIMELINE, 0, "SYNCOBJ_TIMELINE" },
+		/* PRIME import and export and sync objects exist since R2. */
+		{ DRM_CAP_PRIME, 3, "PRIME" },
+		{ DRM_CAP_SYNCOBJ, 1, "SYNCOBJ" },
+		{ DRM_CAP_SYNCOBJ_TIMELINE, 1, "SYNCOBJ_TIMELINE" },
 		{ DRM_CAP_CURSOR_WIDTH, 64, "CURSOR_WIDTH" },
 		{ DRM_CAP_CURSOR_HEIGHT, 64, "CURSOR_HEIGHT" },
 		/* ADDFB2 with modifiers and vblank events exist since R3. */
