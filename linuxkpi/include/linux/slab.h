@@ -12,7 +12,12 @@
  * may fail; with it, KM_SLEEP never fails. kmalloc(0) returns
  * ZERO_SIZE_PTR, as on Linux. Slab caches are illumos kmem caches
  * (constructors are run per allocation, not per slab, which is what
- * Linux's constructor contract allows). illumos' own kmem_cache_*()
+ * Linux's constructor contract allows). That is also safe for
+ * SLAB_TYPESAFE_BY_RCU caches, where Linux constructs once so that RCU
+ * readers of a freed and reused object never see it re-initialised: the
+ * layer returns such objects to kmem only a grace period after
+ * kmem_cache_free(), so no reader can still see an object when it is
+ * allocated and constructed again. illumos' own kmem_cache_*()
  * functions are renamed by function-like macros here; layer sources call
  * them as (kmem_cache_create)(...) with the kmem_cache_t type.
  */

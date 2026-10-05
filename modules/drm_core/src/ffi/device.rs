@@ -246,6 +246,27 @@ pub unsafe extern "C" fn drm_dev_unregister(dev: *mut f::drm_device) -> i32 {
     0
 }
 
+/// Linux's `drm_dev_unplug` before a driver tears itself down: refuses
+/// with `-EBUSY` while user space holds the device (open files, user
+/// mappings), else takes the device out of the device table, so that no
+/// new open reaches it, and returns 0. The device stays registered for the
+/// driver's own calls until `drm_dev_unregister`. 0 for a device that is
+/// not registered or unplugged already. Thread context (detach(9E)).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_dev_illumos_unplug(dev: *mut f::drm_device) -> i32 {
+    // SAFETY: the caller holds a reference to its device.
+    let Some(core) = (unsafe { DevCore::of(dev) }) else { return neg(Errno::EINVAL) };
+    let Some(d) = core.device() else { return 0 };
+    // Out of the table first, so that no open slips in between the check
+    // and the withdrawal; back in if the check refuses.
+    crate::table::withdraw(d.index());
+    if d.user_check().is_err() {
+        crate::table::publish(&d);
+        return neg(Errno::EBUSY);
+    }
+    0
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn drm_dev_get(dev: *mut f::drm_device) {
     // SAFETY: the caller holds a reference.

@@ -16,7 +16,8 @@
  * (folio_nr_pages() == 1). page_to_pfn() returns the kernel virtual frame
  * number, which is unique and orders pages by address but is not a
  * physical frame number; nothing in the layer maps by pfn except
- * vmap_pfn(), which takes real frames.
+ * vmap_pfn(), which takes real frames (<linux/mm.h> lists i915's
+ * callers and why none needs a physical frame).
  */
 #ifndef _LINUX_MM_TYPES_H
 #define	_LINUX_MM_TYPES_H

@@ -23,3 +23,9 @@ $s --disable DRM_XE --disable DRM_AMDGPU --disable HSA_AMD --disable DRM_RADEON 
    --disable MMU_NOTIFIER --disable KVM --disable DEBUG_INFO \
    --disable LOCKDEP --disable PROVE_LOCKING --disable DEBUG_LOCK_ALLOC
 make -s LLVM=1 ARCH=x86_64 olddefconfig
+# The committed copy keeps only the settings (no Kconfig help or menu text):
+{
+	echo "# Linux v7.2 configuration of the R5c headless i915 build (make-config.sh)."
+	echo "# Only the CONFIG_ settings are kept (no Kconfig text)."
+	grep -E '^(CONFIG_|# CONFIG_.* is not set$)' .config
+} > linux-v7.2-r5c.config

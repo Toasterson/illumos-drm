@@ -40,11 +40,21 @@
 
 #include "lkpi_internal.h"
 
-/* A copy of a driver table with the trampoline in its ioctl entries. */
+/*
+ * A copy of a driver table per DRM device, with the trampoline in its
+ * ioctl entries and the layer's release, and the device's detach state.
+ * It lives until the device's release has run; the next copy (or unload)
+ * frees released ones.
+ */
 struct lkpi_drm_driver {
 	struct drm_driver drv;
 	struct list_head link;
 	const struct drm_ioctl_desc *orig;
+	void (*orig_release)(struct drm_device *dev);
+	struct device *parent;		/* referenced until release */
+	struct drm_device *drm;
+	bool stuck;			/* the core refused to unregister */
+	bool released;
 	int num_ioctls;
 	struct drm_ioctl_desc table[];
 };
@@ -70,8 +80,49 @@ lkpi_ioctl_trampoline(struct drm_device *dev, void *data,
 	return (-EINVAL);
 }
 
+/*
+ * The device's release (its last drm_dev_put()): the driver's release,
+ * then the reference on the parent device the allocation took.
+ */
+static void
+lkpi_drm_release(struct drm_device *dev)
+{
+	struct lkpi_drm_driver *ld =
+	    container_of(dev->driver, struct lkpi_drm_driver, drv);
+
+	if (ld->orig_release != NULL)
+		ld->orig_release(dev);
+	put_device(ld->parent);
+	mutex_enter(&lkpi_drm_lock);
+	ld->released = true;
+	mutex_exit(&lkpi_drm_lock);
+}
+
+/* Frees the copies of released devices; lkpi_drm_lock held. */
+static void
+driver_reap_locked(void)
+{
+	struct lkpi_drm_driver *ld, *n;
+
+	list_for_each_entry_safe(ld, n, &lkpi_drm_drivers, link) {
+		if (ld->released) {
+			list_del(&ld->link);
+			kfree(ld);
+		}
+	}
+}
+
+static void
+driver_free(struct lkpi_drm_driver *ld)
+{
+	mutex_enter(&lkpi_drm_lock);
+	list_del(&ld->link);
+	mutex_exit(&lkpi_drm_lock);
+	kfree(ld);
+}
+
 static struct lkpi_drm_driver *
-driver_copy(const struct drm_driver *driver)
+driver_copy(const struct drm_driver *driver, struct device *parent)
 {
 	struct lkpi_drm_driver *ld;
 	int i, n = driver->num_ioctls;
@@ -80,6 +131,9 @@ driver_copy(const struct drm_driver *driver)
 	if (ld == NULL)
 		return (NULL);
 	ld->drv = *driver;
+	ld->orig_release = driver->release;
+	ld->drv.release = lkpi_drm_release;
+	ld->parent = parent;
 	ld->orig = driver->ioctls;
 	ld->num_ioctls = n;
 	for (i = 0; i < n; i++) {
@@ -89,15 +143,85 @@ driver_copy(const struct drm_driver *driver)
 	}
 	ld->drv.ioctls = n > 0 ? ld->table : NULL;
 	mutex_enter(&lkpi_drm_lock);
+	driver_reap_locked();
 	list_add(&ld->link, &lkpi_drm_drivers);
 	mutex_exit(&lkpi_drm_lock);
 	return (ld);
 }
 
+/* The live copy of the DRM device whose parent is `parent`, or NULL. */
+static struct lkpi_drm_driver *
+driver_of_parent(struct device *parent)
+{
+	struct lkpi_drm_driver *ld, *found = NULL;
+
+	mutex_enter(&lkpi_drm_lock);
+	list_for_each_entry(ld, &lkpi_drm_drivers, link) {
+		if (ld->parent == parent && ld->drm != NULL && !ld->released) {
+			found = ld;
+			break;
+		}
+	}
+	mutex_exit(&lkpi_drm_lock);
+	return (found);
+}
+
+/*
+ * The devres action of devm_drm_dev_alloc(), after the driver's remove():
+ * the driver has dropped its GEM objects, so the core can unregister the
+ * device now; then the driver's reference goes. If the core refuses
+ * (fences or objects remain), the device stays registered and referenced,
+ * unreachable for new opens (drm_dev_unplug()), and detach fails
+ * (lkpi_drm_detach_end()), so that the driver's text stays loaded.
+ */
 static void
 lkpi_drm_dev_put_action(void *data)
 {
-	drm_dev_put(data);
+	struct drm_device *drm = data;
+	struct lkpi_drm_driver *ld =
+	    container_of(drm->driver, struct lkpi_drm_driver, drv);
+	int ret;
+
+	if (drm->registered && (ret = (drm_dev_unregister)(drm)) != 0) {
+		dev_err(drm->dev, "the DRM core keeps the device (%d): fences "
+		    "or objects remain; the device stays attached\n", ret);
+		mutex_enter(&lkpi_drm_lock);
+		ld->stuck = true;
+		mutex_exit(&lkpi_drm_lock);
+		return;
+	}
+	drm_dev_put(drm);
+}
+
+/*
+ * detach(9E) of a device, before the driver's remove(): refuses while
+ * user space holds the DRM device (open files, descriptors, mappings);
+ * otherwise no new open reaches it. 0 for a device without one.
+ */
+int
+lkpi_drm_detach_begin(struct device *dev)
+{
+	struct lkpi_drm_driver *ld = driver_of_parent(dev);
+
+	if (ld == NULL || !ld->drm->registered)
+		return (0);
+	return ((drm_dev_illumos_unplug)(ld->drm) != 0 ? -EBUSY : 0);
+}
+
+/* detach(9E), after remove() and devres: -EBUSY if the core kept it. */
+int
+lkpi_drm_detach_end(struct device *dev)
+{
+	struct lkpi_drm_driver *ld;
+	int ret = 0;
+
+	mutex_enter(&lkpi_drm_lock);
+	list_for_each_entry(ld, &lkpi_drm_drivers, link) {
+		if (ld->parent == dev && ld->stuck && !ld->released)
+			ret = -EBUSY;
+	}
+	mutex_exit(&lkpi_drm_lock);
+	return (ret);
 }
 
 void *
@@ -111,13 +235,18 @@ lkpi_devm_drm_dev_alloc(struct device *parent,
 
 	if (parent == NULL || lkpi_dev_dip(parent) == NULL)
 		return (ERR_PTR(-EINVAL));
-	ld = driver_copy(driver);
+	ld = driver_copy(driver, parent);
 	if (ld == NULL)
 		return (ERR_PTR(-ENOMEM));
 	p = __drm_dev_alloc(lkpi_dev_dip(parent), &ld->drv, size, offset);
-	if (IS_ERR(p))
+	if (IS_ERR(p)) {
+		driver_free(ld);
 		return (p);
+	}
+	/* The device structure may outlive detach: it holds its parent. */
+	get_device(parent);
 	drm = (struct drm_device *)((char *)p + offset);
+	ld->drm = drm;
 	drm->dev = parent;
 	drm->dma_dev = parent;
 	/*
@@ -167,6 +296,129 @@ lkpi_drm_dev_unregister(struct drm_device *dev)
 		    "still registered\n", ret);
 }
 
+/* --- messages: formatted here, logged by the core ---------------------- */
+
+#undef	drm_illumos_vprintk
+#undef	__drm_printfn_info
+#undef	__drm_printfn_dbg
+#undef	__drm_printfn_err
+extern void drm_illumos_vprintk(dev_info_t *, const char *, int, const char *,
+    struct va_format *);
+extern void __drm_printfn_info(struct drm_printer *, struct va_format *);
+extern void __drm_printfn_dbg(struct drm_printer *, struct va_format *);
+extern void __drm_printfn_err(struct drm_printer *, struct va_format *);
+
+#define	LKPI_DRM_MSG	256
+
+/*
+ * Formats `vaf` with the layer's vsnprintf into `sbuf`, or into a larger
+ * allocation (returned; the caller frees it when it is not sbuf) for a
+ * longer message; without memory the message is cut. Any context.
+ */
+static char *
+lkpi_drm_format(char *sbuf, size_t ssz, struct va_format *vaf)
+{
+	va_list ap;
+	char *big;
+	int n;
+
+	va_copy(ap, *vaf->va);
+	n = lkpi_vsnprintf(sbuf, ssz, vaf->fmt, ap);
+	va_end(ap);
+	if (n < 0 || (size_t)n < ssz)
+		return (sbuf);
+	big = kmalloc((size_t)n + 1, GFP_NOWAIT | __GFP_NOWARN);
+	if (big == NULL)
+		return (sbuf);
+	va_copy(ap, *vaf->va);
+	(void) lkpi_vsnprintf(big, (size_t)n + 1, vaf->fmt, ap);
+	va_end(ap);
+	return (big);
+}
+
+static void
+lkpi_drm_text(void (*fn)(struct drm_printer *, struct va_format *),
+    struct drm_printer *p, const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list ap;
+
+	va_start(ap, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &ap;
+	fn(p, &vaf);
+	va_end(ap);
+}
+
+static void
+lkpi_drm_vprintk_text(dev_info_t *dev, const char *level, int category,
+    const char *prefix, const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list ap;
+
+	va_start(ap, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &ap;
+	drm_illumos_vprintk(dev, level, category, prefix, &vaf);
+	va_end(ap);
+}
+
+/* Whether a debug message of `category` would be dropped by the core. */
+static bool
+lkpi_drm_dbg_off(const char *level, int category)
+{
+	return (level != NULL && strcmp(level, KERN_DEBUG) == 0 &&
+	    category >= 0 && category < 32 &&
+	    (drm_debug & (1U << category)) == 0);
+}
+
+void
+lkpi_drm_vprintk(dev_info_t *dev, const char *level, int category,
+    const char *prefix, struct va_format *vaf)
+{
+	char sbuf[LKPI_DRM_MSG], *msg;
+
+	if (lkpi_drm_dbg_off(level, category))
+		return;
+	msg = lkpi_drm_format(sbuf, sizeof (sbuf), vaf);
+	lkpi_drm_vprintk_text(dev, level, category, prefix, "%s", msg);
+	if (msg != sbuf)
+		kfree(msg);
+}
+
+static void
+lkpi_drm_printfn(void (*fn)(struct drm_printer *, struct va_format *),
+    struct drm_printer *p, struct va_format *vaf)
+{
+	char sbuf[LKPI_DRM_MSG], *msg;
+
+	msg = lkpi_drm_format(sbuf, sizeof (sbuf), vaf);
+	lkpi_drm_text(fn, p, "%s", msg);
+	if (msg != sbuf)
+		kfree(msg);
+}
+
+void
+lkpi_drm_printfn_info(struct drm_printer *p, struct va_format *vaf)
+{
+	lkpi_drm_printfn(__drm_printfn_info, p, vaf);
+}
+
+void
+lkpi_drm_printfn_dbg(struct drm_printer *p, struct va_format *vaf)
+{
+	if (lkpi_drm_dbg_off(KERN_DEBUG, (int)p->category))
+		return;
+	lkpi_drm_printfn(__drm_printfn_dbg, p, vaf);
+}
+
+void
+lkpi_drm_printfn_err(struct drm_printer *p, struct va_format *vaf)
+{
+	lkpi_drm_printfn(__drm_printfn_err, p, vaf);
+}
+
 /* --- unplug ----------------------------------------------------------- */
 
 static struct srcu_struct lkpi_drm_unplug_srcu;
@@ -188,16 +440,21 @@ drm_dev_exit(int idx)
 	srcu_read_unlock(&lkpi_drm_unplug_srcu, idx);
 }
 
+/*
+ * Marks the device unplugged for drm_dev_enter(), waits for the sections
+ * that entered before, and keeps new opens away from it. The core
+ * unregisters it after the driver's remove() (lkpi_drm_dev_put_action()),
+ * once the driver's own GEM objects are gone; detach(9E) has checked that
+ * user space no longer holds it (lkpi_drm_detach_begin()).
+ */
 void
 drm_dev_unplug(struct drm_device *dev)
 {
-	/*
-	 * Marks the device unplugged for drm_dev_enter() and waits for the
-	 * sections that entered before; then unregisters it.
-	 */
 	WRITE_ONCE(dev->unplugged, true);
 	synchronize_srcu(&lkpi_drm_unplug_srcu);
-	lkpi_drm_dev_unregister(dev);
+	if (dev->registered && (drm_dev_illumos_unplug)(dev) != 0)
+		dev_warn(dev->dev, "drm_dev_unplug: user space still holds "
+		    "the device\n");
 }
 
 int
@@ -520,6 +777,7 @@ lkpi_drm_fini(void)
 {
 	struct lkpi_drm_driver *ld, *n;
 
+	lkpi_resv_fini();
 	cleanup_srcu_struct(&lkpi_drm_unplug_srcu);
 	list_for_each_entry_safe(ld, n, &lkpi_drm_drivers, link) {
 		list_del(&ld->link);

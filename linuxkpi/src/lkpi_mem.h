@@ -17,7 +17,8 @@
  *	pinned user	the descriptor holds a reference on the pin, which is
  *			unmapped and unlocked with its last page;
  *	foreign		kernel memory the layer did not allocate (kmalloc()
- *			memory given to virt_to_page()): see lkpi_page.c.
+ *			memory given to virt_to_page()), until that memory
+ *			is kfree()d: see lkpi_page.c.
  *
  * All descriptors with a registered address are kept in one index
  * (address -> page), which is how virt_to_page() finds "the" struct page
@@ -56,6 +57,11 @@ extern struct lx_page *lkpi_page_create(void *kva,
 extern void lkpi_page_destroy(struct lx_page *page);
 /* The registered descriptor of a page-aligned address, or NULL. */
 extern struct lx_page *lkpi_page_lookup(const void *kva);
+/*
+ * Memory [addr, addr + len) is being freed: drops the index's reference
+ * on the foreign descriptors of the pages it covers entirely.
+ */
+extern void lkpi_page_forget_foreign(const void *addr, size_t len);
 
 /*
  * kfree()/vfree() of a page-aligned address: if it is a vmap() address,

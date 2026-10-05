@@ -6,8 +6,11 @@
  * <linux/hrtimer.h>).
  *
  * Every pending timer is in one AVL tree (avl_create(9F)-style, embedded
- * node, no allocation) ordered by expiry in jiffies and then by an arming
- * sequence number, which is non-zero exactly while the timer is pending.
+ * node, no allocation) ordered by the expiry in jiffies copied at arming
+ * (lkpi_expires: drivers may write the public `expires` of an armed or
+ * disarmed timer, which must not move it in the tree) and then by an
+ * arming sequence number, which is non-zero exactly while the timer is
+ * pending.
  * One layer thread (a single-thread ddi_taskq(9F) at high priority)
  * sleeps until the earliest expiry with cv_reltimedwait(9F), takes due
  * timers out of the tree one at a time and calls their functions with the
@@ -15,7 +18,8 @@
  * thread.
  *
  * The thread records the timer whose function runs (lkpi_tm_running) and
- * never dereferences the timer after the function returns; it only
+ * the driver function behind it (lkpi_tm_running_cb, for unload checks)
+ * and never dereferences the timer after the function returns; it only
  * compares the pointer, so the function may free its timer. Waiting for a
  * running function (timer_delete_sync()) uses that record; it returns at
  * once on the timer thread itself, where the function cannot be running
@@ -24,15 +28,20 @@
  * hrtimers are timer_lists whose function re-arms them for
  * HRTIMER_RESTART; their nanosecond expiry is rounded up to a jiffy and
  * then to illumos' clock tick.
+ *
+ * lkpi_timer_quiesce() disarms the timers whose function lies in an
+ * unloading driver's text (lkpi_module_quiesce(), src/lkpi_module.c).
  */
 
 #include <linux/timer.h>
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
+#include <linux/limits.h>
+#include <linux/sched.h>
 #include <linux/bug.h>
 #include "lkpi_internal.h"
 
-/* lkpi_state: timer_shutdown_sync() was called; arming is ignored. */
+/* lkpi_state: timer_shutdown*() was called; arming is ignored. */
 #define	LKPI_TIMER_SHUTDOWN	0x1
 
 static kmutex_t lkpi_tm_lock;
@@ -41,6 +50,7 @@ static kcondvar_t lkpi_tm_done_cv;	/* a timer function returned */
 static avl_tree_t lkpi_tm_tree;
 static uint64_t lkpi_tm_seq;
 static struct timer_list *lkpi_tm_running;
+static uintptr_t lkpi_tm_running_cb;	/* the driver function it runs */
 static kthread_t *lkpi_tm_thread;
 static boolean_t lkpi_tm_exiting;
 static ddi_taskq_t *lkpi_tm_tq;
@@ -50,8 +60,8 @@ lkpi_tm_compare(const void *a, const void *b)
 {
 	const struct timer_list *ta = a, *tb = b;
 
-	if (ta->expires != tb->expires)
-		return (ta->expires < tb->expires ? -1 : 1);
+	if (ta->lkpi_expires != tb->lkpi_expires)
+		return (ta->lkpi_expires < tb->lkpi_expires ? -1 : 1);
 	if (ta->lkpi_seq != tb->lkpi_seq)
 		return (ta->lkpi_seq < tb->lkpi_seq ? -1 : 1);
 	return (0);
@@ -92,6 +102,7 @@ lkpi_tm_arm_locked(struct timer_list *t, unsigned long expires)
 		return (was);
 	}
 	t->expires = expires;
+	t->lkpi_expires = expires;
 	t->lkpi_seq = ++lkpi_tm_seq;
 	avl_add(&lkpi_tm_tree, t);
 	if (avl_first(&lkpi_tm_tree) == t)
@@ -114,7 +125,7 @@ mod_timer(struct timer_list *t, unsigned long expires)
 	int was;
 
 	mutex_enter(&lkpi_tm_lock);
-	if (lkpi_tm_pending(t) && t->expires == expires)
+	if (lkpi_tm_pending(t) && t->lkpi_expires == expires)
 		was = 1;
 	else
 		was = lkpi_tm_arm_locked(t, expires);
@@ -141,7 +152,7 @@ timer_reduce(struct timer_list *t, unsigned long expires)
 	int was;
 
 	mutex_enter(&lkpi_tm_lock);
-	if (lkpi_tm_pending(t) && !time_before(expires, t->expires))
+	if (lkpi_tm_pending(t) && !time_before(expires, t->lkpi_expires))
 		was = 1;
 	else
 		was = lkpi_tm_arm_locked(t, expires);
@@ -213,6 +224,22 @@ timer_delete_sync(struct timer_list *t)
 	return (was);
 }
 
+/* Disarms t for good, without waiting for a running function. */
+int
+timer_shutdown(struct timer_list *t)
+{
+	int was = 0;
+
+	mutex_enter(&lkpi_tm_lock);
+	t->lkpi_state |= LKPI_TIMER_SHUTDOWN;
+	if (lkpi_tm_pending(t)) {
+		lkpi_tm_remove_locked(t);
+		was = 1;
+	}
+	mutex_exit(&lkpi_tm_lock);
+	return (was);
+}
+
 int
 timer_shutdown_sync(struct timer_list *t)
 {
@@ -233,6 +260,18 @@ lkpi_timer_wait_idle(struct timer_list *t)
 	mutex_exit(&lkpi_tm_lock);
 }
 
+static void lkpi_hrtimer_fn(struct timer_list *tl);
+
+/* The driver function behind t (an hrtimer's own function). */
+static uintptr_t
+lkpi_tm_callback(const struct timer_list *t)
+{
+	if (t->function == lkpi_hrtimer_fn)
+		return ((uintptr_t)container_of(t, struct hrtimer,
+		    timer)->function);
+	return ((uintptr_t)t->function);
+}
+
 /* The timer thread. */
 static void
 lkpi_tm_thread_main(void *arg)
@@ -250,14 +289,16 @@ lkpi_tm_thread_main(void *arg)
 			continue;
 		}
 		now = lkpi_jiffies();
-		if (now < t->expires) {
+		if (time_before(now, t->lkpi_expires)) {
 			(void) cv_reltimedwait(&lkpi_tm_cv, &lkpi_tm_lock,
-			    lkpi_sleep_ticks(t->expires - now), TR_CLOCK_TICK);
+			    lkpi_sleep_ticks(t->lkpi_expires - now),
+			    TR_CLOCK_TICK);
 			continue;
 		}
 		lkpi_tm_remove_locked(t);
 		fn = t->function;
 		lkpi_tm_running = t;
+		lkpi_tm_running_cb = lkpi_tm_callback(t);
 		mutex_exit(&lkpi_tm_lock);
 
 		if (fn != NULL)
@@ -267,6 +308,7 @@ lkpi_tm_thread_main(void *arg)
 
 		mutex_enter(&lkpi_tm_lock);
 		lkpi_tm_running = NULL;
+		lkpi_tm_running_cb = 0;
 		cv_broadcast(&lkpi_tm_done_cv);
 	}
 	lkpi_tm_thread = NULL;
@@ -383,6 +425,57 @@ hrtimer_active(const struct hrtimer *t)
 	return (active);
 }
 
+bool
+hrtimer_is_queued(const struct hrtimer *t)
+{
+	return (timer_pending(&t->timer) != 0);
+}
+
+bool
+hrtimer_callback_running(const struct hrtimer *t)
+{
+	bool running;
+
+	mutex_enter(&lkpi_tm_lock);
+	running = lkpi_tm_running == &t->timer;
+	mutex_exit(&lkpi_tm_lock);
+	return (running);
+}
+
+/*
+ * Sleeps in the state the caller set until the expiry: absolute on
+ * CLOCK_MONOTONIC (ktime_get()) or, with HRTIMER_MODE_REL, relative to
+ * now. 0 when the expiry was reached, -EINTR when woken (or signalled)
+ * earlier. NULL sleeps until woken, as on Linux.
+ */
+int
+schedule_hrtimeout(ktime_t *expires, const enum hrtimer_mode mode)
+{
+	ktime_t now, target;
+	u64 j;
+
+	if (expires == NULL) {
+		schedule();
+		return (-EINTR);
+	}
+	now = ktime_get();
+	if ((mode & HRTIMER_MODE_REL) != 0)
+		target = *expires > KTIME_MAX - now ? KTIME_MAX :
+		    now + *expires;
+	else
+		target = *expires;
+	if (target <= now) {
+		__set_current_state(TASK_RUNNING);
+		return (0);
+	}
+	/* Whole jiffies, rounded up: the sleep never ends before target. */
+	j = nsecs_to_jiffies64((u64)(target - now)) + 1;
+	if (j >= (u64)MAX_SCHEDULE_TIMEOUT)
+		j = MAX_SCHEDULE_TIMEOUT - 1;
+	(void) schedule_timeout((long)j);
+	return (ktime_get() >= target ? 0 : -EINTR);
+}
+
 /*
  * Moves the expiry forward by whole intervals until it is after `now`;
  * returns the number of intervals (0 if it already was).
@@ -402,6 +495,46 @@ hrtimer_forward(struct hrtimer *t, ktime_t now, ktime_t interval)
 	return (n);
 }
 
+/* --- driver unload ------------------------------------------------------ */
+
+static boolean_t
+lkpi_tm_in(uintptr_t cb, uintptr_t lo, uintptr_t hi)
+{
+	return (cb >= lo && cb < hi);
+}
+
+/*
+ * Disarms every timer whose function lies in [lo, hi), the text of a
+ * driver that is unloading, and waits for such a function that is still
+ * running. Each one is a driver bug (it should have been deleted in
+ * module_exit), so it is reported. Returns how many were disarmed.
+ */
+int
+lkpi_timer_quiesce(uintptr_t lo, uintptr_t hi)
+{
+	struct timer_list *t, *next;
+	int n = 0;
+
+	if (!lkpi_tm_may_wait())
+		return (0);
+	mutex_enter(&lkpi_tm_lock);
+	for (t = avl_first(&lkpi_tm_tree); t != NULL; t = next) {
+		next = AVL_NEXT(&lkpi_tm_tree, t);
+		if (!lkpi_tm_in(lkpi_tm_callback(t), lo, hi))
+			continue;
+		cmn_err(CE_WARN, "linuxkpi: timer %p (function %p) still "
+		    "armed at driver unload, disarmed", (void *)t,
+		    (void *)lkpi_tm_callback(t));
+		lkpi_tm_remove_locked(t);
+		n++;
+	}
+	while (lkpi_tm_running != NULL &&
+	    lkpi_tm_in(lkpi_tm_running_cb, lo, hi))
+		cv_wait(&lkpi_tm_done_cv, &lkpi_tm_lock);
+	mutex_exit(&lkpi_tm_lock);
+	return (n);
+}
+
 /* --- module state ---------------------------------------------------------- */
 
 int
@@ -414,6 +547,7 @@ lkpi_timer_init(void)
 	    offsetof(struct timer_list, lkpi_node));
 	lkpi_tm_exiting = B_FALSE;
 	lkpi_tm_running = NULL;
+	lkpi_tm_running_cb = 0;
 
 	lkpi_tm_tq = ddi_taskq_create(NULL, "lkpi_timer", 1, LKPI_PRI_HIGH, 0);
 	if (lkpi_tm_tq != NULL && ddi_taskq_dispatch(lkpi_tm_tq,

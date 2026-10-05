@@ -29,8 +29,9 @@
 #                measurement container): drops illumos-only flags and
 #                undefines the Linux target macros.
 set -u
-# GNU grep first on illumos (grep -m in the summary)
+# GNU grep first on illumos (grep -m in the summary); one collation
 PATH=/usr/gnu/bin:$PATH
+export LC_ALL=C
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=${REPO:-$(cd "$HERE/../.." && pwd)}
@@ -70,7 +71,7 @@ compile_one() {
 	*) src=$I915/$tu ;;
 	esac
 	if "$CC" $CFLAGS $CPPFLAGS -DKBUILD_BASENAME=\"$(basename "${tu%.c}")\" \
-	    -c "$src" -o "$obj" > "$log" 2>&1; then
+	    -MD -MF "${obj%.o}.d" -c "$src" -o "$obj" > "$log" 2>&1; then
 		echo "OK $tu"
 	else
 		rm -f "$obj"
@@ -101,6 +102,14 @@ if [ "$mode" = compile ] || [ "$mode" = all ]; then
 		    sed -E "s/'[^']*'/X/g" | sort | uniq -c | sort -rn | head -60
 	} > "$OUT/summary.txt"
 	head -1 "$OUT/summary.txt"
+	[ "$fail" -eq 0 ] || exit 1
+	# Every file of the Linux tree the compiler read (the dependency
+	# files), for the licence check and the package's licence file.
+	cat "$OUT"/obj/*.d "$OUT"/obj/*/*.d "$OUT"/obj/*/*/*.d 2>/dev/null |
+	    tr ' \\' '\n\n' | grep "^$LINUX/" | grep -v ':$' |
+	    sed "s|^$LINUX/||" | sort -u > "$OUT/linux-inputs.txt"
+	echo "linux inputs: $(wc -l < "$OUT/linux-inputs.txt") files"
+	python3 "$HERE/check-licences.py" "$LINUX" "$OUT/linux-inputs.txt" || exit 1
 fi
 
 if [ "$mode" = link ] || [ "$mode" = all ]; then

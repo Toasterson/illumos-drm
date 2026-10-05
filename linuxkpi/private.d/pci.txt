@@ -1,6 +1,8 @@
 ddi_intr_get_hilevel_pri	# documented 9F: request_irq() refuses high-level vectors (handlers take adaptive mutexes)
 ddi_root_node	# documented 9F: start of the device-tree walk for pci_get_domain_bus_and_slot()/pci_get_class() (i915 host/ISA bridge lookup)
-ddi_walk_devs	# documented 9F: finds another PCI function's node (host bridge, ISA bridge) for the foreign pci_dev wrappers
+ddi_walk_devs	# documented 9F: finds another PCI function's node (host bridge, ISA bridge) for the foreign pci_dev wrappers when no layer device is attaching or detaching (it may not be called from attach(9E)/detach(9E))
 mod_miscops	# non-DDI kernel interface: modlmisc ops of the misc module linuxkpi (every misc module uses it)
 ndi_hold_devi	# non-DDI kernel interface (NDI): keeps a foreign node from being removed while a wrapper holds its config handle
 ndi_rele_devi	# non-DDI kernel interface (NDI): releases the hold of ndi_hold_devi when the wrapper is put
+ddi_get_child	# non-DDI kernel interface (<sys/sunddi.h>): while a layer device attaches or detaches, its parent is held busy by the framework, and the host/ISA bridge are found among the parent's children instead of with ddi_walk_devs(9F), which must not run then
+ddi_get_next_sibling	# non-DDI kernel interface (<sys/sunddi.h>): the sibling scan of ddi_get_child above

@@ -30,12 +30,15 @@ extern void lkpi_rcu_fini(void);
 
 /*
  * Within the scheduling part (src/lkpi_sched.c, lkpi_wait.c,
- * lkpi_kthread.c): a task's fields for a thread named comm; binding a
+ * lkpi_kthread.c): the calling thread's task, NULL in an interrupt
+ * handler (`current` is then a shared placeholder); a task's fields for
+ * a thread named comm; binding a
  * task to the calling thread (`current` returns it from then on) and
  * unbinding it; the shared wait queues of wait_var_event(); stopping the
  * kthreads left at unload.
  */
 struct task_struct;
+extern struct task_struct *lkpi_task_self(void);
 extern void lkpi_task_init(struct task_struct *t, const char *comm);
 extern void lkpi_task_fini(struct task_struct *t);
 extern void lkpi_task_bind(struct task_struct *t);
@@ -63,6 +66,17 @@ extern void lkpi_work_fini(void);
 struct timer_list;
 extern void lkpi_timer_wait_idle(struct timer_list *t);
 
+/*
+ * Driver unload (lkpi_module_quiesce(), src/lkpi_module.c): disarm or
+ * cancel, report and wait for the timers, work items and kthreads whose
+ * function lies in [lo, hi); each returns how many it removed. Thread
+ * context. lkpi_work_flush_system() flushes the layer's shared queues.
+ */
+extern int lkpi_timer_quiesce(uintptr_t lo, uintptr_t hi);
+extern int lkpi_work_quiesce(uintptr_t lo, uintptr_t hi);
+extern int lkpi_kthread_quiesce(uintptr_t lo, uintptr_t hi);
+extern void lkpi_work_flush_system(void);
+
 /* Thread priority of the layer's high-priority threads (SYS class). */
 #define	LKPI_PRI_HIGH	98
 
@@ -73,10 +87,23 @@ extern void lkpi_shrinker_fini(void);
 /* src/lkpi_drm.c: the DRM driver-table copies, the unplug SRCU. */
 extern int lkpi_drm_init(void);
 extern void lkpi_drm_fini(void);
+/* src/lkpi_resv.c: snapshots of locked walks never unlocked again. */
+extern void lkpi_resv_fini(void);
 
 /* src/lkpi_pci.c: attached PCI devices. */
 extern int lkpi_pci_init(void);
 extern void lkpi_pci_fini(void);
+
+/*
+ * src/lkpi_drm.c, called by lkpi_pci_detach() for DDI_DETACH: begin
+ * before the driver's remove() (non-zero: refuse the detach, the device
+ * keeps working); end after remove() and the managed resources
+ * (non-zero: the DRM core still uses the device; the node stays attached
+ * without its driver and the struct pci_dev is kept). 0 for a device
+ * without a DRM device.
+ */
+extern int lkpi_drm_detach_begin(struct device *dev);
+extern int lkpi_drm_detach_end(struct device *dev);
 
 /*
  * src/lkpi_irq.c: the table of allocated interrupt vectors (irq numbers);
@@ -84,6 +111,13 @@ extern void lkpi_pci_fini(void);
  */
 extern int lkpi_irq_init(void);
 extern void lkpi_irq_fini(void);
+
+/*
+ * Interrupt handlers free_irq() could not remove (their vectors stay
+ * allocated, the trampoline ignores them); the layer refuses to unload
+ * while there are any.
+ */
+extern uint_t lkpi_irq_stuck(void);
 
 /*
  * The BAR of an attached layer PCI device that contains the physical range

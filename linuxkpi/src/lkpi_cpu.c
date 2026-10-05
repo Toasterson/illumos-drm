@@ -138,7 +138,15 @@ lkpi_cpu_init(void)
 		c->x86_model = (u8)model;
 		c->x86_stepping = (u8)(a & 0xf);
 		c->x86_capability_lkpi[0] = d;
-		c->x86_capability_lkpi[1] = cx;
+		/*
+		 * SSE4.1 is not reported: drivers use it only for MOVNTDQA
+		 * reads of write-combined memory inside kernel FPU sections
+		 * (i915_memcpy_from_wc(), drm_memcpy_from_wc()), which they
+		 * may enter from interrupt context, where illumos cannot
+		 * save an interrupted section's registers. They fall back to
+		 * plain copies.
+		 */
+		c->x86_capability_lkpi[1] = cx & ~(1U << 19);
 		if (d & (1U << 19))
 			c->x86_clflush_size = (u16)(((b >> 8) & 0xff) * 8);
 	}
@@ -210,6 +218,9 @@ lkpi_kernel_fpu_begin(void)
 	struct lkpi_fpu_cpu *s;
 	processorid_t id;
 
+	/* No driver gets here with SSE4.1 hidden; an interrupt must not. */
+	WARN_ONCE(servicing_interrupt(),
+	    "kernel_fpu_begin() in interrupt context");
 	kpreempt_disable();
 	id = CPU->cpu_id;
 	if (id < 0 || id >= NR_CPUS) {

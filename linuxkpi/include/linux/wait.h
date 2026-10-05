@@ -234,11 +234,15 @@ __out: \
 	__r; })
 #include <linux/wait_bit.h>
 
+/*
+ * Called with lock held; the condition is evaluated with it held, and it
+ * is dropped only around the sleep, as on Linux.
+ */
 #define	wait_event_lock_irq(wq, condition, lock) do { \
-	while (!(condition)) { \
-		spin_unlock_irq(&(lock)); \
-		wait_event_timeout(wq, condition, 1); \
-		spin_lock_irq(&(lock)); \
-	} } while (0)
+	if (condition) \
+		break; \
+	(void)___wait_event(wq, condition, TASK_UNINTERRUPTIBLE, 0, 0, \
+	    spin_unlock_irq(&(lock)); schedule(); spin_lock_irq(&(lock))); \
+	} while (0)
 
 #endif

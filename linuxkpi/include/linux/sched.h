@@ -14,10 +14,13 @@
  * condition variable. TASK_INTERRUPTIBLE and TASK_KILLABLE sleeps end
  * early on any signal (cv_reltimedwait_sig(9F); illumos does not tell
  * fatal signals apart) and set the task's sigpending flag.
- * signal_pending() is false while the flag is clear; when it is set, it
- * asks illumos again (a zero-length cv_reltimedwait_sig(), which does not
- * sleep), so a flag left from an earlier system call cannot fail a later
- * one. Other task fields are fixed: comm is "illumos" (a kthread's name
+ * signal_pending() on the caller's own task asks illumos each time (a
+ * zero-length cv_reltimedwait_sig(), which does not sleep: a mutex and a
+ * few flag tests), so loops that only poll for signals see them, and a
+ * flag left from an earlier system call cannot fail a later one; for
+ * another task it reports the flag. The task also holds the thread's
+ * RCU read-section nesting and phase (src/lkpi_rcu.c). Other task
+ * fields are fixed: comm is "illumos" (a kthread's name
  * for kthreads), mm is NULL (no Linux address spaces), pid is the
  * process ID (ddi_get_pid(9F); 0 for kernel threads).
  */
@@ -69,6 +72,8 @@ struct task_struct {
 	kmutex_t lock;
 	kcondvar_t cv;
 	void *kthread_data;
+	unsigned int lkpi_rcu_nest;	/* rcu_read_lock() depth */
+	unsigned int lkpi_rcu_idx;	/* the outermost section's phase */
 };
 
 extern struct task_struct *lkpi_current(void);
@@ -94,8 +99,6 @@ extern void io_schedule(void);
 #define	schedule_timeout_killable(t) \
 	({ set_current_state(TASK_KILLABLE); schedule_timeout(t); })
 #define	schedule_timeout_idle(t)	schedule_timeout_uninterruptible(t)
-#define	schedule_hrtimeout(kt, mode) \
-	schedule_timeout(nsecs_to_jiffies(*(kt)) + 1)
 
 extern void lkpi_cond_resched(void);
 #define	cond_resched()			({ lkpi_cond_resched(); 0; })
@@ -104,14 +107,12 @@ extern void lkpi_cond_resched(void);
 #define	yield()				lkpi_cond_resched()
 #define	cpu_relax_yield()		lkpi_cond_resched()
 
-/* Whether t's signal is still pending (src/lkpi_sched.c). */
+/* Whether a signal is pending for t (src/lkpi_sched.c). */
 extern int lkpi_signal_recheck(struct task_struct *t);
 
 static inline int
 signal_pending(struct task_struct *t)
 {
-	if (t->sigpending == 0)
-		return (0);
 	return (lkpi_signal_recheck(t));
 }
 

@@ -92,12 +92,28 @@ array_enable_signaling(struct dma_fence *fence)
 	return (true);
 }
 
+/*
+ * Once signalling is enabled, the callbacks count the children down.
+ * Before that nothing counts, so the children are asked: the array is
+ * signalled when all of them are (it takes the first error among them).
+ */
 static bool
 array_signaled(struct dma_fence *fence)
 {
 	struct dma_fence_array *array = to_dma_fence_array(fence);
+	unsigned int i;
+	int err = 0;
 
-	return (atomic_read(&array->num_pending) <= 0);
+	if (test_bit(DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT, &fence->flags))
+		return (atomic_read(&array->num_pending) <= 0);
+	for (i = 0; i < array->num_fences; i++) {
+		if (!dma_fence_is_signaled(array->fences[i]))
+			return (false);
+		if (err == 0 && array->fences[i]->error < 0)
+			err = array->fences[i]->error;
+	}
+	array_set_error(array, err);
+	return (true);
 }
 
 static void

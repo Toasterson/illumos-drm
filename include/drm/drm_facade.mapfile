@@ -64,6 +64,7 @@ SYMBOL_SCOPE {
 		drm_dev_illumos_set_dma_attr	{ FLAGS = EXTERN };
 		drm_dev_illumos_set_fence_priority	{ FLAGS = EXTERN };
 		drm_dev_illumos_set_mode_config	{ FLAGS = EXTERN };
+		drm_dev_illumos_unplug	{ FLAGS = EXTERN };
 		drm_dev_put	{ FLAGS = EXTERN };
 		drm_dev_register	{ FLAGS = EXTERN };
 		drm_dev_set_unique	{ FLAGS = EXTERN };

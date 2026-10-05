@@ -1,0 +1,41 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 10] i915: reference lookups straight through the illumos DRM core
+
+i915_gem_object_lookup() (execbuffer and most ioctls) looks a handle up
+under RCU and takes a reference with kref_get_unless_zero(). On illumos
+the RCU lookup of patch 0003 costs an allocation and a grace-period put
+per call; a lookup that wants a reference asks the DRM core directly
+(drm_gem_object_lookup(), through i915_illumos_object_lookup()), which
+also reports no memory as no object only where the core does.
+
+--- a/drivers/gpu/drm/i915/gem/i915_gem_object.h
++++ b/drivers/gpu/drm/i915/gem/i915_gem_object.h
+@@ -124,6 +124,20 @@
+ 	return obj;
+ }
+ 
++#ifdef __illumos__
++/*
++ * A lookup with a reference is the DRM core's own (no RCU round trip
++ * through i915_gem_object_lookup_rcu()); i915_illumos.c.
++ */
++struct drm_i915_gem_object *
++i915_illumos_object_lookup(struct drm_file *file, u32 handle);
++
++static inline struct drm_i915_gem_object *
++i915_gem_object_lookup(struct drm_file *file, u32 handle)
++{
++	return i915_illumos_object_lookup(file, handle);
++}
++#else
+ static inline struct drm_i915_gem_object *
+ i915_gem_object_lookup(struct drm_file *file, u32 handle)
+ {
+@@ -136,6 +150,7 @@
+ 
+ 	return obj;
+ }
++#endif
+ 
+ __deprecated
+ struct drm_gem_object *

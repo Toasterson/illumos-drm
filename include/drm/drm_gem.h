@@ -100,6 +100,11 @@ struct drm_illumos_fault;
  * illumos_movable
  *		mappings may be unloaded and refaulted; the core then
  *		installs devmap callbacks that call illumos_access.
+ * illumos_close_every_handle
+ *		close is called for every handle a file removes, as Linux
+ *		does, not only for the file's last handle to the object (the
+ *		default, which pairs it with open). For drivers that drop
+ *		per-handle state in close (i915's execbuffer lookup tables).
  */
 struct drm_gem_object_funcs {
 	void (*free)(struct drm_gem_object *obj);
@@ -113,6 +118,7 @@ struct drm_gem_object_funcs {
 	int (*illumos_access)(struct drm_gem_object *obj,
 	    struct drm_illumos_mapping *map, struct drm_illumos_fault *fault);
 	bool illumos_movable;
+	bool illumos_close_every_handle;
 };
 
 /*

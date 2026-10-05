@@ -58,20 +58,25 @@ const struct intel_display_dpt_interface i915_display_dpt_interface = { 0 };
 
 const struct intel_display_dsb_interface i915_display_dsb_interface = { 0 };
 
-const struct intel_display_fb_pin_interface i915_display_fb_pin_interface = { 0 };
+const struct intel_display_fb_pin_interface
+    i915_display_fb_pin_interface = { 0 };
 
 const struct intel_display_hdcp_interface i915_display_hdcp_interface = { 0 };
 
-const struct intel_display_initial_plane_interface i915_display_initial_plane_interface = { 0 };
+const struct intel_display_initial_plane_interface
+    i915_display_initial_plane_interface = { 0 };
 
-const struct intel_display_overlay_interface i915_display_overlay_interface = { 0 };
+const struct intel_display_overlay_interface
+    i915_display_overlay_interface = { 0 };
 
 const struct intel_display_panic_interface i915_display_panic_interface = { 0 };
 
 const struct intel_display_pc8_interface i915_display_pc8_interface = { 0 };
 
 void
-__intel_display_power_put_async(struct intel_display *display, enum intel_display_power_domain domain, struct ref_tracker *wakeref, int delay_ms)
+__intel_display_power_put_async(struct intel_display *display,
+    enum intel_display_power_domain domain, struct ref_tracker *wakeref,
+    int delay_ms)
 {
 	(void) display;
 	(void) domain;
@@ -80,7 +85,8 @@ __intel_display_power_put_async(struct intel_display *display, enum intel_displa
 }
 
 void
-__intel_frontbuffer_flush(struct intel_frontbuffer *front, enum fb_op_origin origin, unsigned int frontbuffer_bits)
+__intel_frontbuffer_flush(struct intel_frontbuffer *front,
+    enum fb_op_origin origin, unsigned int frontbuffer_bits)
 {
 	(void) front;
 	(void) origin;
@@ -88,7 +94,8 @@ __intel_frontbuffer_flush(struct intel_frontbuffer *front, enum fb_op_origin ori
 }
 
 void
-__intel_frontbuffer_invalidate(struct intel_frontbuffer *front, enum fb_op_origin origin, unsigned int frontbuffer_bits)
+__intel_frontbuffer_invalidate(struct intel_frontbuffer *front,
+    enum fb_op_origin origin, unsigned int frontbuffer_bits)
 {
 	(void) front;
 	(void) origin;
@@ -129,16 +136,20 @@ i9xx_display_sr_save(struct intel_display *display)
 	(void) display;
 }
 
+/* The illumos glue does this instead (patch 0006). */
 void
-ilk_display_irq_master_disable(struct intel_display *display, u32 *de_ier, u32 *sde_ier)
+ilk_display_irq_master_disable(struct intel_display *display, u32 *de_ier,
+    u32 *sde_ier)
 {
 	(void) display;
 	(void) de_ier;
 	(void) sde_ier;
 }
 
+/* The illumos glue does this instead (patch 0006). */
 void
-ilk_display_irq_master_enable(struct intel_display *display, u32 de_ier, u32 sde_ier)
+ilk_display_irq_master_enable(struct intel_display *display, u32 de_ier,
+    u32 sde_ier)
 {
 	(void) display;
 	(void) de_ier;
@@ -164,7 +175,8 @@ intel_bw_init_hw(struct intel_display *display)
 }
 
 int
-intel_crtc_get_pipe_from_crtc_id_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+intel_crtc_get_pipe_from_crtc_id_ioctl(struct drm_device *dev, void *data,
+    struct drm_file *file_priv)
 {
 	(void) dev;
 	(void) data;
@@ -216,7 +228,8 @@ intel_display_device_present(struct intel_display *display)
 }
 
 struct intel_display *
-intel_display_device_probe(struct pci_dev *pdev, const struct intel_display_parent_interface *parent)
+intel_display_device_probe(struct pci_dev *pdev,
+    const struct intel_display_parent_interface *parent)
 {
 	(void) pdev;
 	(void) parent;
@@ -379,26 +392,30 @@ intel_display_ilk_init_clock_gating(struct intel_display *display)
 }
 
 void
-intel_display_irq_ack(struct intel_display *display, struct intel_display_irq_state *state)
+intel_display_irq_ack(struct intel_display *display,
+    struct intel_display_irq_state *state)
 {
 	(void) display;
 	(void) state;
 }
 
 bool
-intel_display_irq_handler(struct intel_display *display, const struct intel_display_irq_state *state)
+intel_display_irq_handler(struct intel_display *display,
+    const struct intel_display_irq_state *state)
 {
 	(void) display;
 	(void) state;
 	return (false);
 }
 
+/* The illumos glue does this instead (patch 0006). */
 void
 intel_display_irq_postinstall(struct intel_display *display)
 {
 	(void) display;
 }
 
+/* The illumos glue does this instead (patch 0006). */
 void
 intel_display_irq_reset(struct intel_display *display)
 {
@@ -442,7 +459,8 @@ intel_display_power_enable(struct intel_display *display)
 }
 
 struct ref_tracker *
-intel_display_power_get(struct intel_display *display, enum intel_display_power_domain domain)
+intel_display_power_get(struct intel_display *display,
+    enum intel_display_power_domain domain)
 {
 	(void) display;
 	(void) domain;
@@ -622,7 +640,8 @@ intel_init_pch_refclk(struct intel_display *display)
 }
 
 int
-intel_overlay_attrs_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+intel_overlay_attrs_ioctl(struct drm_device *dev, void *data,
+    struct drm_file *file_priv)
 {
 	(void) dev;
 	(void) data;
@@ -638,7 +657,8 @@ intel_overlay_available(struct intel_display *display)
 }
 
 int
-intel_overlay_put_image_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+intel_overlay_put_image_ioctl(struct drm_device *dev, void *data,
+    struct drm_file *file_priv)
 {
 	(void) dev;
 	(void) data;
@@ -691,7 +711,8 @@ intel_sbi_init(struct intel_display *display)
 }
 
 int
-intel_sprite_set_colorkey_ioctl(struct drm_device *dev, void *data, struct drm_file *file_priv)
+intel_sprite_set_colorkey_ioctl(struct drm_device *dev, void *data,
+    struct drm_file *file_priv)
 {
 	(void) dev;
 	(void) data;

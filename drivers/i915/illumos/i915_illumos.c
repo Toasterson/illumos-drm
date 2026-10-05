@@ -15,7 +15,8 @@
  * module_exit.
  *
  * Also here: the GEM handle lookups patch 0003 routes to the DRM core,
- * and the user mappings of patch 0005.
+ * the user mappings of patch 0005, and the display-engine interrupt
+ * registers that patch 0006 needs without the display code.
  */
 
 #include <linux/pci.h>
@@ -25,6 +26,8 @@
 #include <drm/drm_facade.h>
 
 #include "i915_drv.h"
+#include "i915_irq.h"
+#include "intel_uncore.h"
 #include "gem/i915_gem_object.h"
 
 extern int lkpi_module_init(void);
@@ -116,6 +119,8 @@ _fini(void)
 		return (ret);
 	i915n_pci_driver = NULL;
 	lkpi_module_exit();
+	/* Nothing of the layer may call into this module's text any more. */
+	lkpi_module_quiesce(&i915n_modlinkage);
 	return (0);
 }
 
@@ -166,6 +171,15 @@ i915_gem_object_lookup_rcu(struct drm_file *file, u32 handle)
 	d->obj = obj;
 	call_rcu(&d->rcu, i915n_put_after_gp);
 	return (to_intel_bo(obj));
+}
+
+/* i915_gem_object_lookup() (patch 0010): the core's lookup, a reference. */
+struct drm_i915_gem_object *
+i915_illumos_object_lookup(struct drm_file *file, u32 handle)
+{
+	struct drm_gem_object *obj = drm_gem_object_lookup(file, handle);
+
+	return (obj != NULL ? to_intel_bo(obj) : NULL);
 }
 
 bool
@@ -225,6 +239,12 @@ i915_illumos_mmap_offset(struct drm_i915_gem_object *obj,
 		if (!HAS_LLC(i915) ||
 		    (obj->cache_coherent & coherent) != coherent)
 			return (-ENODEV);
+		/*
+		 * The write-back mapping stands for WC/UC only while the
+		 * object stays coherent: patch 0008 refuses SET_CACHING to a
+		 * non-coherent level from now on.
+		 */
+		set_bit(I915_BO_ILLUMOS_WB_FOR_WC_BIT, &obj->flags);
 		break;
 	default:
 		return (-ENODEV);
@@ -234,5 +254,130 @@ i915_illumos_mmap_offset(struct drm_i915_gem_object *obj,
 		return (err);
 	*offset = drm_vma_node_offset_addr(&obj->base.vma_node);
 	return (0);
+}
+
+/* --- display-engine interrupt registers (patch 0006) --------------------- */
+
+/*
+ * On gen5 to gen7 (ILK..HSW) the master enable of every interrupt, the
+ * GT's included, is DE_MASTER_IRQ_CONTROL in DEIER, a display-engine
+ * register; on gen8+ the display engine has interrupt registers of its
+ * own that must be quiet when the master enable is set. The display code
+ * that owns them is not built (headless): these keep the display sources
+ * masked and disabled, and run the master enable as i915's display code
+ * would. Register offsets as in Linux's display/intel_display_regs.h.
+ */
+#define	ILLUMOS_DEIMR		_MMIO(0x44004)
+#define	ILLUMOS_DEIIR		_MMIO(0x44008)
+#define	ILLUMOS_DEIER		_MMIO(0x4400c)
+#define	ILLUMOS_GEN7_ERR_INT	_MMIO(0x44040)
+#define	ILLUMOS_SDEIMR		_MMIO(0xc4004)
+#define	ILLUMOS_SDEIIR		_MMIO(0xc4008)
+#define	ILLUMOS_SDEIER		_MMIO(0xc400c)
+#define	ILLUMOS_SERR_INT	_MMIO(0xc4040)
+#define	ILLUMOS_DE_MASTER	(1U << 31)
+#define	ILLUMOS_GEN8_DE_PIPE_A_IMR	_MMIO(0x44404)
+#define	ILLUMOS_GEN8_DE_PIPE_A_IIR	_MMIO(0x44408)
+#define	ILLUMOS_GEN8_DE_PIPE_A_IER	_MMIO(0x4440c)
+#define	ILLUMOS_GEN8_DE_PORT_IMR	_MMIO(0x44444)
+#define	ILLUMOS_GEN8_DE_PORT_IIR	_MMIO(0x44448)
+#define	ILLUMOS_GEN8_DE_PORT_IER	_MMIO(0x4444c)
+#define	ILLUMOS_GEN8_DE_MISC_IMR	_MMIO(0x44464)
+#define	ILLUMOS_GEN8_DE_MISC_IIR	_MMIO(0x44468)
+#define	ILLUMOS_GEN8_DE_MISC_IER	_MMIO(0x4446c)
+
+static struct i915_irq_regs
+illumos_irq_regs(i915_reg_t imr, i915_reg_t ier, i915_reg_t iir)
+{
+	struct i915_irq_regs r = { .imr = imr, .ier = ier, .iir = iir };
+
+	return (r);
+}
+
+/* The south display engine (PCH) exists on every platform these run on. */
+static bool
+illumos_has_pch(struct drm_i915_private *i915)
+{
+	return (!IS_VALLEYVIEW(i915) && !IS_CHERRYVIEW(i915) &&
+	    !IS_GEN9_LP(i915));
+}
+
+/* ilk_irq_reset(): every display source masked, disabled and cleared. */
+void
+i915_illumos_de_irq_reset(struct drm_i915_private *i915)
+{
+	struct intel_uncore *uncore = &i915->uncore;
+
+	gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_DEIMR, ILLUMOS_DEIER,
+	    ILLUMOS_DEIIR));
+	if (GRAPHICS_VER(i915) == 7)
+		intel_uncore_write(uncore, ILLUMOS_GEN7_ERR_INT, 0xffffffff);
+	if (illumos_has_pch(i915)) {
+		gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_SDEIMR,
+		    ILLUMOS_SDEIER, ILLUMOS_SDEIIR));
+		intel_uncore_write(uncore, ILLUMOS_SERR_INT, 0xffffffff);
+	}
+}
+
+/*
+ * ilk_irq_postinstall(): the display sources stay masked; DEIER gets the
+ * master enable only, which lets the GT and PM interrupts through.
+ */
+void
+i915_illumos_de_irq_postinstall(struct drm_i915_private *i915)
+{
+	gen2_irq_init(&i915->uncore, illumos_irq_regs(ILLUMOS_DEIMR,
+	    ILLUMOS_DEIER, ILLUMOS_DEIIR), 0xffffffff, ILLUMOS_DE_MASTER);
+}
+
+/* ilk_irq_handler(): the master enable off while the sources are read. */
+void
+i915_illumos_de_master_disable(struct drm_i915_private *i915, u32 *de_ier,
+    u32 *sde_ier)
+{
+	struct intel_uncore *uncore = &i915->uncore;
+
+	*de_ier = intel_uncore_read_fw(uncore, ILLUMOS_DEIER);
+	intel_uncore_write_fw(uncore, ILLUMOS_DEIER,
+	    *de_ier & ~ILLUMOS_DE_MASTER);
+	*sde_ier = 0;
+	if (illumos_has_pch(i915)) {
+		*sde_ier = intel_uncore_read_fw(uncore, ILLUMOS_SDEIER);
+		intel_uncore_write_fw(uncore, ILLUMOS_SDEIER, 0);
+	}
+}
+
+void
+i915_illumos_de_master_enable(struct drm_i915_private *i915, u32 de_ier,
+    u32 sde_ier)
+{
+	struct intel_uncore *uncore = &i915->uncore;
+
+	intel_uncore_write_fw(uncore, ILLUMOS_DEIER, de_ier);
+	if (sde_ier != 0)
+		intel_uncore_write_fw(uncore, ILLUMOS_SDEIER, sde_ier);
+}
+
+/*
+ * gen8_irq_reset(): the gen8+ display interrupt registers quiet, so that
+ * nothing the firmware left armed reaches the master interrupt. Pipe A
+ * is in the always-on power well; the other pipes' registers are only
+ * reachable with their power wells on (display code, not built), and the
+ * firmware does not arm their interrupts.
+ */
+void
+i915_illumos_gen8_de_irq_reset(struct drm_i915_private *i915)
+{
+	struct intel_uncore *uncore = &i915->uncore;
+
+	gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_GEN8_DE_PIPE_A_IMR,
+	    ILLUMOS_GEN8_DE_PIPE_A_IER, ILLUMOS_GEN8_DE_PIPE_A_IIR));
+	gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_GEN8_DE_PORT_IMR,
+	    ILLUMOS_GEN8_DE_PORT_IER, ILLUMOS_GEN8_DE_PORT_IIR));
+	gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_GEN8_DE_MISC_IMR,
+	    ILLUMOS_GEN8_DE_MISC_IER, ILLUMOS_GEN8_DE_MISC_IIR));
+	if (illumos_has_pch(i915))
+		gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_SDEIMR,
+		    ILLUMOS_SDEIER, ILLUMOS_SDEIIR));
 }
 

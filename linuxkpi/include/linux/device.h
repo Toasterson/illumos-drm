@@ -13,6 +13,10 @@
  * or the device detaches) and the printing helpers live here. dev_name()
  * is the PCI address ("0000:00:02.0") for PCI devices.
  * Messages go to dev_err(9F) on the device's node.
+ * A device is reference counted: lkpi_device_init() sets the count to 1,
+ * get_device()/put_device() change it, and the last put_device() calls
+ * dev->release (else type->release), which frees the structure (the PCI
+ * glue's release frees its struct pci_dev; src/lkpi_device.c).
  */
 #ifndef _LINUX_DEVICE_H
 #define	_LINUX_DEVICE_H
@@ -65,6 +69,7 @@ struct device {
 	ddi_dma_attr_t lkpi_dma_attr;
 	kmutex_t lkpi_devres_lock;
 	struct list_head lkpi_devres;
+	volatile uint32_t lkpi_refs;	/* get_device() references */
 };
 
 static inline const char *
@@ -90,8 +95,8 @@ dev_set_drvdata(struct device *dev, void *data)
 #define	dev_to_node(dev)		(-1)
 #endif
 #define	set_dev_node(dev, n)		((void)(dev))
-#define	get_device(dev)			(dev)
-#define	put_device(dev)			((void)(dev))
+extern struct device *get_device(struct device *dev);
+extern void put_device(struct device *dev);
 #define	device_is_registered(dev)	true
 #define	dev_driver_string(dev)		((dev)->driver != NULL ? (dev)->driver->name : "")
 #define	dev_is_pci(dev)			((dev)->bus == &pci_bus_type)

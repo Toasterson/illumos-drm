@@ -38,6 +38,7 @@
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <drm/drm_print.h>
+#include <sys/random.h>
 
 /* The tunable of pr_debug() (see <linux/printk.h>). */
 volatile int lkpi_debug = 0;
@@ -70,6 +71,35 @@ struct lkpi_spec {
 
 static const char lkpi_digits_lc[] = "0123456789abcdef";
 static const char lkpi_digits_uc[] = "0123456789ABCDEF";
+
+/*
+ * The value %p prints for a pointer: a keyed 64-bit mix of the address,
+ * stable while the layer is loaded (so equal pointers print equal), with
+ * a random key taken at first use.
+ */
+static volatile uint64_t lkpi_ptr_key;
+
+static uintptr_t
+lkpi_ptr_hash(const void *p)
+{
+	uint64_t k = lkpi_ptr_key, x;
+
+	if (k == 0) {
+		uint64_t nk = 0;
+
+		(void) random_get_pseudo_bytes((uint8_t *)&nk, sizeof (nk));
+		nk |= 1;
+		(void) atomic_cas_64(&lkpi_ptr_key, 0, nk);
+		k = lkpi_ptr_key;
+	}
+	x = (uint64_t)(uintptr_t)p ^ k;
+	x ^= x >> 30;
+	x *= 0xbf58476d1ce4e5b9ULL;
+	x ^= x >> 27;
+	x *= 0x94d049bb133111ebULL;
+	x ^= x >> 31;
+	return ((uintptr_t)(x & 0xffffffffULL));
+}
 
 static void
 out_c(struct lkpi_out *o, char c)
@@ -463,13 +493,20 @@ out_pext(struct lkpi_out *o, const char **fmtp, const void *p,
 		out_ptr(o, p, sp);
 		break;
 	default:
-		/* %p, %px, %pK and every extension the layer lacks. */
+		/*
+		 * %p, %px, %pK and every extension the layer lacks. As on
+		 * Linux, only %px prints the address: the others print a
+		 * keyed hash of it, so that kernel addresses stay out of the
+		 * world-readable system log.
+		 */
 		while (isalnum(*f))
 			f++;
 		if (p == NULL && e != 'x' && e != 'K')
 			out_null_ptr(o, sp);
-		else
+		else if (e == 'x')
 			out_ptr(o, p, sp);
+		else
+			out_ptr(o, (const void *)lkpi_ptr_hash(p), sp);
 		break;
 	}
 	*fmtp = f;

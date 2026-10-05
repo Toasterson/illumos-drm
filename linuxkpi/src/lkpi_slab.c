@@ -18,7 +18,12 @@
  *
  * A slab cache is an illumos kmem cache. The Linux constructor runs on
  * every allocation, which satisfies Linux's contract (objects are freed in
- * their constructed state, so constructing again is idempotent).
+ * their constructed state, so constructing again is idempotent). For
+ * SLAB_TYPESAFE_BY_RCU caches Linux runs the constructor once per slab
+ * object precisely so that an RCU reader still looking at a freed and
+ * reallocated object never sees its lock or refcount re-initialised; here
+ * no reader can still see an object when it is reallocated, because the
+ * free reaches kmem only after a grace period (below).
  *
  * SLAB_TYPESAFE_BY_RCU: Linux keeps such objects' memory a valid object
  * of the type until a grace period after kmem_cache_free(), so RCU readers
@@ -125,6 +130,8 @@ void
 lkpi_kfree(const void *p)
 {
 	struct lkpi_kmhdr *h;
+	size_t total;
+	char *base;
 
 	if (ZERO_OR_NULL_PTR(p))
 		return;
@@ -133,7 +140,12 @@ lkpi_kfree(const void *p)
 	if ((h = lkpi_km_hdr(p, "kfree")) == NULL)
 		return;
 	h->kh_magic = 0;
-	kmem_free((char *)h - h->kh_shift, lkpi_km_total(h->kh_size));
+	base = (char *)h - h->kh_shift;
+	total = lkpi_km_total(h->kh_size);
+	/* virt_to_page() descriptors of the buffer's pages (lkpi_page.c). */
+	if (total >= PAGE_SIZE)
+		lkpi_page_forget_foreign(base, total);
+	kmem_free(base, total);
 }
 
 size_t

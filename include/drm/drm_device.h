@@ -164,6 +164,18 @@ extern int drm_dev_register(struct drm_device *dev, unsigned long flags);
  */
 extern int drm_dev_unregister(struct drm_device *dev);
 
+/*
+ * Facade 1.1. For a driver that tears its own state down before the core
+ * can unregister (a Linux driver's remove() frees its GEM objects after
+ * drm_dev_unplug()): refuses with -EBUSY, changing nothing, while user
+ * space holds the device (open files, dma-buf or sync-file descriptors,
+ * user mappings); otherwise no new open reaches the device and it returns
+ * 0. The device keeps working for the driver until drm_dev_unregister(),
+ * which may still refuse while fences or sync objects remain. 0 for a
+ * device that is not registered. detach(9E) context.
+ */
+extern int drm_dev_illumos_unplug(struct drm_device *dev);
+
 extern void drm_dev_get(struct drm_device *dev);
 extern void drm_dev_put(struct drm_device *dev);
 

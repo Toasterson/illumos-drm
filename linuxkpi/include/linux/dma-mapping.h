@@ -15,8 +15,10 @@
  * physically contiguous run. The handles are kept with the table and
  * released by dma_unmap_sg(). dma_alloc_coherent() is ddi_dma_mem_alloc(9F)
  * with DDI_DMA_CONSISTENT and one cookie. dma_map_page()/dma_map_single()
- * bind one range and must give one cookie. Mapping errors return
- * DMA_MAPPING_ERROR / 0 entries, as on Linux.
+ * bind one range and must give one cookie. Streaming mappings of memory
+ * outside the device's address range fail instead of using an illumos
+ * copy buffer (i915 does not sync its objects; see src/lkpi_dma.c).
+ * Mapping errors return DMA_MAPPING_ERROR / 0 entries, as on Linux.
  */
 #ifndef _LINUX_DMA_MAPPING_H
 #define	_LINUX_DMA_MAPPING_H

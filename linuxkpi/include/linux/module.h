@@ -24,6 +24,18 @@ struct lx_module;
 #define	THIS_MODULE		((struct lx_module *)NULL)
 #define	KBUILD_MODNAME_LKPI	KBUILD_MODNAME
 
+/*
+ * A driver's _fini(9E) calls lkpi_module_quiesce(&its modlinkage) after
+ * module_exit, before returning: the layer cancels (and reports) the
+ * driver's timers, work items, tasklets, irq_work and kthreads that are
+ * still active and waits for queued RCU callbacks and the shared
+ * workqueues, so that nothing runs driver code after the driver's text is
+ * unloaded (src/lkpi_module.c). lkpi_module_quiesce_range() does the same
+ * for an explicit text range.
+ */
+extern void lkpi_module_quiesce(struct modlinkage *ml);
+extern void lkpi_module_quiesce_range(const void *text, size_t size);
+
 #define	module_init(fn) \
 	int lkpi_module_init(void); \
 	int lkpi_module_init(void) { return (fn()); }

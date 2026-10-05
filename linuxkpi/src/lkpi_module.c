@@ -6,11 +6,19 @@
  * dependency order and installs the module; a failing part unwinds the
  * ones before it. _fini(9E) removes the module first (it fails while a
  * driver that depends on the layer is loaded) and only then tears the
- * parts down in reverse order. linuxkpi_check() is the version handshake
- * of the drivers (<lkpi/version.h>).
+ * parts down in reverse order; it refuses (EBUSY) while an interrupt
+ * handler could not be removed (free_irq(), src/lkpi_irq.c), because the
+ * handler's trampoline is in this module. linuxkpi_check() is the version
+ * handshake of the drivers (<lkpi/version.h>).
+ *
+ * lkpi_module_quiesce() is called by a driver's _fini(9E) after its
+ * module_exit: the layer's deferred work must not run driver code once
+ * the driver's text is unloaded.
  */
 
 #include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/rcupdate.h>
 #include <lkpi/version.h>
 #include "lkpi_internal.h"
 
@@ -82,6 +90,11 @@ _fini(void)
 {
 	int ret;
 
+	if (lkpi_irq_stuck() != 0) {
+		cmn_err(CE_WARN, "linuxkpi: %u interrupt handlers could not be "
+		    "removed; not unloading", lkpi_irq_stuck());
+		return (EBUSY);
+	}
 	ret = mod_remove(&lkpi_modlinkage);
 	if (ret != 0)
 		return (ret);
@@ -104,4 +117,49 @@ linuxkpi_check(const char *driver, unsigned int abi)
 	    "this module provides %u", driver != NULL ? driver : "?", abi,
 	    LINUXKPI_ABI);
 	return (EINVAL);
+}
+
+/*
+ * Quiesces the layer for a driver whose text is [text, text + size):
+ * waits for queued RCU callbacks, stops the driver's kthreads, disarms
+ * its timers, runs what is queued on the shared workqueues, cancels the
+ * driver's work items still queued or armed anywhere and waits for those
+ * running. Everything removed is reported: module_exit should have done
+ * it. Thread context.
+ */
+void
+lkpi_module_quiesce_range(const void *text, size_t size)
+{
+	uintptr_t lo = (uintptr_t)text, hi = lo + size;
+	int n;
+
+	if (servicing_interrupt() || text == NULL || hi < lo) {
+		WARN_ONCE(1, "linuxkpi: lkpi_module_quiesce_range(%p, %lu) "
+		    "refused", text, (unsigned long)size);
+		return;
+	}
+	rcu_barrier();
+	n = lkpi_kthread_quiesce(lo, hi);
+	n += lkpi_timer_quiesce(lo, hi);
+	lkpi_work_flush_system();
+	n += lkpi_work_quiesce(lo, hi);
+	/* Work that ran meanwhile may have armed timers or queued RCU. */
+	n += lkpi_timer_quiesce(lo, hi);
+	rcu_barrier();
+	if (n != 0)
+		cmn_err(CE_WARN, "linuxkpi: %d timers, work items or kthreads "
+		    "of the unloading driver were still active", n);
+}
+
+/* lkpi_module_quiesce_range() for the text of the module of ml. */
+void
+lkpi_module_quiesce(struct modlinkage *ml)
+{
+	modctl_t *mc = ml != NULL ? mod_getctl(ml) : NULL;
+
+	if (mc == NULL || mc->mod_text == NULL) {
+		WARN_ONCE(1, "linuxkpi: lkpi_module_quiesce(): no module text");
+		return;
+	}
+	lkpi_module_quiesce_range(mc->mod_text, mc->mod_text_size);
 }

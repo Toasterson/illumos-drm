@@ -7,7 +7,8 @@
  *
  * A workqueue is a list of pending work items served by worker threads
  * of a ddi_taskq(9F) whose tasks loop on the queue (one thread for
- * ordered queues, otherwise up to max_active, at most 8). queue_work()
+ * ordered queues, otherwise max_active, by default and at most a number
+ * that grows with the CPU count; see src/lkpi_work.c). queue_work()
  * only links the item and signals a worker, so it works in interrupt
  * handlers and never allocates. As on Linux, a pending item is queued at
  * most once, an item never runs on two workers at the same time, and an
@@ -20,6 +21,9 @@
  * loads; system_percpu_wq and system_dfl_wq (Linux's newer names) are
  * system_wq and system_unbound_wq. Flushing a queue from one of its own
  * items, or an item from itself, warns instead of deadlocking.
+ * disable_work*() cancel an item and keep it from being queued (queueing
+ * returns false) until as many enable_work*() calls; destroy_workqueue()
+ * disarms (and reports) delayed items still armed for the queue.
  */
 #ifndef _LINUX_WORKQUEUE_H
 #define	_LINUX_WORKQUEUE_H
@@ -57,6 +61,7 @@ struct delayed_work {
 	struct timer_list timer;
 	struct workqueue_struct *wq;
 	int cpu;
+	struct list_head lkpi_dlink;	/* wq's armed items, while armed */
 };
 
 struct rcu_work {
@@ -98,6 +103,12 @@ extern bool work_busy(struct work_struct *w);
 extern struct work_struct *current_work(void);
 extern void lkpi_init_work(struct work_struct *w, work_func_t func);
 extern void lkpi_init_delayed_work(struct delayed_work *dw, work_func_t func);
+extern bool disable_work(struct work_struct *w);
+extern bool disable_work_sync(struct work_struct *w);
+extern bool enable_work(struct work_struct *w);
+extern bool disable_delayed_work(struct delayed_work *dw);
+extern bool disable_delayed_work_sync(struct delayed_work *dw);
+extern bool enable_delayed_work(struct delayed_work *dw);
 
 #define	alloc_ordered_workqueue(fmt, flags, args...) \
 	alloc_workqueue(fmt, __WQ_ORDERED | (flags), 1, ##args)
@@ -134,10 +145,6 @@ extern void lkpi_init_delayed_work(struct delayed_work *dw, work_func_t func);
 #define	schedule_delayed_work(dw, d)	queue_delayed_work(system_wq, (dw), (d))
 #define	schedule_delayed_work_on(c, dw, d)	queue_delayed_work(system_wq, (dw), (d))
 #define	flush_scheduled_work()		flush_workqueue(system_wq)
-#define	disable_work_sync(w)		cancel_work_sync(w)
-#define	disable_delayed_work_sync(dw)	cancel_delayed_work_sync(dw)
-#define	enable_work(w)			true
-#define	enable_delayed_work(dw)		true
 #define	workqueue_set_max_active(wq, n)	((void)(wq), (void)(n))
 #define	current_is_workqueue_rescuer()	false
 

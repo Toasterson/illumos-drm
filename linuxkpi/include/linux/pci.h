@@ -13,8 +13,15 @@
  * (<linux/interrupt.h>). Other functions' config space
  * (pci_get_domain_bus_and_slot(), e.g. the host bridge) is reached by
  * finding their node in the device tree; such devices are read-only
- * wrappers without BARs or interrupts. Power states and save/restore of
- * config space are not supported (always D0; 0 returned).
+ * wrappers without BARs or interrupts (a host bridge accepts writes to
+ * the MCHBAR and DEVEN registers i915 programs). While a layer device
+ * attaches or detaches, only the siblings of its node are searched
+ * (src/lkpi_pci.c). Devices are reference counted (pci_dev_get(),
+ * pci_dev_put(), get_device(), put_device()); pci_get_*() return a
+ * reference. Config accesses are limited to the function's config space
+ * (cfg_size: 4096 bytes for PCI Express, else 256). Power states and
+ * save/restore of config space are not supported (always D0; 0
+ * returned).
  */
 #ifndef _LINUX_PCI_H
 #define	_LINUX_PCI_H
@@ -78,6 +85,7 @@ struct pci_dev {
 	u8 pcie_cap;
 	u8 msi_cap;
 	u8 msix_cap;
+	int cfg_size;
 	int irq;
 	unsigned int msi_enabled:1;
 	unsigned int msix_enabled:1;
@@ -122,7 +130,7 @@ struct pci_driver {
 #define	pci_is_pcie(p)		((p)->pcie_cap != 0)
 #define	pci_pcie_cap(p)		((p)->pcie_cap)
 #define	pci_dev_put(p)		lkpi_pci_dev_put(p)
-#define	pci_dev_get(p)		(p)
+#define	pci_dev_get(p)		lkpi_pci_dev_get(p)
 #define	pci_dev_present(ids)	0
 #define	pci_is_enabled(p)	true
 #define	pci_dev_run_wake(p)	false
@@ -177,6 +185,7 @@ extern struct pci_dev *pci_get_domain_bus_and_slot(int domain,
 extern struct pci_dev *pci_get_device(unsigned int vendor,
     unsigned int device, struct pci_dev *from);
 extern struct pci_dev *pci_get_class(unsigned int cls, struct pci_dev *from);
+extern struct pci_dev *lkpi_pci_dev_get(struct pci_dev *dev);
 extern void lkpi_pci_dev_put(struct pci_dev *dev);
 extern int pci_register_driver(struct pci_driver *drv);
 extern void pci_unregister_driver(struct pci_driver *drv);

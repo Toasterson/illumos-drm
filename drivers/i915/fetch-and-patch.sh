@@ -8,8 +8,11 @@
 # the MIT-licensed Linux headers of mit-headers.txt. The Linux source stays
 # outside illumos-drm; only the patches and this script are in it.
 #
-# Licences: every TU of tus.txt must be MIT (SPDX or the MIT notice), else
-# the script refuses the tree. i915's two tracepoint headers are GPL-2.0;
+# Licences: every TU of tus.txt and header of mit-headers.txt must be MIT
+# or HPND (check-licences.py), else the script refuses the tree. GPL-2.0
+# headers i915 includes are replaced in the tree: the tracepoint headers by
+# generated MIT no-op headers, intel_ips.h by illumos/intel_ips.h (MIT);
+# build.sh checks every Linux file the compiler read. i915's two tracepoint headers are GPL-2.0;
 # they are replaced in the tree by MIT no-op headers that
 # illumos/gen-trace-stubs.py writes from the original's event names
 # (TRACE_HEADERS below), so no GPL text reaches the build.
@@ -22,8 +25,9 @@
 # copies in <tree>/.illumos/series and reverts them before applying a
 # changed series); the script never discards other changes.
 set -euo pipefail
-# GNU grep and sed first on illumos (\b in the licence checks)
+# GNU grep and sed first on illumos; one collation everywhere
 PATH=/usr/gnu/bin:$PATH
+export LC_ALL=C
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck disable=SC1091
@@ -45,9 +49,14 @@ fi
 
 I915=drivers/gpu/drm/i915
 TRACE_HEADERS="$I915/i915_trace.h $I915/intel_uncore_trace.h"
-# git pathspecs that leave out the generated headers
+# GPL-2.0 headers i915 includes by relative path, replaced by the MIT
+# files of illumos/ (tree path, then replacement)
+REPLACED="drivers/platform/x86/intel_ips.h illumos/intel_ips.h"
+# git pathspecs that leave out the generated and replaced headers
 keep=()
 for h in $TRACE_HEADERS; do keep+=(":(exclude)$h"); done
+set -- $REPLACED
+while [ $# -ge 2 ]; do keep+=(":(exclude)$1"); shift 2; done
 
 series=$( (cd "$HERE" && ls patches/*.patch 2>/dev/null || true) | sort)
 sum=$(cd "$HERE" && cat /dev/null $series | sha256sum 2>/dev/null | cut -d' ' -f1 ||
@@ -60,7 +69,7 @@ else
 	# series off again (the copies kept at the time), newest first.
 	if [ -f "$stamp" ] && [ -d "$dest/.illumos/series" ]; then
 		# shellcheck disable=SC2086
-		git -C "$dest" checkout -- $TRACE_HEADERS
+		git -C "$dest" checkout -- $TRACE_HEADERS $(echo $REPLACED | awk '{ for (i = 1; i <= NF; i += 2) print $i }')
 		for p in $(ls "$dest/.illumos/series" | sort -r); do
 			echo "fetch-and-patch: reverting the earlier $p"
 			git -C "$dest" apply -R --whitespace=nowarn "$dest/.illumos/series/$p"
@@ -73,7 +82,7 @@ else
 		exit 1
 	fi
 	# shellcheck disable=SC2086
-	git -C "$dest" checkout -- $TRACE_HEADERS
+	git -C "$dest" checkout -- $TRACE_HEADERS $(echo $REPLACED | awk '{ for (i = 1; i <= NF; i += 2) print $i }')
 	for p in $series; do
 		echo "fetch-and-patch: applying $p"
 		git -C "$dest" apply --whitespace=nowarn "$HERE/$p"
@@ -91,23 +100,26 @@ for h in $TRACE_HEADERS; do
 	rm -f "$dest/.illumos/$(basename "$h").orig"
 done
 
-# The TUs: MIT only.
-grep -v '^#' "$HERE/tus.txt" | grep . | grep -v '^illumos/' | while read -r f; do
-	if ! head -40 "$dest/$I915/$f" | grep -q -E 'SPDX-License-Identifier:[[:space:]]*MIT\b|Permission is hereby granted, free of charge'; then
-		echo "fetch-and-patch: $I915/$f is not MIT-licensed; refusing it" >&2
-		exit 1
-	fi
+# The replaced headers.
+set -- $REPLACED
+while [ $# -ge 2 ]; do
+	cp "$HERE/$2" "$dest/$1"
+	shift 2
 done
+
+# The TUs and the headers used unchanged: MIT (or HPND) only. The build
+# checks every Linux file the compiler read, too (build.sh).
+{
+	grep -v '^#' "$HERE/tus.txt" | grep . | grep -v '^illumos/' | sed "s|^|$I915/|"
+	grep -v '^#' "$HERE/mit-headers.txt" | grep .
+} > "$dest/.illumos/licence-check.txt"
+python3 "$HERE/check-licences.py" "$dest" "$dest/.illumos/licence-check.txt"
 
 mit=$dest/.illumos/mit-include
 rm -rf "$mit"
 mkdir -p "$mit"
 grep -v '^#' "$HERE/mit-headers.txt" | grep . | while read -r f; do
 	src=$dest/$f
-	if ! head -40 "$src" | grep -q -i -E 'SPDX-License-Identifier:.*\bMIT\b|Permission is hereby granted, free of charge|Permission to use, copy, modify, distribute, and sell this software'; then
-		echo "fetch-and-patch: $f is not MIT-licensed (or HPND); refusing it" >&2
-		exit 1
-	fi
 	d=$mit/${f#include/}
 	mkdir -p "$(dirname "$d")"
 	cp "$src" "$d"

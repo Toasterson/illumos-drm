@@ -23,6 +23,17 @@
  * be called in atomic context: it fails instead, and i915 then shrinks
  * and retries.
  *
+ * Streaming mappings never use a copy buffer. rootnex bounces pages that
+ * lie outside the device's address range through one, and only
+ * ddi_dma_sync(9F) moves data between the two; i915 does not sync its
+ * GEM objects (it expects the device to see the pages themselves), so a
+ * bounced binding would lose data silently. lkpi_dma_bind() therefore
+ * checks every page's frame against dma_attr_addr_lo/hi first, with
+ * rootnex's own test, and refuses the binding (the layer's default
+ * attributes give no other reason to bounce: no segment bounce flag,
+ * unlimited sgllen). With an IOMMU, rootnex would remap instead of
+ * bouncing; the check is then stricter than needed.
+ *
  * dma_map_page()/dma_map_single() bind one range that must give one
  * cookie (a physically contiguous range); dma_map_resource() first maps
  * the physical range into the kernel (vmap_pfn(), uncached) and binds
@@ -144,7 +155,31 @@ lkpi_dma_syncflag(bool for_cpu)
 	return (for_cpu ? DDI_DMA_SYNC_FORCPU : DDI_DMA_SYNC_FORDEV);
 }
 
-/* Binds [kva, kva + len) without sleeping. */
+/*
+ * True if the device reaches every page of [kva, kva + len), so rootnex
+ * binds it without a copy buffer (its test in rootnex_get_sgl()).
+ */
+static bool
+lkpi_dma_reachable(const ddi_dma_attr_t *attr, caddr_t kva, size_t len)
+{
+	uintptr_t va = P2ALIGN((uintptr_t)kva, PAGE_SIZE);
+	uintptr_t end = (uintptr_t)kva + len;
+	uint64_t pa;
+	pfn_t pfn;
+
+	for (; va < end; va += PAGE_SIZE) {
+		pfn = hat_getpfnum(kas.a_hat, (caddr_t)va);
+		if (pfn == PFN_INVALID)
+			return (false);
+		pa = (uint64_t)pfn << PAGE_SHIFT;
+		if (pa < attr->dma_attr_addr_lo ||
+		    pa + PAGE_SIZE > attr->dma_attr_addr_hi)
+			return (false);
+	}
+	return (true);
+}
+
+/* Binds [kva, kva + len) without sleeping and without a copy buffer. */
 static int
 lkpi_dma_bind(dev_info_t *dip, const ddi_dma_attr_t *attr, caddr_t kva,
     size_t len, uint_t flags, ddi_dma_handle_t *hp, uint_t *ccountp)
@@ -152,6 +187,12 @@ lkpi_dma_bind(dev_info_t *dip, const ddi_dma_attr_t *attr, caddr_t kva,
 	ddi_dma_handle_t h;
 	ddi_dma_cookie_t c;
 
+	if (!lkpi_dma_reachable(attr, kva, len)) {
+		WARN_ONCE(1, "DMA: memory at %p is outside the device's "
+		    "address range (mask %llx); not using a copy buffer",
+		    (void *)kva, (unsigned long long)attr->dma_attr_addr_hi);
+		return (-EIO);
+	}
 	if (ddi_dma_alloc_handle(dip, attr, DDI_DMA_DONTWAIT, NULL, &h) !=
 	    DDI_SUCCESS)
 		return (-ENOMEM);

@@ -5,14 +5,17 @@
  * Linux's RCU (include/linux/rcupdate.h, GPL-2.0; reimplemented in
  * src/lkpi_rcu.c).
  *
- * Readers increment one global count in rcu_read_lock() and decrement it
- * in rcu_read_unlock(), each with a full memory barrier; they may nest and
- * run in interrupt handlers. synchronize_rcu() returns once the count was
- * observed at zero after the caller's updates: every reader that might
- * see the old data has then finished (the store/load barriers on both
- * sides guarantee that a reader the writer did not see sees the new
- * data). This is a correct grace period, but a continuous overlap of
- * readers on many processors delays it; it has no per-CPU state.
+ * Grace periods use two reader counts and a phase index (src/lkpi_rcu.c).
+ * The outermost rcu_read_lock() of a thread counts it in the current
+ * phase and remembers that phase for its rcu_read_unlock(): in the
+ * thread's task (`current`) in thread context, in a small table keyed by
+ * the interrupt thread in an interrupt handler. Read sections nest, may
+ * run in interrupt handlers and stay correct when the reader moves to
+ * another CPU; as with Linux's non-preemptible RCU they must not sleep
+ * (blocking on a spinlock, an adaptive mutex here, is fine).
+ * synchronize_rcu() flips the phase and waits only for the readers of the
+ * old one, so readers that start meanwhile do not hold it up: a grace
+ * period is bounded by the longest read section that overlaps it.
  * call_rcu() and kfree_rcu() queue the callback for a layer task queue
  * that waits for a grace period and then runs the callbacks in thread
  * context; rcu_barrier() waits for all queued callbacks.
@@ -33,23 +36,8 @@
 #include <linux/preempt.h>
 #include <asm/barrier.h>
 
-extern volatile uint32_t lkpi_rcu_readers;
-extern void lkpi_rcu_read_unlock_slow(void);
-
-static inline void
-rcu_read_lock(void)
-{
-	(void)__atomic_fetch_add(&lkpi_rcu_readers, 1, __ATOMIC_SEQ_CST);
-	barrier();
-}
-
-static inline void
-rcu_read_unlock(void)
-{
-	barrier();
-	if (__atomic_sub_fetch(&lkpi_rcu_readers, 1, __ATOMIC_SEQ_CST) == 0)
-		lkpi_rcu_read_unlock_slow();
-}
+extern void rcu_read_lock(void);
+extern void rcu_read_unlock(void);
 
 #define	rcu_read_lock_bh()		rcu_read_lock()
 #define	rcu_read_unlock_bh()		rcu_read_unlock()

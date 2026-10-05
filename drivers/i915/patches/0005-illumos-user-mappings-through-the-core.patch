@@ -6,7 +6,11 @@ one fake offset (drm_gem_create_mmap_offset()), and the core maps the
 memory its illumos_umem callback names. i915's objects are made with
 drm_gem_private_object_init(), which the core refuses for objects
 without that callback; i915_illumos_gem_umem() names the shmem file's
-memory (no memory for internal, stolen and imported objects).
+memory (no memory for internal, stolen and imported objects). i915 also
+asks for its close callback on every removed handle, as Linux calls it
+(illumos_close_every_handle): i915_gem_close_object() drops the file's
+execbuffer lookup entries, which a handle number reused after GEM_CLOSE
+would otherwise find.
 DRM_IOCTL_I915_GEM_MMAP_OFFSET (and the dumb-buffer offset) go to
 i915_illumos_mmap_offset(), which hands out the object's core offset
 for write-back mappings and, on LLC platforms for objects the CPU cache
@@ -46,7 +50,7 @@ offsets (struct i915_mmap_offset) are not used on illumos.
  	    !i915_gem_object_has_iomem(obj))
 --- a/drivers/gpu/drm/i915/gem/i915_gem_object.c	2026-10-05 09:33:16.868861331 +0000
 +++ b/drivers/gpu/drm/i915/gem/i915_gem_object.c	2026-10-05 09:33:16.869861345 +0000
-@@ -894,9 +894,21 @@
+@@ -894,9 +894,23 @@
  	return 0;
  }
  
@@ -64,6 +68,8 @@ offsets (struct i915_mmap_offset) are not used on illumos.
 +	 * it); the core requires it of objects without core memory.
 +	 */
 +	.illumos_umem = i915_illumos_gem_umem,
++	/* i915_gem_close_object() drops the file's lookup tables (LUTs). */
++	.illumos_close_every_handle = true,
 +#endif
  #ifndef __illumos__
  	/* On illumos the DRM core exports and maps dma-bufs itself. */

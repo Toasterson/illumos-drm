@@ -4,20 +4,39 @@
  *
  * Linux's RCU and sleepable RCU (<linux/rcupdate.h>, <linux/srcu.h>).
  *
- * Grace periods: rcu_read_lock() and rcu_read_unlock() count the readers
- * in lkpi_rcu_readers (inline, sequentially consistent atomics).
- * synchronize_rcu() returns once the count was zero at some instant after
- * its start: every reader that was inside a read section when it started
- * has then left it. The writer cannot poll for that instant (readers on
- * other processors may keep the count above zero most of the time), so
- * while a writer waits, the reader that brings the count to zero bumps an
- * epoch and wakes it (lkpi_rcu_read_unlock_slow()); a wake-up missed in
- * the window between the writer's tests is caught by re-testing every
- * clock tick. Grace periods are serialised and numbered (rcu_gp_seq: odd
- * while one runs) for the polled interface.
+ * Grace periods (RCU and each srcu_struct): two reader counts and a phase
+ * index. A reader increments the count of the current phase (followed by
+ * a full barrier) and decrements the same count when it leaves. A grace
+ * period, serialised by gp_lock:
+ *	1. waits until the count of the other phase is zero;
+ *	2. flips the phase;
+ *	3. waits until the count of the old phase is zero.
+ * Readers that start after the flip use the new phase, so step 3 waits
+ * only for readers that overlap the grace period. A reader that read the
+ * old phase before the flip but counted itself only after step 3 found
+ * the count at zero sees the updater's data (the updater's store, its
+ * barrier and its read of the count against the reader's increment, its
+ * barrier and its reads); it may still be reading when the next grace
+ * period starts, which is why step 1 of that period waits for it. Both
+ * waits are bounded by read sections that already began.
  *
- * synchronize_rcu() must not be called inside a read section (it would
- * wait for itself); after 10 seconds it reports that it is still waiting.
+ * Waiters sleep on the structure's condition variable; the reader that
+ * brings a count to zero while someone waits broadcasts it, and a wake-up
+ * lost between the waiter's test and its sleep is caught by re-testing
+ * every clock tick. After 10 seconds a wait reports that it is still
+ * waiting (a grace period started inside a read section waits for
+ * itself).
+ *
+ * RCU readers remember the phase of their outermost read section: in the
+ * task of the thread (`current`, <linux/sched.h>) in thread context; in
+ * an interrupt handler, where `current` is a shared placeholder, in a
+ * slot of lkpi_rcu_slots claimed by the interrupt thread, found by
+ * hashing curthread and probing a few slots. Read sections nest. Either
+ * record belongs to one thread, so a reader that moves to another CPU
+ * keeps it. High-level interrupt handlers (which run on the interrupted
+ * thread's stack) are not supported; the layer never installs them.
+ * RCU grace periods are numbered (rcu_gp_seq: odd while one runs) for
+ * the polled interface.
  *
  * Callbacks (call_rcu(), kfree_rcu()) are queued in order for one layer
  * thread (a single-thread ddi_taskq(9F)) that takes the whole queue,
@@ -30,19 +49,27 @@
 
 #include <linux/rcupdate.h>
 #include <linux/srcu.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/bug.h>
 #include "lkpi_internal.h"
 
-volatile uint32_t lkpi_rcu_readers;
-
-/* Writers waiting for the reader count to reach zero, and its epoch. */
-static volatile uint32_t lkpi_rcu_waiters;
-static volatile uint32_t lkpi_rcu_epoch;
-static kmutex_t lkpi_rcu_lock;		/* the epoch's sleepers */
-static kcondvar_t lkpi_rcu_cv;
-static kmutex_t lkpi_rcu_gp_lock;	/* serialises grace periods */
+/* RCU's grace-period state: the same machinery as an srcu_struct. */
+static struct srcu_struct lkpi_rcu_gp;
+static kmutex_t lkpi_rcu_sync_lock;	/* a numbered grace period */
 static volatile unsigned long lkpi_rcu_gp_seq;
+
+/* The phase records of interrupt-context RCU readers. */
+#define	LKPI_RCU_SLOTS	256
+#define	LKPI_RCU_PROBE	16
+
+struct lkpi_rcu_slot {
+	kthread_t *volatile owner;
+	unsigned int nest;
+	unsigned int idx;
+};
+
+static struct lkpi_rcu_slot lkpi_rcu_slots[LKPI_RCU_SLOTS];
 
 /* The callback queue and its thread. */
 static kmutex_t lkpi_rcu_cb_lock;
@@ -62,43 +89,195 @@ static ddi_taskq_t *lkpi_rcu_tq;
 
 #define	LKPI_RCU_WARN_NS	(10LL * NANOSEC)
 
-/*
- * Waits until *readers was zero at some instant after the call, given
- * that a reader bringing it to zero while *waiters is non-zero
- * increments *epoch and broadcasts cv under lock. Called with lock held.
- */
-static void
-lkpi_rcu_wait_readers(volatile uint32_t *readers, volatile uint32_t *waiters,
-    volatile uint32_t *epoch, kmutex_t *lock, kcondvar_t *cv,
-    const char *what)
-{
-	hrtime_t start = gethrtime();
-	boolean_t warned = B_FALSE;
-	uint32_t e0;
+/* --- grace-period machinery (RCU and SRCU) ------------------------------ */
 
-	(void) __atomic_add_fetch(waiters, 1, __ATOMIC_SEQ_CST);
-	e0 = __atomic_load_n(epoch, __ATOMIC_SEQ_CST);
-	while (__atomic_load_n(readers, __ATOMIC_SEQ_CST) != 0 &&
-	    __atomic_load_n(epoch, __ATOMIC_SEQ_CST) == e0) {
-		(void) cv_reltimedwait(cv, lock, 1, TR_CLOCK_TICK);
-		if (!warned && gethrtime() - start > LKPI_RCU_WARN_NS) {
-			warned = B_TRUE;
+/* Counts a reader in the current phase; returns the phase. */
+static unsigned int
+lkpi_gp_enter(struct srcu_struct *gp)
+{
+	unsigned int idx = __atomic_load_n(&gp->idx, __ATOMIC_SEQ_CST) & 1;
+
+	(void) __atomic_add_fetch(&gp->readers[idx], 1, __ATOMIC_SEQ_CST);
+	/* The read section's loads follow the increment. */
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	return (idx);
+}
+
+/* Uncounts a reader of phase idx; wakes a waiting grace period. */
+static void
+lkpi_gp_exit(struct srcu_struct *gp, unsigned int idx)
+{
+	if (__atomic_sub_fetch(&gp->readers[idx], 1, __ATOMIC_SEQ_CST) != 0 ||
+	    __atomic_load_n(&gp->waiters, __ATOMIC_SEQ_CST) == 0)
+		return;
+	mutex_enter(&gp->lock);
+	cv_broadcast(&gp->cv);
+	mutex_exit(&gp->lock);
+}
+
+/* Waits until phase idx has no readers. */
+static void
+lkpi_gp_wait_phase(struct srcu_struct *gp, unsigned int idx,
+    const char *what, hrtime_t start, boolean_t *warned)
+{
+	if (__atomic_load_n(&gp->readers[idx], __ATOMIC_SEQ_CST) == 0)
+		return;
+	(void) __atomic_add_fetch(&gp->waiters, 1, __ATOMIC_SEQ_CST);
+	mutex_enter(&gp->lock);
+	while (__atomic_load_n(&gp->readers[idx], __ATOMIC_SEQ_CST) != 0) {
+		(void) cv_reltimedwait(&gp->cv, &gp->lock, 1, TR_CLOCK_TICK);
+		if (!*warned && gethrtime() - start > LKPI_RCU_WARN_NS) {
+			*warned = B_TRUE;
 			cmn_err(CE_WARN, "linuxkpi: %s has waited 10 s for "
 			    "readers (called inside a read section?)", what);
 		}
 	}
-	(void) __atomic_sub_fetch(waiters, 1, __ATOMIC_SEQ_CST);
+	mutex_exit(&gp->lock);
+	(void) __atomic_sub_fetch(&gp->waiters, 1, __ATOMIC_SEQ_CST);
+}
+
+/* A full grace period of gp (see the top of the file). */
+static void
+lkpi_gp_sync(struct srcu_struct *gp, const char *what)
+{
+	hrtime_t start = gethrtime();
+	boolean_t warned = B_FALSE;
+	unsigned int idx;
+
+	/* The caller's updates before the reader counts are read. */
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	mutex_enter(&gp->gp_lock);
+	idx = __atomic_load_n(&gp->idx, __ATOMIC_SEQ_CST) & 1;
+	lkpi_gp_wait_phase(gp, idx ^ 1, what, start, &warned);
+	__atomic_store_n(&gp->idx, idx ^ 1, __ATOMIC_SEQ_CST);
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	lkpi_gp_wait_phase(gp, idx, what, start, &warned);
+	mutex_exit(&gp->gp_lock);
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+static void
+lkpi_gp_init(struct srcu_struct *gp)
+{
+	gp->readers[0] = gp->readers[1] = 0;
+	gp->idx = 0;
+	gp->waiters = 0;
+	(mutex_init)(&gp->lock, NULL, MUTEX_DRIVER, NULL);
+	cv_init(&gp->cv, NULL, CV_DRIVER, NULL);
+	(mutex_init)(&gp->gp_lock, NULL, MUTEX_DRIVER, NULL);
+}
+
+static void
+lkpi_gp_fini(struct srcu_struct *gp)
+{
+	WARN_ON(gp->readers[0] != 0 || gp->readers[1] != 0);
+	(mutex_destroy)(&gp->gp_lock);
+	cv_destroy(&gp->cv);
+	(mutex_destroy)(&gp->lock);
+}
+
+/* --- RCU readers -------------------------------------------------------- */
+
+static inline uint_t
+lkpi_rcu_hash(const kthread_t *t)
+{
+	uintptr_t h = (uintptr_t)t;
+
+	return ((uint_t)((h >> 6) ^ (h >> 14)) % LKPI_RCU_SLOTS);
+}
+
+/* The slot of the calling interrupt thread, or NULL if it has none. */
+static struct lkpi_rcu_slot *
+lkpi_rcu_slot_find(void)
+{
+	uint_t h = lkpi_rcu_hash(curthread), i;
+	struct lkpi_rcu_slot *sl;
+
+	for (i = 0; i < LKPI_RCU_PROBE; i++) {
+		sl = &lkpi_rcu_slots[(h + i) % LKPI_RCU_SLOTS];
+		if (sl->owner == curthread)
+			return (sl);
+	}
+	return (NULL);
+}
+
+/*
+ * Claims a free slot for the calling interrupt thread. All slots of its
+ * probe range are taken only with dozens of nested interrupt readers;
+ * spin until one leaves.
+ */
+static struct lkpi_rcu_slot *
+lkpi_rcu_slot_claim(void)
+{
+	uint_t h = lkpi_rcu_hash(curthread), i;
+	struct lkpi_rcu_slot *sl;
+	kthread_t *expect;
+
+	for (;;) {
+		for (i = 0; i < LKPI_RCU_PROBE; i++) {
+			sl = &lkpi_rcu_slots[(h + i) % LKPI_RCU_SLOTS];
+			expect = NULL;
+			if (sl->owner == NULL &&
+			    __atomic_compare_exchange_n(&sl->owner, &expect,
+			    curthread, B_FALSE, __ATOMIC_SEQ_CST,
+			    __ATOMIC_SEQ_CST)) {
+				sl->nest = 0;
+				return (sl);
+			}
+		}
+		WARN_ONCE(1, "linuxkpi: RCU reader slots exhausted");
+		cpu_relax();
+	}
 }
 
 void
-lkpi_rcu_read_unlock_slow(void)
+rcu_read_lock(void)
 {
-	if (__atomic_load_n(&lkpi_rcu_waiters, __ATOMIC_SEQ_CST) == 0)
+	struct task_struct *t = lkpi_task_self();
+	struct lkpi_rcu_slot *sl;
+
+	if (t != NULL) {
+		if (t->lkpi_rcu_nest++ == 0)
+			t->lkpi_rcu_idx = lkpi_gp_enter(&lkpi_rcu_gp);
+	} else {
+		sl = lkpi_rcu_slot_find();
+		if (sl == NULL)
+			sl = lkpi_rcu_slot_claim();
+		if (sl->nest++ == 0)
+			sl->idx = lkpi_gp_enter(&lkpi_rcu_gp);
+	}
+	barrier();
+}
+
+void
+rcu_read_unlock(void)
+{
+	struct task_struct *t = lkpi_task_self();
+	struct lkpi_rcu_slot *sl;
+	unsigned int idx;
+
+	barrier();
+	if (t != NULL) {
+		if (t->lkpi_rcu_nest == 0) {
+			WARN_ONCE(1, "linuxkpi: rcu_read_unlock() without "
+			    "rcu_read_lock()");
+			return;
+		}
+		if (--t->lkpi_rcu_nest == 0)
+			lkpi_gp_exit(&lkpi_rcu_gp, t->lkpi_rcu_idx);
 		return;
-	mutex_enter(&lkpi_rcu_lock);
-	(void) __atomic_add_fetch(&lkpi_rcu_epoch, 1, __ATOMIC_SEQ_CST);
-	cv_broadcast(&lkpi_rcu_cv);
-	mutex_exit(&lkpi_rcu_lock);
+	}
+	sl = lkpi_rcu_slot_find();
+	if (sl == NULL || sl->nest == 0) {
+		WARN_ONCE(1, "linuxkpi: rcu_read_unlock() without "
+		    "rcu_read_lock() in an interrupt");
+		return;
+	}
+	if (--sl->nest == 0) {
+		idx = sl->idx;
+		__atomic_store_n(&sl->owner, NULL, __ATOMIC_SEQ_CST);
+		lkpi_gp_exit(&lkpi_rcu_gp, idx);
+	}
 }
 
 void
@@ -108,17 +287,11 @@ synchronize_rcu(void)
 		WARN_ONCE(1, "linuxkpi: synchronize_rcu() in an interrupt");
 		return;
 	}
-	/* The caller's updates before the reader count is read. */
-	__atomic_thread_fence(__ATOMIC_SEQ_CST);
-	mutex_enter(&lkpi_rcu_gp_lock);
+	mutex_enter(&lkpi_rcu_sync_lock);
 	(void) __atomic_add_fetch(&lkpi_rcu_gp_seq, 1, __ATOMIC_SEQ_CST);
-	mutex_enter(&lkpi_rcu_lock);
-	lkpi_rcu_wait_readers(&lkpi_rcu_readers, &lkpi_rcu_waiters,
-	    &lkpi_rcu_epoch, &lkpi_rcu_lock, &lkpi_rcu_cv, "synchronize_rcu()");
-	mutex_exit(&lkpi_rcu_lock);
+	lkpi_gp_sync(&lkpi_rcu_gp, "synchronize_rcu()");
 	(void) __atomic_add_fetch(&lkpi_rcu_gp_seq, 1, __ATOMIC_SEQ_CST);
-	mutex_exit(&lkpi_rcu_gp_lock);
-	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	mutex_exit(&lkpi_rcu_sync_lock);
 }
 
 /*
@@ -282,51 +455,45 @@ lkpi_rcu_thread(void *arg)
 int
 init_srcu_struct(struct srcu_struct *ssp)
 {
-	ssp->readers = 0;
-	ssp->waiters = 0;
-	ssp->epoch = 0;
-	(mutex_init)(&ssp->lock, NULL, MUTEX_DRIVER, NULL);
-	cv_init(&ssp->cv, NULL, CV_DRIVER, NULL);
+	lkpi_gp_init(ssp);
 	return (0);
 }
 
 void
 cleanup_srcu_struct(struct srcu_struct *ssp)
 {
-	WARN_ON(ssp->readers != 0);
-	cv_destroy(&ssp->cv);
-	(mutex_destroy)(&ssp->lock);
+	lkpi_gp_fini(ssp);
 }
 
 int
 srcu_read_lock(struct srcu_struct *ssp)
 {
-	(void) __atomic_add_fetch(&ssp->readers, 1, __ATOMIC_SEQ_CST);
-	return (0);
+	return ((int)lkpi_gp_enter(ssp));
 }
 
 void
 srcu_read_unlock(struct srcu_struct *ssp, int idx)
 {
-	if (__atomic_sub_fetch(&ssp->readers, 1, __ATOMIC_SEQ_CST) != 0 ||
-	    __atomic_load_n(&ssp->waiters, __ATOMIC_SEQ_CST) == 0)
+	if (idx != 0 && idx != 1) {
+		WARN_ONCE(1, "linuxkpi: srcu_read_unlock() with index %d", idx);
 		return;
-	mutex_enter(&ssp->lock);
-	(void) __atomic_add_fetch(&ssp->epoch, 1, __ATOMIC_SEQ_CST);
-	cv_broadcast(&ssp->cv);
-	mutex_exit(&ssp->lock);
+	}
+	if (__atomic_load_n(&ssp->readers[idx], __ATOMIC_SEQ_CST) == 0) {
+		WARN_ONCE(1, "linuxkpi: srcu_read_unlock() without a reader");
+		return;
+	}
+	lkpi_gp_exit(ssp, (unsigned int)idx);
 }
 
 void
 synchronize_srcu(struct srcu_struct *ssp)
 {
 	might_sleep();
-	__atomic_thread_fence(__ATOMIC_SEQ_CST);
-	mutex_enter(&ssp->lock);
-	lkpi_rcu_wait_readers(&ssp->readers, &ssp->waiters, &ssp->epoch,
-	    &ssp->lock, &ssp->cv, "synchronize_srcu()");
-	mutex_exit(&ssp->lock);
-	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	if (servicing_interrupt()) {
+		WARN_ONCE(1, "linuxkpi: synchronize_srcu() in an interrupt");
+		return;
+	}
+	lkpi_gp_sync(ssp, "synchronize_srcu()");
 }
 
 /* --- module state ---------------------------------------------------------- */
@@ -334,9 +501,9 @@ synchronize_srcu(struct srcu_struct *ssp)
 int
 lkpi_rcu_init(void)
 {
-	(mutex_init)(&lkpi_rcu_lock, NULL, MUTEX_DRIVER, NULL);
-	cv_init(&lkpi_rcu_cv, NULL, CV_DRIVER, NULL);
-	(mutex_init)(&lkpi_rcu_gp_lock, NULL, MUTEX_DRIVER, NULL);
+	lkpi_gp_init(&lkpi_rcu_gp);
+	(mutex_init)(&lkpi_rcu_sync_lock, NULL, MUTEX_DRIVER, NULL);
+	bzero(lkpi_rcu_slots, sizeof (lkpi_rcu_slots));
 	(mutex_init)(&lkpi_rcu_cb_lock, NULL, MUTEX_DRIVER, NULL);
 	cv_init(&lkpi_rcu_cb_cv, NULL, CV_DRIVER, NULL);
 	cv_init(&lkpi_rcu_done_cv, NULL, CV_DRIVER, NULL);
@@ -359,9 +526,8 @@ fail:
 	cv_destroy(&lkpi_rcu_done_cv);
 	cv_destroy(&lkpi_rcu_cb_cv);
 	(mutex_destroy)(&lkpi_rcu_cb_lock);
-	(mutex_destroy)(&lkpi_rcu_gp_lock);
-	cv_destroy(&lkpi_rcu_cv);
-	(mutex_destroy)(&lkpi_rcu_lock);
+	(mutex_destroy)(&lkpi_rcu_sync_lock);
+	lkpi_gp_fini(&lkpi_rcu_gp);
 	return (-ENOMEM);
 }
 
@@ -383,11 +549,9 @@ lkpi_rcu_fini(void)
 	cv_broadcast(&lkpi_rcu_done_cv);
 	mutex_exit(&lkpi_rcu_cb_lock);
 
-	WARN_ON(lkpi_rcu_readers != 0);
 	cv_destroy(&lkpi_rcu_done_cv);
 	cv_destroy(&lkpi_rcu_cb_cv);
 	(mutex_destroy)(&lkpi_rcu_cb_lock);
-	(mutex_destroy)(&lkpi_rcu_gp_lock);
-	cv_destroy(&lkpi_rcu_cv);
-	(mutex_destroy)(&lkpi_rcu_lock);
+	(mutex_destroy)(&lkpi_rcu_sync_lock);
+	lkpi_gp_fini(&lkpi_rcu_gp);
 }

@@ -113,6 +113,9 @@ if ! prtconf -pv | grep -q "pci1b36,5"; then
 	bad "no QEMU pci-testdev (pci1b36,5) in this guest"
 else
 	step cp linuxkpi_selftest $DRV/linuxkpi_selftest
+	# WARNs inside the self-test are its own (it provokes some on
+	# purpose); the run's no-WARN check leaves its window out.
+	warn_st0=$(echo 'lkpi_warnings/E' | mdb -k 2>/dev/null | awk 'NF == 2 { print $2 }')
 	if step add_drv -i '"pci1b36,5"' linuxkpi_selftest; then
 		pass "add_drv linuxkpi_selftest"
 	else
@@ -149,6 +152,8 @@ else
 	id=$(modid linuxkpi_selftest)
 	[ -n "$id" ] && step modunload -i "$id"
 	step rm -f $DRV/linuxkpi_selftest
+	warn_st1=$(echo 'lkpi_warnings/E' | mdb -k 2>/dev/null | awk 'NF == 2 { print $2 }')
+	echo "lkpi_warnings during the self-test: ${warn_st0:-?} -> ${warn_st1:-?}"
 fi
 
 echo
@@ -178,6 +183,15 @@ if grep -q '^i915n ' /etc/name_to_major; then
 else
 	bad "add_drv i915n"
 fi
+# Twice: module_exit must unregister the PCI driver so that the second
+# module_init can register it again.
+step modload -p drv/i915n
+id=$(modid i915n)
+if [ -n "$id" ] && step modunload -i "$id"; then
+	pass "i915n loads and unloads (first time)"
+else
+	bad "i915n first load/unload"
+fi
 step modload -p drv/i915n
 if [ -n "$(modid i915n)" ]; then
 	pass "i915n loads: imports resolved, i915 module_init registered its PCI driver"
@@ -199,6 +213,18 @@ else
 	bad "i915n does not load"
 	step tail -40 /var/adm/messages
 fi
+# The attach-failure path: bound to the PCI test device, which is not in
+# i915's ID table, i915n refuses the attach and nothing stays behind.
+if prtconf -pv | grep -q "pci1b36,5"; then
+	step update_drv -a -i '"pci1b36,5"' i915n
+	step prtconf -D | grep 'pci1b36,5'
+	if prtconf -D | grep 'pci1b36,5' | grep -q 'driver name: i915n'; then
+		bad "i915n attached to the PCI test device"
+	else
+		pass "i915n refuses a device outside its ID table"
+	fi
+	step update_drv -d -i '"pci1b36,5"' i915n
+fi
 step rem_drv i915n
 step rm -f $DRV/i915n
 
@@ -206,10 +232,11 @@ echo
 echo "=== E: unload and cleanup"
 warn1=$(echo 'lkpi_warnings/E' | mdb -k 2>/dev/null | awk 'NF == 2 { print $2 }')
 echo "lkpi_warnings at end: ${warn1:-unknown}"
-if [ -n "$warn0" ] && [ "$warn0" = "$warn1" ]; then
-	pass "no WARN fired in the layer during the run"
+outside=$(( ${warn1:-0} - ${warn0:-0} - (${warn_st1:-0} - ${warn_st0:-0}) ))
+if [ -n "$warn0" ] && [ -n "$warn1" ] && [ "$outside" -eq 0 ]; then
+	pass "no WARN fired in the layer outside the self-test"
 else
-	bad "WARNs fired in the layer during the run (${warn0:-?} -> ${warn1:-?})"
+	bad "WARNs fired in the layer outside the self-test ($outside)"
 	newlog | grep "WARNING at" | head -20
 fi
 for m in drm_helpers linuxkpi; do

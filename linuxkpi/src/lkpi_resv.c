@@ -19,6 +19,10 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 
+#include "lkpi_internal.h"
+
+static void lkpi_resv_snaps_release(struct dma_resv *obj);
+
 /* The class of reservation locks: one class, the core's. */
 struct ww_class reservation_ww_class =
     __WW_CLASS_INITIALIZER(reservation_ww_class, 1);
@@ -97,11 +101,18 @@ lkpi_dma_resv_unlock(struct dma_resv *obj)
 {
 	struct ww_acquire_ctx *ctx = obj->lock.ctx;
 
+	/* Snapshots of locked iterations end with the lock. */
+	lkpi_resv_snaps_release(obj);
 	if (ctx != NULL) {
+		/*
+		 * The core refuses an unlock by a thread that does not hold
+		 * the lock; the C state changes only when it accepted.
+		 */
+		if (drm_illumos_resv_unlock_ctx(obj, ctx->stamp) != 0)
+			return;
 		obj->lock.ctx = NULL;
 		WARN_ON(ctx->acquired == 0);
 		ctx->acquired--;
-		drm_illumos_resv_unlock_ctx(obj, ctx->stamp);
 	} else {
 		(dma_resv_unlock)(obj);
 	}
@@ -115,52 +126,75 @@ lkpi_dma_resv_held(struct dma_resv *obj)
 
 /* --- ww_mutex: only the locks of reservation objects ------------------ */
 
+/*
+ * A stand-alone ww_mutex (ww_mutex_init()) has no core lock behind it: it
+ * is marked with this class and every operation on it is refused, rather
+ * than taken for the lock of a reservation that does not exist.
+ */
+static struct ww_class lkpi_ww_standalone =
+    __WW_CLASS_INITIALIZER(lkpi_ww_standalone, 1);
+
 static struct dma_resv *
-ww_resv(struct ww_mutex *lock)
+ww_resv(struct ww_mutex *lock, const char *who)
 {
+	if (lock->ww_class == &lkpi_ww_standalone) {
+		WARN_ONCE(1, "%s: a stand-alone ww_mutex is not supported", who);
+		return (NULL);
+	}
 	return (container_of(lock, struct dma_resv, lock));
 }
 
 void
 lkpi_ww_mutex_init(struct ww_mutex *lock, struct ww_class *c)
 {
-	/* A stand-alone ww_mutex has no core lock behind it. */
 	WARN(1, "ww_mutex_init: only reservation locks are supported");
 	memset(lock, 0, sizeof (*lock));
-	lock->ww_class = c;
+	lock->ww_class = &lkpi_ww_standalone;
 }
 
 int
 ww_mutex_lock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
 {
-	return (resv_lock(ww_resv(lock), ctx, false, false));
+	struct dma_resv *obj = ww_resv(lock, "ww_mutex_lock");
+
+	return (obj == NULL ? -EINVAL : resv_lock(obj, ctx, false, false));
 }
 
 int
 ww_mutex_lock_interruptible(struct ww_mutex *lock,
     struct ww_acquire_ctx *ctx)
 {
-	return (resv_lock(ww_resv(lock), ctx, false, true));
+	struct dma_resv *obj = ww_resv(lock, "ww_mutex_lock_interruptible");
+
+	return (obj == NULL ? -EINVAL : resv_lock(obj, ctx, false, true));
 }
 
 void
 ww_mutex_lock_slow(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
 {
-	(void) resv_lock(ww_resv(lock), ctx, ctx != NULL, false);
+	struct dma_resv *obj = ww_resv(lock, "ww_mutex_lock_slow");
+
+	if (obj != NULL)
+		(void) resv_lock(obj, ctx, ctx != NULL, false);
 }
 
 int
 ww_mutex_lock_slow_interruptible(struct ww_mutex *lock,
     struct ww_acquire_ctx *ctx)
 {
-	return (resv_lock(ww_resv(lock), ctx, ctx != NULL, true));
+	struct dma_resv *obj = ww_resv(lock,
+	    "ww_mutex_lock_slow_interruptible");
+
+	return (obj == NULL ? -EINVAL : resv_lock(obj, ctx, ctx != NULL, true));
 }
 
 int
 ww_mutex_trylock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
 {
-	struct dma_resv *obj = ww_resv(lock);
+	struct dma_resv *obj = ww_resv(lock, "ww_mutex_trylock");
 
+	if (obj == NULL)
+		return (0);
 	if (ctx == NULL) {
 		if (!dma_resv_trylock(obj))
 			return (0);
@@ -177,124 +211,148 @@ ww_mutex_trylock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
 void
 ww_mutex_unlock(struct ww_mutex *lock)
 {
-	lkpi_dma_resv_unlock(ww_resv(lock));
+	struct dma_resv *obj = ww_resv(lock, "ww_mutex_unlock");
+
+	if (obj != NULL)
+		lkpi_dma_resv_unlock(obj);
 }
 
 bool
 ww_mutex_is_locked(struct ww_mutex *lock)
 {
-	return (drm_illumos_resv_is_locked(ww_resv(lock)));
+	struct dma_resv *obj = ww_resv(lock, "ww_mutex_is_locked");
+
+	return (obj != NULL && drm_illumos_resv_is_locked(obj));
 }
 
 /* --- fence snapshots ------------------------------------------------- */
 
 /*
  * The fences of `obj` with a usage at least as important as `usage`, each
- * with a reference, in a kmalloc'd array, and the usage class each one
- * was found in: the core gives one snapshot per usage level, so the
- * levels are queried from the most important up and every fence is
- * reported at the first level it appears in (matched by context and
- * seqno, since each snapshot gives new structures).
+ * with a reference, in a kmalloc'd array, with the usage each has: one
+ * core snapshot (drm_illumos_resv_fences(), which gives a driver's own
+ * fences back as its structures). `locked` includes signalled fences, as
+ * Linux's locked iteration sees every fence of the object.
  */
 static int
-resv_snapshot(struct dma_resv *obj, enum dma_resv_usage usage,
+resv_snapshot(struct dma_resv *obj, enum dma_resv_usage usage, bool locked,
     struct dma_fence ***fencesp, u8 **usagep, unsigned int *countp)
 {
-	struct dma_fence **all = NULL, **level = NULL;
+	struct dma_fence **fences = NULL;
 	u8 *usages = NULL;
-	unsigned int n = 0, cap = 0, u;
-	int ret = 0;
+	uint32_t want = 8, got = 0, i;
+	uint32_t flags = locked ? DRM_ILLUMOS_RESV_SIGNALED : 0;
+	int ret;
 
 	*fencesp = NULL;
 	*usagep = NULL;
 	*countp = 0;
-	for (u = DMA_RESV_USAGE_KERNEL; u <= (unsigned int)usage; u++) {
-		uint32_t want = 8, got = 0, i, j;
-
-		for (;;) {
-			level = kmalloc_array(want, sizeof (*level), GFP_KERNEL);
-			if (level == NULL) {
-				ret = -ENOMEM;
-				goto fail;
-			}
-			ret = drm_illumos_resv_fences(obj, u, level, want, &got);
-			if (ret != 0) {
-				kfree(level);
-				level = NULL;
-				goto fail;
-			}
-			if (got <= want)
-				break;
-			for (i = 0; i < want; i++)
-				dma_fence_put(level[i]);
-			kfree(level);
-			want = got;
+	for (;;) {
+		fences = kmalloc_array(want, sizeof (*fences), GFP_KERNEL);
+		usages = kmalloc(want, GFP_KERNEL);
+		if (fences == NULL || usages == NULL) {
+			kfree(fences);
+			kfree(usages);
+			return (-ENOMEM);
 		}
-		for (i = 0; i < got; i++) {
-			bool dup = false;
-
-			for (j = 0; j < n && !dup; j++)
-				dup = all[j]->context == level[i]->context &&
-				    all[j]->seqno == level[i]->seqno;
-			if (dup) {
-				dma_fence_put(level[i]);
-				continue;
-			}
-			if (n == cap) {
-				unsigned int ncap = cap == 0 ? 8 : cap * 2;
-				struct dma_fence **na;
-				u8 *nu;
-
-				na = krealloc(all, ncap * sizeof (*all),
-				    GFP_KERNEL);
-				if (na == NULL) {
-					ret = -ENOMEM;
-					goto fail_level;
-				}
-				all = na;
-				nu = krealloc(usages, ncap, GFP_KERNEL);
-				if (nu == NULL) {
-					ret = -ENOMEM;
-					goto fail_level;
-				}
-				usages = nu;
-				cap = ncap;
-			}
-			all[n] = level[i];
-			usages[n] = (u8)u;
-			n++;
-			continue;
-fail_level:
-			for (; i < got; i++)
-				dma_fence_put(level[i]);
-			kfree(level);
-			level = NULL;
-			goto fail;
+		ret = drm_illumos_resv_fences(obj, usage, flags, fences, usages,
+		    want, &got);
+		if (ret != 0) {
+			kfree(fences);
+			kfree(usages);
+			return (ret);
 		}
-		kfree(level);
-		level = NULL;
+		if (got <= want)
+			break;
+		for (i = 0; i < want; i++)
+			dma_fence_put(fences[i]);
+		kfree(fences);
+		kfree(usages);
+		want = got;
 	}
-	*fencesp = all;
+	*fencesp = fences;
 	*usagep = usages;
-	*countp = n;
+	*countp = got;
 	return (0);
-fail:
-	while (n > 0)
-		dma_fence_put(all[--n]);
-	kfree(all);
-	kfree(usages);
-	return (ret);
+}
+
+/*
+ * Snapshots of locked iterations. Linux's locked iteration
+ * (dma_resv_for_each_fence()) holds no references and has no end call, so
+ * callers stop at any point and never call dma_resv_iter_end(). A locked
+ * snapshot is released when its walk reaches the end, or, for a walk the
+ * caller left early, when the object is unlocked; until then it is kept
+ * here, per object. The fences it holds stay valid while the lock is held,
+ * as on Linux.
+ */
+struct lkpi_resv_snap {
+	struct list_head	rs_link;
+	struct dma_resv		*rs_obj;
+	struct dma_fence	**rs_fences;
+	u8			*rs_usages;
+	unsigned int		rs_count;
+};
+
+static DEFINE_MUTEX(lkpi_resv_snaps_lock);
+static LIST_HEAD(lkpi_resv_snaps);
+
+static void
+snap_free(struct lkpi_resv_snap *rs)
+{
+	unsigned int i;
+
+	for (i = 0; i < rs->rs_count; i++)
+		dma_fence_put(rs->rs_fences[i]);
+	kfree(rs->rs_fences);
+	kfree(rs->rs_usages);
+	kfree(rs);
+}
+
+static void
+lkpi_resv_snaps_release(struct dma_resv *obj)
+{
+	struct lkpi_resv_snap *rs, *n;
+	LIST_HEAD(done);
+
+	mutex_lock(&lkpi_resv_snaps_lock);
+	list_for_each_entry_safe(rs, n, &lkpi_resv_snaps, rs_link) {
+		if (rs->rs_obj == obj)
+			list_move(&rs->rs_link, &done);
+	}
+	mutex_unlock(&lkpi_resv_snaps_lock);
+	list_for_each_entry_safe(rs, n, &done, rs_link) {
+		list_del(&rs->rs_link);
+		snap_free(rs);
+	}
+}
+
+/* Unload: walks left early on objects never unlocked again. */
+void
+lkpi_resv_fini(void)
+{
+	struct lkpi_resv_snap *rs, *n;
+
+	mutex_lock(&lkpi_resv_snaps_lock);
+	list_for_each_entry_safe(rs, n, &lkpi_resv_snaps, rs_link) {
+		WARN_ONCE(1, "dma_resv: a locked walk outlived its lock");
+		list_del(&rs->rs_link);
+		snap_free(rs);
+	}
+	mutex_unlock(&lkpi_resv_snaps_lock);
 }
 
 static void
 iter_release(struct dma_resv_iter *cursor)
 {
-	unsigned int i;
+	struct lkpi_resv_snap *rs = cursor->lkpi_snap;
 
-	for (i = 0; i < cursor->num_fences; i++)
-		dma_fence_put(cursor->fences[i]);
-	kfree(cursor->fences);
-	kfree(cursor->lkpi_usages);
+	if (rs != NULL) {
+		mutex_lock(&lkpi_resv_snaps_lock);
+		list_del(&rs->rs_link);
+		mutex_unlock(&lkpi_resv_snaps_lock);
+		snap_free(rs);
+	}
+	cursor->lkpi_snap = NULL;
 	cursor->fences = NULL;
 	cursor->lkpi_usages = NULL;
 	cursor->num_fences = 0;
@@ -305,6 +363,9 @@ static struct dma_fence *
 iter_at(struct dma_resv_iter *cursor)
 {
 	if (cursor->index >= cursor->num_fences) {
+		/* The end of a locked walk releases its snapshot. */
+		if (cursor->locked)
+			iter_release(cursor);
 		cursor->fence = NULL;
 		return (NULL);
 	}
@@ -314,25 +375,43 @@ iter_at(struct dma_resv_iter *cursor)
 }
 
 /*
- * A snapshot failure (no memory) is reported as a WARN and an empty walk
- * is not possible to tell from "no fences" in Linux's interface, so the
- * walk then waits for every fence instead: it reports one signalled stub
- * fence after waiting, which makes callers that test or wait on the
- * fences see an idle reservation only once it is idle.
+ * A snapshot failure (no memory) cannot be reported through Linux's
+ * interface, where an empty walk means "no fences". An unlocked walk then
+ * waits for the fences and reports none; a locked walk (which must not
+ * wait with the lock held for other users' work any longer than Linux
+ * would) waits too: either way the caller sees an idle reservation only
+ * once it is idle.
  */
 static struct dma_fence *
-iter_first(struct dma_resv_iter *cursor)
+iter_first(struct dma_resv_iter *cursor, bool locked)
 {
+	struct lkpi_resv_snap *rs;
+
 	iter_release(cursor);
 	cursor->index = 0;
 	cursor->is_restarted = true;
-	if (resv_snapshot(cursor->obj, cursor->usage, &cursor->fences,
-	    &cursor->lkpi_usages, &cursor->num_fences) != 0) {
+	cursor->locked = locked;
+	rs = kzalloc(sizeof (*rs), GFP_KERNEL);
+	if (rs == NULL || resv_snapshot(cursor->obj, cursor->usage, locked,
+	    &rs->rs_fences, &rs->rs_usages, &rs->rs_count) != 0) {
+		kfree(rs);
 		WARN_ONCE(1, "dma_resv iterator: no memory for a snapshot; "
 		    "waiting for the fences instead");
 		(void) (dma_resv_wait_timeout)(cursor->obj, cursor->usage,
 		    false, MAX_SCHEDULE_TIMEOUT);
 		return (NULL);
+	}
+	rs->rs_obj = cursor->obj;
+	cursor->lkpi_snap = rs;
+	cursor->fences = rs->rs_fences;
+	cursor->lkpi_usages = rs->rs_usages;
+	cursor->num_fences = rs->rs_count;
+	if (locked) {
+		mutex_lock(&lkpi_resv_snaps_lock);
+		list_add(&rs->rs_link, &lkpi_resv_snaps);
+		mutex_unlock(&lkpi_resv_snaps_lock);
+	} else {
+		INIT_LIST_HEAD(&rs->rs_link);
 	}
 	return (iter_at(cursor));
 }
@@ -340,7 +419,7 @@ iter_first(struct dma_resv_iter *cursor)
 struct dma_fence *
 dma_resv_iter_first_unlocked(struct dma_resv_iter *cursor)
 {
-	return (iter_first(cursor));
+	return (iter_first(cursor, false));
 }
 
 struct dma_fence *
@@ -354,7 +433,7 @@ dma_resv_iter_next_unlocked(struct dma_resv_iter *cursor)
 struct dma_fence *
 dma_resv_iter_first(struct dma_resv_iter *cursor)
 {
-	return (iter_first(cursor));
+	return (iter_first(cursor, true));
 }
 
 struct dma_fence *
@@ -376,7 +455,7 @@ dma_resv_get_fences(struct dma_resv *obj, enum dma_resv_usage usage,
 	u8 *usages;
 	int ret;
 
-	ret = resv_snapshot(obj, usage, fences, &usages, num_fences);
+	ret = resv_snapshot(obj, usage, false, fences, &usages, num_fences);
 	kfree(usages);
 	return (ret);
 }

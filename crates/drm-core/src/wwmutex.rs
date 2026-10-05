@@ -533,32 +533,124 @@ mod tests {
 
     #[test]
     fn older_transaction_waits_for_younger_c_holder() {
+        // Wait-die: a transaction older than the holder waits for it, even
+        // while holding other locks; a younger one would die (EDEADLK).
         let ctx = sleep();
         let m = Arc::new(WwMutex::new(0u32, &CLASS));
-        let older = WwAcquireCtx::new(&CLASS);
-        let young = CLASS.next_stamp();
-        m.lock_raw_ctx(young, 0, false, false, &ctx).unwrap();
-        let m2 = m.clone();
-        let released = Arc::new(AtomicBool::new(false));
-        let r2 = released.clone();
-        let t = thread::spawn(move || {
-            thread::sleep(std::time::Duration::from_millis(20));
-            r2.store(true, Ordering::SeqCst);
-            m2.unlock_raw_ctx(young).unwrap_err();
-        });
-        t.join().unwrap();
-        // The other thread could not release it; the holder does.
-        assert!(released.load(Ordering::SeqCst));
-        let m3 = m.clone();
+        let other = Arc::new(WwMutex::new(0u32, &CLASS));
+        let (made, go) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+        let older_stamp = Arc::new(AtomicU64::new(0));
+        let got = Arc::new(AtomicBool::new(false));
+        let (m3, o3, mk, g2, os, g3) =
+            (m.clone(), other.clone(), made.clone(), go.clone(), older_stamp.clone(), got.clone());
         let w = thread::spawn(move || {
             let c = sleep();
+            // The older transaction: its stamp is taken before the C one.
             let tx = WwAcquireCtx::new(&CLASS);
-            drop(m3.lock(&tx, &c).unwrap());
+            os.store(tx.stamp(), Ordering::SeqCst);
+            let held = o3.lock(&tx, &c).unwrap();
+            mk.wait();
+            g2.wait();
+            let g = m3.lock(&tx, &c).expect("an older transaction waits, it does not die");
+            g3.store(true, Ordering::SeqCst);
+            drop(g);
+            drop(held);
         });
-        thread::sleep(std::time::Duration::from_millis(20));
+        made.wait();
+        let young = CLASS.next_stamp();
+        assert!(older_stamp.load(Ordering::SeqCst) < young);
+        m.lock_raw_ctx(young, 0, false, false, &ctx).unwrap();
+        // Only the holder's thread may release it.
+        let m2 = m.clone();
+        thread::spawn(move || assert_eq!(m2.unlock_raw_ctx(young).err(), Some(Errno::EPERM))).join().unwrap();
+        go.wait();
+        thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!got.load(Ordering::SeqCst), "waits while the younger C holder holds it");
         m.unlock_raw_ctx(young).unwrap();
         w.join().unwrap();
-        drop(older);
+        assert!(got.load(Ordering::SeqCst));
+        assert!(!m.is_locked() && !other.is_locked());
+    }
+
+    /// Rust transactions and C transactions (raw contexts, as the
+    /// LinuxKPI layer's ww_acquire_ctx) lock random sets of the same
+    /// mutexes at once, backing off on EDEADLK as Linux's protocol does:
+    /// the run must finish (no deadlock) and no mutex has two holders.
+    #[test]
+    fn mixed_c_and_rust_transactions_lock_all() {
+        const N: usize = 6;
+        let ms: Arc<Vec<WwMutex<()>>> = Arc::new((0..N).map(|_| WwMutex::new((), &CLASS)).collect());
+        let busy: Arc<Vec<AtomicBool>> = Arc::new((0..N).map(|_| AtomicBool::new(false)).collect());
+        let hs: Vec<_> = (0..8u64)
+            .map(|t| {
+                let (ms, busy) = (ms.clone(), busy.clone());
+                thread::spawn(move || {
+                    let ctx = sleep();
+                    let mut seed = t * 104729 + 3;
+                    for _ in 0..300 {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        let pick: Vec<usize> = (0..N).filter(|i| (seed >> (i + 20)) & 1 == 1).collect();
+                        if t % 2 == 0 {
+                            // A Rust transaction.
+                            let refs: Vec<&WwMutex<()>> = pick.iter().map(|&i| &ms[i]).collect();
+                            let tx = WwAcquireCtx::new(&CLASS);
+                            let (gs, _) = lock_all(&refs, &tx, false, &ctx).unwrap();
+                            for &i in &pick {
+                                assert!(!busy[i].swap(true, Ordering::SeqCst), "two holders");
+                            }
+                            thread::yield_now();
+                            for &i in &pick {
+                                busy[i].store(false, Ordering::SeqCst);
+                            }
+                            drop(gs);
+                        } else {
+                            // A C transaction: stamp, lock in order, back
+                            // off on EDEADLK, then take the contended one
+                            // with the slow path first.
+                            let stamp = CLASS.next_stamp();
+                            let mut held: Vec<usize> = Vec::new();
+                            let mut first: Option<usize> = None;
+                            'retry: loop {
+                                if let Some(c) = first.take() {
+                                    ms[c].lock_raw_ctx(stamp, 0, true, false, &ctx).unwrap();
+                                    held.push(c);
+                                }
+                                for &i in &pick {
+                                    if held.contains(&i) {
+                                        continue;
+                                    }
+                                    match ms[i].lock_raw_ctx(stamp, held.len() as u32, false, false, &ctx) {
+                                        Ok(()) => held.push(i),
+                                        Err(e) if e == EDEADLK => {
+                                            for &h in &held {
+                                                ms[h].unlock_raw_ctx(stamp).unwrap();
+                                            }
+                                            held.clear();
+                                            first = Some(i);
+                                            continue 'retry;
+                                        }
+                                        Err(e) => panic!("lock_raw_ctx: {e:?}"),
+                                    }
+                                }
+                                break;
+                            }
+                            for &i in &held {
+                                assert!(!busy[i].swap(true, Ordering::SeqCst), "two holders");
+                            }
+                            thread::yield_now();
+                            for &i in &held {
+                                busy[i].store(false, Ordering::SeqCst);
+                                ms[i].unlock_raw_ctx(stamp).unwrap();
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        assert!(ms.iter().all(|m| !m.is_locked()));
     }
 
     #[test]

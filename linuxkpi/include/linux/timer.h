@@ -16,13 +16,13 @@
  * timer_delete() (del_timer()) disarms without waiting;
  * timer_delete_sync() also waits until the function is not running. The
  * timer structure is never touched after its function returns, so a
- * timer function may free its own timer.
+ * timer function may free its own timer. timer_shutdown() and
+ * timer_shutdown_sync() disarm the timer and make every later arming a
+ * no-op.
  *
- * Deviation from the first design (one timeout(9F) callout per arming
- * with an allocated arm record): a callout cannot be cancelled without
- * possibly waiting for it (untimeout(9F)), so every disarmed callout
- * would have needed a record that outlives the timer and a way to cancel
- * it at module unload; the timer thread has neither problem.
+ * illumos' timeout(9F) is not used: untimeout(9F) may wait for the
+ * callout, so it cannot disarm a timer in an interrupt handler or under a
+ * spinlock, and every armed callout would need an allocated record.
  */
 #ifndef _LINUX_TIMER_H
 #define	_LINUX_TIMER_H
@@ -44,6 +44,7 @@ extern int timer_reduce(struct timer_list *t, unsigned long expires);
 extern void add_timer(struct timer_list *t);
 extern int timer_delete(struct timer_list *t);
 extern int timer_delete_sync(struct timer_list *t);
+extern int timer_shutdown(struct timer_list *t);
 extern int timer_shutdown_sync(struct timer_list *t);
 extern int timer_pending(const struct timer_list *t);
 
@@ -52,7 +53,6 @@ extern int timer_pending(const struct timer_list *t);
 #define	destroy_timer_on_stack(t)	((void)(t))
 #define	del_timer(t)			timer_delete(t)
 #define	del_timer_sync(t)		timer_delete_sync(t)
-#define	timer_shutdown(t)		timer_delete(t)
 #define	add_timer_on(t, cpu)		add_timer(t)
 #define	from_timer(var, callback_timer, timer_fieldname) \
 	container_of(callback_timer, typeof (*var), timer_fieldname)

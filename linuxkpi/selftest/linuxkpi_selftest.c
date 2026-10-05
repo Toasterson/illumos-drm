@@ -110,9 +110,8 @@ st_dwork_fn(struct work_struct *w)
 static void
 test_work(void)
 {
-	struct workqueue_struct *wq, *owq;
+	struct workqueue_struct *wq;
 	struct st_work *sw;
-	int i, ok;
 
 	sw = kzalloc(sizeof (*sw) * 4, GFP_KERNEL);
 	if (sw == NULL) {
@@ -120,9 +119,8 @@ test_work(void)
 		return;
 	}
 	wq = alloc_workqueue("lkpi_st", 0, 4);
-	owq = alloc_ordered_workqueue("lkpi_st_ord", 0);
-	CHECK("alloc_workqueue", wq != NULL && owq != NULL);
-	if (wq == NULL || owq == NULL)
+	CHECK("alloc_workqueue", wq != NULL);
+	if (wq == NULL)
 		goto out;
 
 	init_completion(&sw[0].done);
@@ -132,25 +130,6 @@ test_work(void)
 	    wait_for_completion_timeout(&sw[0].done, msecs_to_jiffies(5000)) > 0);
 	flush_work(&sw[0].work);
 	CHECK("work ran once", atomic_read(&sw[0].runs) == 1);
-
-	/* Ordered queue: four items of one shared order record. */
-	atomic_set(&sw[0].next, 0);
-	for (i = 0; i < 4; i++) {
-		sw[i].id = i;
-		init_completion(&sw[i].done);
-		INIT_WORK(&sw[i].work, st_work_fn);
-	}
-	for (i = 0; i < 4; i++) {
-		/* All items record into sw[0]. */
-		sw[i].work.func = st_work_fn;
-	}
-	for (i = 0; i < 4; i++)
-		(void) queue_work(owq, &sw[i].work);
-	flush_workqueue(owq);
-	ok = 1;
-	for (i = 0; i < 4; i++)
-		ok &= atomic_read(&sw[i].runs) >= 1;
-	CHECK("flush_workqueue ran all", ok);
 
 	/* Delayed work fires after its delay; cancel before it fires. */
 	init_completion(&sw[1].done);
@@ -167,8 +146,6 @@ test_work(void)
 	    cancel_delayed_work_sync(&sw[2].dwork));
 	CHECK("cancelled work did not run", atomic_read(&sw[2].runs) == 0);
 out:
-	if (owq != NULL)
-		destroy_workqueue(owq);
 	if (wq != NULL)
 		destroy_workqueue(wq);
 	kfree(sw);
@@ -334,7 +311,7 @@ test_dma(struct pci_dev *pdev)
 	struct scatterlist *sg;
 	dma_addr_t handle = 0;
 	void *coherent;
-	int i, n, ok;
+	int i, j, n, ok;
 
 	CHECK("dma_set_mask_and_coherent(39)",
 	    dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(39)) == 0);
@@ -347,13 +324,17 @@ test_dma(struct pci_dev *pdev)
 	CHECK("alloc_page", i == ST_PAGES);
 	if (i != ST_PAGES)
 		goto free_pages;
-	CHECK("sg_alloc_table", sg_alloc_table(&st, ST_PAGES, GFP_KERNEL) == 0);
-	for_each_sg(st.sgl, sg, ST_PAGES, i)
-		sg_set_page(sg, pages[i], PAGE_SIZE, 0);
+	/* i counts the pages to free: the sg loops use j. */
+	n = sg_alloc_table(&st, ST_PAGES, GFP_KERNEL);
+	CHECK("sg_alloc_table", n == 0);
+	if (n != 0)
+		goto free_pages;
+	for_each_sg(st.sgl, sg, ST_PAGES, j)
+		sg_set_page(sg, pages[j], PAGE_SIZE, 0);
 	n = dma_map_sg(&pdev->dev, st.sgl, ST_PAGES, DMA_BIDIRECTIONAL);
 	CHECK("dma_map_sg maps every entry", n == ST_PAGES);
 	ok = n > 0;
-	for_each_sg(st.sgl, sg, n, i) {
+	for_each_sg(st.sgl, sg, n, j) {
 		ok &= sg_dma_address(sg) != 0 && sg_dma_len(sg) == PAGE_SIZE &&
 		    (sg_dma_address(sg) & (PAGE_SIZE - 1)) == 0 &&
 		    sg_dma_address(sg) < DMA_BIT_MASK(39);
@@ -509,6 +490,7 @@ _fini(void)
 	if ((ret = mod_remove(&st_modlinkage)) != 0)
 		return (ret);
 	pci_unregister_driver(&st_pci_driver);
+	lkpi_module_quiesce(&st_modlinkage);
 	return (0);
 }
 

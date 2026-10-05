@@ -35,6 +35,15 @@ unsafe fn resv<'a>(obj: *const f::dma_resv) -> Option<&'a Resv> {
 
 /// The core's usage of a `dma_resv_usage`; `None` (after a warning) for a
 /// value Linux does not define, which the functions refuse.
+fn usage_c(u: Usage) -> f::dma_resv_usage {
+    match u {
+        Usage::Kernel => f::DMA_RESV_USAGE_KERNEL,
+        Usage::Write => f::DMA_RESV_USAGE_WRITE,
+        Usage::Read => f::DMA_RESV_USAGE_READ,
+        Usage::Bookkeep => f::DMA_RESV_USAGE_BOOKKEEP,
+    }
+}
+
 fn usage(u: f::dma_resv_usage) -> Option<Usage> {
     match u {
         f::DMA_RESV_USAGE_KERNEL => Some(Usage::Kernel),
@@ -283,37 +292,44 @@ pub unsafe extern "C" fn drm_illumos_resv_is_locked(obj: *mut f::dma_resv) -> bo
     unsafe { resv(obj) }.is_some_and(|r| r.lock().is_locked())
 }
 
-/// Releases a lock taken with `drm_illumos_resv_lock_ctx` for `stamp`;
-/// a warning if the calling thread does not hold it that way.
+/// Releases a lock taken with `drm_illumos_resv_lock_ctx` for `stamp`:
+/// 0, or `-EPERM` (with a warning) if the calling thread does not hold it
+/// that way, which leaves the lock as it was; `-EINVAL` for no reservation.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn drm_illumos_resv_unlock_ctx(obj: *mut f::dma_resv, stamp: u64) {
+pub unsafe extern "C" fn drm_illumos_resv_unlock_ctx(obj: *mut f::dma_resv, stamp: u64) -> i32 {
     // SAFETY: the caller holds the object.
-    let Some(r) = (unsafe { resv(obj) }) else { return };
+    let Some(r) = (unsafe { resv(obj) }) else { return neg(Errno::EINVAL) };
     if r.lock().unlock_raw_ctx(stamp).is_err() {
         // SAFETY: a constant format without arguments.
         unsafe {
             ddi::sys::cmn_err(
                 ddi::sys::CE_WARN,
-                c"drm_core: drm_illumos_resv_unlock_ctx by a thread or transaction that does not hold the lock; ignored"
+                c"drm_core: drm_illumos_resv_unlock_ctx by a thread or transaction that does not hold the lock; refused"
                     .as_ptr(),
             )
         };
+        return neg(Errno::EPERM);
     }
+    0
 }
 
-/// A snapshot of the unsignalled fences of `obj` with a usage at least as
-/// important as `u` (Linux's `dma_resv_get_fences`, into a caller's
-/// array): stores up to `max` fences, each with a new reference, in
-/// `fences`, and the number the reservation had in `*count`, which may
-/// exceed `max` (then retry with a larger array; the stored ones are
-/// still the caller's to put). 0, `-EINVAL` or `-ENOMEM`. Thread context.
-/// The structures are the core's views of the fences (new structures,
-/// not a driver's own).
+/// A snapshot of the fences of `obj` with a usage at least as important
+/// as `u` (Linux's reservation iterators and `dma_resv_get_fences`, into a
+/// caller's array): stores up to `max` fences, each with a new reference,
+/// in `fences`, the usage each one has in `usages` (if not NULL), and the
+/// number the reservation had in `*count`, which may exceed `max` (then
+/// retry with a larger array; the stored ones are still the caller's to
+/// put). Signalled fences are included with `DRM_ILLUMOS_RESV_SIGNALED`
+/// in `flags`. A fence a driver made (`dma_fence_init`) comes back as
+/// that driver's structure while it lives; other fences as the core's
+/// structures. 0, `-EINVAL` or `-ENOMEM`. Thread context.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn drm_illumos_resv_fences(
     obj: *mut f::dma_resv,
     u: f::dma_resv_usage,
+    flags: u32,
     fences: *mut *mut f::dma_fence,
+    usages: *mut u8,
     max: u32,
     count: *mut u32,
 ) -> i32 {
@@ -321,32 +337,37 @@ pub unsafe extern "C" fn drm_illumos_resv_fences(
     let ctx = unsafe { super::sleepable() };
     // SAFETY: the caller holds the object.
     let (Some(r), Some(u)) = (unsafe { resv(obj) }, usage(u)) else { return neg(Errno::EINVAL) };
-    if count.is_null() || (max > 0 && fences.is_null()) {
+    if count.is_null() || (max > 0 && fences.is_null()) || flags & !f::DRM_ILLUMOS_RESV_SIGNALED != 0 {
         return neg(Errno::EINVAL);
     }
-    let list = match r.fences(u, &ctx) {
+    let list = match r.entries(u, flags & f::DRM_ILLUMOS_RESV_SIGNALED != 0, &ctx) {
         Ok(l) => l,
         Err(e) => return neg(e),
     };
     let mut stored = 0u32;
     let mut err = 0;
-    for f in list.iter() {
+    for (fence, fu) in list.iter() {
         if stored >= max {
             break;
         }
-        let p = super::fence::proxy(f.clone());
+        let p = super::fence::proxy(fence.clone());
         if p.is_null() {
             err = neg(Errno::ENOMEM);
             break;
         }
-        // SAFETY: the caller's array of max entries.
-        unsafe { *fences.add(stored as usize) = p };
+        // SAFETY: the caller's arrays of max entries.
+        unsafe {
+            *fences.add(stored as usize) = p;
+            if !usages.is_null() {
+                *usages.add(stored as usize) = usage_c(*fu) as u8;
+            }
+        }
         stored += 1;
     }
     let n = list.len() as u32;
     let mut list = list;
-    while let Some(f) = list.len().checked_sub(1).and_then(|i| list.swap_remove(i)) {
-        f.put(Ctx::Sleep(&ctx));
+    while let Some((fence, _)) = list.len().checked_sub(1).and_then(|i| list.swap_remove(i)) {
+        fence.put(Ctx::Sleep(&ctx));
     }
     if err != 0 {
         for i in 0..stored {

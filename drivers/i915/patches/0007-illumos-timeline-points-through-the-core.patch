@@ -1,0 +1,35 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 07] i915: timeline points through the illumos DRM core
+
+DRM_I915_GEM_EXECBUFFER2's timeline fences look a point up with
+dma_fence_chain_find_seqno() on the sync object's fence. On illumos the
+chains are the DRM core's and no fence a driver sees is a chain, so a
+point other than 0 is looked up with drm_syncobj_find_fence() instead
+(a point not submitted yet is -EINVAL, as Linux's lookup returns).
+
+--- a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+@@ -2861,8 +2861,23 @@
+ 			return -EINVAL;
+ 		}
+ 
++#ifdef __illumos__
++		/*
++		 * Timeline points are the DRM core's: no fence a driver sees
++		 * is a chain, so the point is looked up through the core.
++		 */
++		if (fence && point != 0) {
++			dma_fence_put(fence);
++			fence = NULL;
++			err = drm_syncobj_find_fence(eb->file, user_fence.handle,
++			    point, 0, &fence);
++			if (err == -ENOENT)
++				err = -EINVAL;
++		}
++#else
+ 		if (fence)
+ 			err = dma_fence_chain_find_seqno(&fence, point);
++#endif
+ 
+ 		if (err && !(user_fence.flags & I915_EXEC_FENCE_SIGNAL)) {
+ 			drm_dbg(&eb->i915->drm,

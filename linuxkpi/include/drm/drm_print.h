@@ -14,6 +14,16 @@
 #include <linux/seq_file.h>
 #include <linux/printk.h>
 #include <linux/bug.h>
+/*
+ * Messages are formatted by the layer (Linux's %p extensions, %pe, %pa,
+ * %ph, %pV, and hashed plain %p), and the core gets the text: the facade's
+ * logging entry point and core printers are the layer's under these names
+ * (src/lkpi_drm.c).
+ */
+#define	drm_illumos_vprintk	lkpi_drm_vprintk
+#define	__drm_printfn_info	lkpi_drm_printfn_info
+#define	__drm_printfn_dbg	lkpi_drm_printfn_dbg
+#define	__drm_printfn_err	lkpi_drm_printfn_err
 #include_next <drm/drm_print.h>
 
 extern void __drm_printfn_seq_file(struct drm_printer *p, struct va_format *vaf);

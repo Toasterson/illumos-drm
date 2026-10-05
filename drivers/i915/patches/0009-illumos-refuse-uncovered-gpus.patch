@@ -1,0 +1,38 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 09] i915: refuse GPUs the illumos build does not cover
+
+drmadm moves every Intel GPU alias of the legacy driver to i915n, but the
+headless illumos build is written for the integrated GPUs of gen6 to
+gen9.5 with a PCH (the layer's stolen-memory decoding, patch 0006's
+interrupt setup, the stubs of the display and local-memory code).
+i915_driver_probe() refuses Valleyview, Cherryview, Broxton, Geminilake,
+discrete GPUs and every other generation with -ENODEV, before it
+touches the device.
+
+--- a/drivers/gpu/drm/i915/i915_driver.c
++++ b/drivers/gpu/drm/i915/i915_driver.c
+@@ -856,6 +856,24 @@
+ 		return PTR_ERR(i915);
+ 	}
+ 
++#ifdef __illumos__
++	/*
++	 * The illumos build covers the integrated GPUs of gen6 to gen9.5
++	 * with a PCH: the layer's stolen-memory decoding, the headless
++	 * interrupt setup (patch 0006) and the stubs of the parts left out
++	 * are written for those. Other GPUs are refused before anything
++	 * touches them.
++	 */
++	if (GRAPHICS_VER(i915) < 6 || GRAPHICS_VER(i915) > 9 ||
++	    IS_VALLEYVIEW(i915) || IS_CHERRYVIEW(i915) || IS_GEN9_LP(i915) ||
++	    IS_DGFX(i915)) {
++		drm_info(&i915->drm, "i915n: this GPU (gen %d) is not "
++		    "supported on illumos\n", GRAPHICS_VER(i915));
++		pci_disable_device(pdev);
++		return -ENODEV;
++	}
++#endif
++
+ 	display = i915->display;
+ 
+ 	ret = i915_driver_early_probe(i915);

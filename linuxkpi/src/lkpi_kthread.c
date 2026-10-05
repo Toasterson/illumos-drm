@@ -195,3 +195,40 @@ lkpi_kthread_fini(void)
 	}
 	mutex_exit(&lkpi_kthread_lock);
 }
+
+/*
+ * Stops the kthreads whose function lies in [lo, hi), the text of a
+ * driver that is unloading (lkpi_module_quiesce()). One still running is
+ * a driver bug and is reported; kthread_stop() waits for it to return.
+ * Returns how many were stopped.
+ */
+int
+lkpi_kthread_quiesce(uintptr_t lo, uintptr_t hi)
+{
+	struct lkpi_kthread *kt, *found;
+	boolean_t exited;
+	int n = 0;
+
+	for (;;) {
+		found = NULL;
+		mutex_enter(&lkpi_kthread_lock);
+		list_for_each_entry(kt, &lkpi_kthreads, link) {
+			if ((uintptr_t)kt->fn >= lo && (uintptr_t)kt->fn < hi) {
+				found = kt;
+				break;
+			}
+		}
+		mutex_exit(&lkpi_kthread_lock);
+		if (found == NULL)
+			return (n);
+		mutex_enter(&found->lock);
+		exited = found->exited;
+		mutex_exit(&found->lock);
+		if (!exited)
+			cmn_err(CE_WARN, "linuxkpi: kthread \"%s\" still "
+			    "running at driver unload, stopping it",
+			    found->task.comm);
+		(void) kthread_stop(&found->task);
+		n++;
+	}
+}

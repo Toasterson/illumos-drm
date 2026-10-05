@@ -29,8 +29,22 @@
  * waits until no item of the old colour is pending or running, so items
  * queued after the flush started do not hold it up.
  *
+ * Workers wait on their queue's condition variable while it has nothing
+ * pending, and on lkpi_wq_done_cv while everything pending runs on other
+ * workers; queueing wakes both kinds, so a queue never sleeps with a
+ * runnable item. A queue has max_active workers (0: the default), at
+ * most LKPI_WQ_MAX_THREADS; both grow with the CPU count, so blocking
+ * items cannot exhaust a pool as easily as a fixed small one.
+ *
  * Delayed work arms the item's layer timer (src/lkpi_timer.c), whose
- * function queues the item if it is still the armed instance.
+ * function queues the item if it is still the armed instance. Each queue
+ * lists its armed delayed items; destroy_workqueue() disarms them.
+ *
+ * disable_work() counts disables in the item's data (as Linux does):
+ * while the count is non-zero the item cannot be queued.
+ *
+ * lkpi_work_quiesce() removes the items whose function lies in an
+ * unloading driver's text (lkpi_module_quiesce(), src/lkpi_module.c).
  *
  * irq_work and tasklets run on two layer workqueues of high priority
  * (thread context, not interrupt context).
@@ -53,22 +67,28 @@
 #define	LKPI_WORK_CANCELING	(1UL << 3)	/* cancel_*_sync(): no queueing */
 #define	LKPI_WORK_COLOR		(1UL << 4)	/* flush colour while pending */
 #define	LKPI_WORK_RCU		(1UL << 5)	/* queue_rcu_work(): in RCU */
-#define	LKPI_WORK_GEN_SHIFT	8
+#define	LKPI_WORK_DIS_SHIFT	8		/* disable_work() count */
+#define	LKPI_WORK_DIS_ONE	(1UL << LKPI_WORK_DIS_SHIFT)
+#define	LKPI_WORK_DIS_MASK	(0xffffUL << LKPI_WORK_DIS_SHIFT)
+#define	LKPI_WORK_GEN_SHIFT	24
 #define	LKPI_WORK_GEN_ONE	(1UL << LKPI_WORK_GEN_SHIFT)
 
-#define	LKPI_WQ_MAX_THREADS	8
-#define	LKPI_WQ_DFL_THREADS	4
+/* Worker threads per queue: the default and the limit. */
+#define	LKPI_WQ_DFL_THREADS	MAX(8, ncpus)
+#define	LKPI_WQ_MAX_THREADS	MIN(MAX(16, 2 * ncpus), 256)
 
 struct workqueue_struct {
 	char name[32];
 	unsigned int flags;
 	int nthreads;
 	ddi_taskq_t *tq;
+	struct list_head link;		/* lkpi_wq_all */
 	struct list_head pending;
+	struct list_head delayed;	/* armed delayed_work.lkpi_dlink */
 	kcondvar_t cv;			/* workers: new or runnable items */
+	unsigned int nwait_done;	/* workers waiting on lkpi_wq_done_cv */
 	unsigned int color;		/* colour of newly queued items */
 	unsigned long inflight[2];	/* pending or running, per colour */
-	unsigned long ndelayed;		/* delayed items with armed timers */
 	kmutex_t flush_lock;		/* serialises flush_workqueue() */
 	boolean_t exiting;
 };
@@ -78,12 +98,14 @@ struct lkpi_worker {
 	struct list_head link;
 	struct workqueue_struct *wq;
 	struct work_struct *cur;
+	uintptr_t cb;			/* the driver function behind cur */
 	kthread_t *thread;
 };
 
 static kmutex_t lkpi_wq_lock;
 static kcondvar_t lkpi_wq_done_cv;	/* an item ran or was cancelled */
 static struct list_head lkpi_wq_running = LIST_HEAD_INIT(lkpi_wq_running);
+static struct list_head lkpi_wq_all = LIST_HEAD_INIT(lkpi_wq_all);
 
 struct workqueue_struct *system_wq;
 struct workqueue_struct *system_percpu_wq;
@@ -131,6 +153,14 @@ wd_gen(const struct work_struct *w)
 	return (wd_get(w) >> LKPI_WORK_GEN_SHIFT);
 }
 
+/* Whether d (an item's data) refuses queueing. */
+static inline boolean_t
+wd_blocked(unsigned long d)
+{
+	return ((d & (LKPI_WORK_PENDING | LKPI_WORK_CANCELING |
+	    LKPI_WORK_DIS_MASK)) != 0);
+}
+
 /* The worker executing w, if any. */
 static struct lkpi_worker *
 lkpi_wq_runner_locked(const struct work_struct *w)
@@ -170,6 +200,9 @@ lkpi_wq_insert_locked(struct workqueue_struct *wq, struct work_struct *w)
 	wq->inflight[wq->color]++;
 	list_add_tail(&w->entry, &wq->pending);
 	cv_signal(&wq->cv);
+	/* Workers that skipped items running elsewhere can run this one. */
+	if (wq->nwait_done != 0)
+		cv_broadcast(&lkpi_wq_done_cv);
 }
 
 static boolean_t
@@ -186,7 +219,7 @@ lkpi_wq_usable(struct workqueue_struct *wq)
 static bool
 lkpi_queue_work_locked(struct workqueue_struct *wq, struct work_struct *w)
 {
-	if ((wd_get(w) & (LKPI_WORK_PENDING | LKPI_WORK_CANCELING)) != 0)
+	if (wd_blocked(wd_get(w)))
 		return (false);
 	if (!lkpi_wq_usable(wq))
 		return (false);
@@ -214,8 +247,7 @@ lkpi_work_grab_locked(struct work_struct *w)
 	if ((d & LKPI_WORK_DELAYED) != 0) {
 		dw = to_delayed_work(w);
 		(void) timer_delete(&dw->timer);
-		if (dw->wq != NULL && dw->wq->ndelayed > 0)
-			dw->wq->ndelayed--;
+		list_del_init(&dw->lkpi_dlink);
 	} else {
 		wq = w->wq;
 		list_del_init(&w->entry);
@@ -252,6 +284,29 @@ lkpi_work_may_wait(void)
 
 /* --- worker threads ------------------------------------------------------ */
 
+static void lkpi_tasklet_work(struct work_struct *w);
+static void lkpi_irq_work_fn(struct work_struct *w);
+
+/*
+ * The driver function an item runs: the item's own, or for the layer's
+ * tasklet and irq_work items the tasklet's or irq_work's function.
+ */
+static uintptr_t
+lkpi_work_callback(struct work_struct *w)
+{
+	struct tasklet_struct *t;
+
+	if (w->func == lkpi_tasklet_work) {
+		t = container_of(w, struct tasklet_struct, lkpi_work);
+		return (t->use_callback ? (uintptr_t)t->callback :
+		    (uintptr_t)t->func);
+	}
+	if (w->func == lkpi_irq_work_fn)
+		return ((uintptr_t)container_of(w, struct irq_work,
+		    work)->func);
+	return ((uintptr_t)w->func);
+}
+
 /* The first item a worker may run now (ordered queues: only the head). */
 static struct work_struct *
 lkpi_wq_next_locked(struct workqueue_struct *wq)
@@ -279,6 +334,7 @@ lkpi_wq_worker(void *arg)
 
 	me.wq = wq;
 	me.cur = NULL;
+	me.cb = 0;
 	me.thread = curthread;
 	mutex_enter(&lkpi_wq_lock);
 	for (;;) {
@@ -286,9 +342,14 @@ lkpi_wq_worker(void *arg)
 		if (w == NULL) {
 			if (wq->exiting && list_empty(&wq->pending))
 				break;
+			if (list_empty(&wq->pending)) {
+				cv_wait(&wq->cv, &lkpi_wq_lock);
+				continue;
+			}
 			/* Items running elsewhere: wait for a run to end. */
-			cv_wait(list_empty(&wq->pending) ? &wq->cv :
-			    &lkpi_wq_done_cv, &lkpi_wq_lock);
+			wq->nwait_done++;
+			cv_wait(&lkpi_wq_done_cv, &lkpi_wq_lock);
+			wq->nwait_done--;
 			continue;
 		}
 		list_del_init(&w->entry);
@@ -297,6 +358,7 @@ lkpi_wq_worker(void *arg)
 		wd_set(w, (d & ~LKPI_WORK_PENDING) + LKPI_WORK_GEN_ONE);
 		func = w->func;
 		me.cur = w;
+		me.cb = lkpi_work_callback(w);
 		list_add(&me.link, &lkpi_wq_running);
 		mutex_exit(&lkpi_wq_lock);
 
@@ -308,6 +370,7 @@ lkpi_wq_worker(void *arg)
 		mutex_enter(&lkpi_wq_lock);
 		list_del(&me.link);
 		me.cur = NULL;
+		me.cb = 0;
 		wq->inflight[color]--;
 		cv_broadcast(&lkpi_wq_done_cv);
 	}
@@ -343,6 +406,8 @@ lkpi_alloc_workqueue(const char *name, unsigned int flags, int max_active)
 	wq->flags = flags;
 	wq->nthreads = n;
 	INIT_LIST_HEAD(&wq->pending);
+	INIT_LIST_HEAD(&wq->delayed);
+	INIT_LIST_HEAD(&wq->link);
 	cv_init(&wq->cv, NULL, CV_DRIVER, NULL);
 	(mutex_init)(&wq->flush_lock, NULL, MUTEX_DRIVER, NULL);
 
@@ -366,6 +431,9 @@ lkpi_alloc_workqueue(const char *name, unsigned int flags, int max_active)
 		lkpi_wq_free(wq);
 		return (NULL);
 	}
+	mutex_enter(&lkpi_wq_lock);
+	list_add_tail(&wq->link, &lkpi_wq_all);
+	mutex_exit(&lkpi_wq_lock);
 	return (wq);
 }
 
@@ -424,17 +492,36 @@ drain_workqueue(struct workqueue_struct *wq)
 	}
 }
 
+/*
+ * Delayed items still armed for the queue would queue themselves to the
+ * freed queue when their timers fire: they are disarmed (and reported, as
+ * Linux leaves them to fire into freed memory). Their timer functions may
+ * be running already; those find the items disarmed and only read the
+ * items, which belong to the caller.
+ */
 void
 destroy_workqueue(struct workqueue_struct *wq)
 {
+	struct delayed_work *dw;
+	unsigned long n = 0;
+
 	if (wq == NULL)
 		return;
 	drain_workqueue(wq);
 	mutex_enter(&lkpi_wq_lock);
-	if (wq->ndelayed != 0)
+	while (!list_empty(&wq->delayed)) {
+		dw = list_first_entry(&wq->delayed, struct delayed_work,
+		    lkpi_dlink);
+		/* Armed items are pending, so this always takes dw off. */
+		if (!lkpi_work_grab_locked(&dw->work))
+			list_del_init(&dw->lkpi_dlink);
+		n++;
+	}
+	if (n != 0)
 		cmn_err(CE_WARN, "linuxkpi: workqueue %s destroyed with %lu "
-		    "delayed items armed", wq->name, wq->ndelayed);
+		    "delayed items armed, disarmed", wq->name, n);
 	wq->exiting = B_TRUE;
+	list_del_init(&wq->link);
 	cv_broadcast(&wq->cv);
 	mutex_exit(&lkpi_wq_lock);
 	/* Waits for the workers, which run what is still pending first. */
@@ -573,9 +660,8 @@ lkpi_delayed_work_timer(struct timer_list *t)
 	if ((wd_get(&dw->work) & LKPI_WORK_DELAYED) != 0 &&
 	    !timer_pending(&dw->timer)) {
 		wd_clear(&dw->work, LKPI_WORK_DELAYED);
+		list_del_init(&dw->lkpi_dlink);
 		wq = dw->wq;
-		if (wq->ndelayed > 0)
-			wq->ndelayed--;
 		if (wq->exiting) {
 			WARN_ONCE(1, "linuxkpi: delayed work fired for a "
 			    "destroyed workqueue");
@@ -596,6 +682,7 @@ lkpi_init_delayed_work(struct delayed_work *dw, work_func_t func)
 	lkpi_timer_setup(&dw->timer, lkpi_delayed_work_timer, 0);
 	dw->wq = NULL;
 	dw->cpu = 0;
+	INIT_LIST_HEAD(&dw->lkpi_dlink);
 }
 
 /* Queues a non-pending delayed item now or arms its timer. */
@@ -614,7 +701,7 @@ lkpi_queue_delayed_locked(struct workqueue_struct *wq, struct delayed_work *dw,
 	}
 	wd_or(&dw->work, LKPI_WORK_DELAYED);
 	dw->work.wq = wq;
-	wq->ndelayed++;
+	list_add_tail(&dw->lkpi_dlink, &wq->delayed);
 	(void) mod_timer(&dw->timer, lkpi_jiffies() + delay);
 }
 
@@ -625,8 +712,7 @@ queue_delayed_work(struct workqueue_struct *wq, struct delayed_work *dw,
 	bool queued = false;
 
 	mutex_enter(&lkpi_wq_lock);
-	if ((wd_get(&dw->work) & (LKPI_WORK_PENDING | LKPI_WORK_CANCELING)) ==
-	    0 && lkpi_wq_usable(wq)) {
+	if (!wd_blocked(wd_get(&dw->work)) && lkpi_wq_usable(wq)) {
 		lkpi_queue_delayed_locked(wq, dw, delay);
 		queued = true;
 	}
@@ -645,7 +731,9 @@ mod_delayed_work(struct workqueue_struct *wq, struct delayed_work *dw,
 	if ((wd_get(&dw->work) & LKPI_WORK_CANCELING) == 0 &&
 	    lkpi_wq_usable(wq)) {
 		was = lkpi_work_grab_locked(&dw->work);
-		lkpi_queue_delayed_locked(wq, dw, delay);
+		/* A disabled item is only cancelled, as on Linux. */
+		if ((wd_get(&dw->work) & LKPI_WORK_DIS_MASK) == 0)
+			lkpi_queue_delayed_locked(wq, dw, delay);
 	}
 	mutex_exit(&lkpi_wq_lock);
 	return (was);
@@ -658,8 +746,7 @@ flush_delayed_work(struct delayed_work *dw)
 	if ((wd_get(&dw->work) & LKPI_WORK_DELAYED) != 0) {
 		(void) timer_delete(&dw->timer);
 		wd_clear(&dw->work, LKPI_WORK_DELAYED);
-		if (dw->wq->ndelayed > 0)
-			dw->wq->ndelayed--;
+		list_del_init(&dw->lkpi_dlink);
 		lkpi_wq_insert_locked(dw->wq, &dw->work);
 	}
 	mutex_exit(&lkpi_wq_lock);
@@ -708,6 +795,104 @@ cancel_delayed_work_sync(struct delayed_work *dw)
 	return (was);
 }
 
+/* --- disabling ------------------------------------------------------------------ */
+
+/* Counts a disable of w; false (and a warning) if the count is full. */
+static boolean_t
+lkpi_work_disable_locked(struct work_struct *w)
+{
+	if ((wd_get(w) & LKPI_WORK_DIS_MASK) == LKPI_WORK_DIS_MASK) {
+		WARN_ONCE(1, "linuxkpi: work item disabled too often");
+		return (B_FALSE);
+	}
+	wd_set(w, wd_get(w) + LKPI_WORK_DIS_ONE);
+	return (B_TRUE);
+}
+
+/* Disables w and cancels it; whether it was pending. */
+bool
+disable_work(struct work_struct *w)
+{
+	bool was = false;
+
+	mutex_enter(&lkpi_wq_lock);
+	if (lkpi_work_disable_locked(w))
+		was = lkpi_work_grab_locked(w);
+	mutex_exit(&lkpi_wq_lock);
+	return (was);
+}
+
+/* disable_work(), then waits until w does not run. */
+bool
+disable_work_sync(struct work_struct *w)
+{
+	bool was = false;
+
+	if (!lkpi_work_may_wait())
+		return (disable_work(w));
+	mutex_enter(&lkpi_wq_lock);
+	if (lkpi_work_disable_locked(w)) {
+		was = lkpi_work_grab_locked(w);
+		lkpi_work_wait_idle_locked(w);
+	}
+	mutex_exit(&lkpi_wq_lock);
+	return (was);
+}
+
+/* Undoes one disable; true when w can be queued again. */
+bool
+enable_work(struct work_struct *w)
+{
+	bool enabled;
+
+	mutex_enter(&lkpi_wq_lock);
+	if ((wd_get(w) & LKPI_WORK_DIS_MASK) == 0) {
+		WARN_ONCE(1, "linuxkpi: enable_work() of an enabled item");
+		enabled = true;
+	} else {
+		wd_set(w, wd_get(w) - LKPI_WORK_DIS_ONE);
+		enabled = (wd_get(w) & LKPI_WORK_DIS_MASK) == 0;
+	}
+	mutex_exit(&lkpi_wq_lock);
+	return (enabled);
+}
+
+bool
+disable_delayed_work(struct delayed_work *dw)
+{
+	boolean_t delayed;
+	bool was = false;
+
+	mutex_enter(&lkpi_wq_lock);
+	delayed = (wd_get(&dw->work) & LKPI_WORK_DELAYED) != 0;
+	if (lkpi_work_disable_locked(&dw->work))
+		was = lkpi_work_grab_locked(&dw->work);
+	mutex_exit(&lkpi_wq_lock);
+	if (delayed && !servicing_interrupt())
+		lkpi_timer_wait_idle(&dw->timer);
+	return (was);
+}
+
+bool
+disable_delayed_work_sync(struct delayed_work *dw)
+{
+	bool was;
+
+	if (!lkpi_work_may_wait())
+		return (disable_delayed_work(dw));
+	was = disable_delayed_work(dw);
+	mutex_enter(&lkpi_wq_lock);
+	lkpi_work_wait_idle_locked(&dw->work);
+	mutex_exit(&lkpi_wq_lock);
+	return (was);
+}
+
+bool
+enable_delayed_work(struct delayed_work *dw)
+{
+	return (enable_work(&dw->work));
+}
+
 /* --- RCU work ---------------------------------------------------------------- */
 
 static void
@@ -717,7 +902,8 @@ lkpi_rcu_work_rcufn(struct rcu_head *head)
 
 	mutex_enter(&lkpi_wq_lock);
 	wd_clear(&rw->work, LKPI_WORK_RCU);
-	if (lkpi_wq_usable(rw->wq)) {
+	if ((wd_get(&rw->work) & LKPI_WORK_DIS_MASK) == 0 &&
+	    lkpi_wq_usable(rw->wq)) {
 		lkpi_wq_insert_locked(rw->wq, &rw->work);
 	} else {
 		wd_set(&rw->work, (wd_get(&rw->work) & ~LKPI_WORK_PENDING) +
@@ -732,8 +918,7 @@ bool
 queue_rcu_work(struct workqueue_struct *wq, struct rcu_work *rw)
 {
 	mutex_enter(&lkpi_wq_lock);
-	if ((wd_get(&rw->work) & (LKPI_WORK_PENDING | LKPI_WORK_CANCELING)) !=
-	    0 || !lkpi_wq_usable(wq)) {
+	if (wd_blocked(wd_get(&rw->work)) || !lkpi_wq_usable(wq)) {
 		mutex_exit(&lkpi_wq_lock);
 		return (false);
 	}
@@ -947,11 +1132,33 @@ tasklet_unlock_wait(struct tasklet_struct *t)
 	wait_var_event(&t->state, (ts_get(t) & LKPI_TASKLET_RUN) == 0);
 }
 
+/*
+ * Tasklets run on a layer thread that an interrupt handler may have
+ * interrupted on this CPU, so in an interrupt the spin is bounded and
+ * then reported (the caller proceeds as if the tasklet had finished).
+ */
+#define	LKPI_TASKLET_SPIN_NS	(10LL * NANOSEC / MILLISEC)
+
 void
 tasklet_unlock_spin_wait(struct tasklet_struct *t)
 {
-	while ((ts_get(t) & LKPI_TASKLET_RUN) != 0)
+	hrtime_t start;
+
+	if (!servicing_interrupt()) {
+		while ((ts_get(t) & LKPI_TASKLET_RUN) != 0)
+			cpu_relax();
+		return;
+	}
+	start = gethrtime();
+	while ((ts_get(t) & LKPI_TASKLET_RUN) != 0) {
+		if (gethrtime() - start > LKPI_TASKLET_SPIN_NS) {
+			WARN_ONCE(1, "linuxkpi: tasklet %p still running "
+			    "after 10 ms of waiting in an interrupt",
+			    (void *)t);
+			return;
+		}
 		cpu_relax();
+	}
 }
 
 /*
@@ -986,6 +1193,114 @@ tasklet_kill(struct tasklet_struct *t)
 	wake_up_var(&t->state);
 }
 
+/* --- driver unload ------------------------------------------------------------ */
+
+/* Flushes the layer's shared queues (lkpi_module_quiesce()). */
+void
+lkpi_work_flush_system(void)
+{
+	flush_workqueue(system_wq);
+	flush_workqueue(system_highpri_wq);
+	flush_workqueue(system_long_wq);
+	flush_workqueue(system_unbound_wq);
+	flush_workqueue(system_freezable_wq);
+	flush_workqueue(system_power_efficient_wq);
+	flush_workqueue(system_freezable_power_efficient_wq);
+	flush_workqueue(lkpi_irq_work_wq);
+	flush_workqueue(lkpi_tasklet_wq);
+}
+
+static boolean_t
+lkpi_work_in(uintptr_t cb, uintptr_t lo, uintptr_t hi)
+{
+	return (cb >= lo && cb < hi);
+}
+
+/*
+ * The first armed delayed item or pending item, on any queue, whose
+ * function lies in [lo, hi).
+ */
+static struct work_struct *
+lkpi_work_find_locked(uintptr_t lo, uintptr_t hi)
+{
+	struct workqueue_struct *wq;
+	struct delayed_work *dw;
+	struct work_struct *w;
+
+	list_for_each_entry(wq, &lkpi_wq_all, link) {
+		list_for_each_entry(dw, &wq->delayed, lkpi_dlink) {
+			if (lkpi_work_in(lkpi_work_callback(&dw->work), lo, hi))
+				return (&dw->work);
+		}
+		list_for_each_entry(w, &wq->pending, entry) {
+			if (lkpi_work_in(lkpi_work_callback(w), lo, hi))
+				return (w);
+		}
+	}
+	return (NULL);
+}
+
+static boolean_t
+lkpi_work_running_in_locked(uintptr_t lo, uintptr_t hi)
+{
+	struct lkpi_worker *wk;
+
+	list_for_each_entry(wk, &lkpi_wq_running, link) {
+		if (lkpi_work_in(wk->cb, lo, hi))
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+/*
+ * Cancels every armed delayed item and pending item whose function lies
+ * in [lo, hi), the text of a driver that is unloading, and waits until no
+ * such function runs. Each one is a driver bug (module_exit should have
+ * cancelled it), so it is reported. Returns how many were cancelled.
+ */
+int
+lkpi_work_quiesce(uintptr_t lo, uintptr_t hi)
+{
+	struct work_struct *w;
+	struct delayed_work *dw;
+	boolean_t delayed;
+	int n = 0;
+
+	if (!lkpi_work_may_wait())
+		return (0);
+	mutex_enter(&lkpi_wq_lock);
+	for (;;) {
+		w = lkpi_work_find_locked(lo, hi);
+		if (w == NULL) {
+			/* A running item may queue itself again. */
+			if (!lkpi_work_running_in_locked(lo, hi))
+				break;
+			cv_wait(&lkpi_wq_done_cv, &lkpi_wq_lock);
+			continue;
+		}
+		delayed = (wd_get(w) & LKPI_WORK_DELAYED) != 0;
+		cmn_err(CE_WARN, "linuxkpi: work item %p (function %p) still "
+		    "%s at driver unload, cancelled", (void *)w,
+		    (void *)lkpi_work_callback(w),
+		    delayed ? "armed" : "queued");
+		if (!lkpi_work_grab_locked(w)) {
+			/* Not reached: listed items are pending. */
+			WARN_ONCE(1, "linuxkpi: work item %p not cancellable",
+			    (void *)w);
+			break;
+		}
+		n++;
+		if (delayed) {
+			dw = to_delayed_work(w);
+			mutex_exit(&lkpi_wq_lock);
+			lkpi_timer_wait_idle(&dw->timer);
+			mutex_enter(&lkpi_wq_lock);
+		}
+	}
+	mutex_exit(&lkpi_wq_lock);
+	return (n);
+}
+
 /* --- module state ------------------------------------------------------------- */
 
 int
@@ -995,12 +1310,15 @@ lkpi_work_init(void)
 	cv_init(&lkpi_wq_done_cv, NULL, CV_DRIVER, NULL);
 	INIT_LIST_HEAD(&lkpi_wq_running);
 
-	system_wq = lkpi_alloc_workqueue("lkpi_events", 0, 8);
+	INIT_LIST_HEAD(&lkpi_wq_all);
+
+	/* The general queues get the default, CPU-scaled worker count. */
+	system_wq = lkpi_alloc_workqueue("lkpi_events", 0, 0);
 	system_highpri_wq = lkpi_alloc_workqueue("lkpi_events_highpri",
 	    WQ_HIGHPRI, 4);
-	system_long_wq = lkpi_alloc_workqueue("lkpi_events_long", 0, 4);
+	system_long_wq = lkpi_alloc_workqueue("lkpi_events_long", 0, 0);
 	system_unbound_wq = lkpi_alloc_workqueue("lkpi_events_unbound",
-	    WQ_UNBOUND, 8);
+	    WQ_UNBOUND, 0);
 	system_freezable_wq = lkpi_alloc_workqueue("lkpi_events_freezable",
 	    WQ_FREEZABLE, 2);
 	system_power_efficient_wq = lkpi_alloc_workqueue("lkpi_events_pwr",

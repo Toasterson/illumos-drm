@@ -70,6 +70,19 @@ extern long strncpy_from_user(char *dst, const char __user *src, long count);
 	do { if (put_user(x, ptr) != 0) goto err; } while (0)
 #define	unsafe_copy_to_user(d, s, l, err) \
 	do { if (copy_to_user(d, s, l) != 0) goto err; } while (0)
+/*
+ * pagefault_disable() is a no-op, so the _inatomic copies above may fault
+ * and sleep. On Linux it makes them fail at once instead, because a fault
+ * on a GEM mmap would re-enter i915 (its fault handler takes the object
+ * and ww locks the copying ioctl may hold). That cannot happen here: user
+ * mappings of the layer's GEM objects are the DRM core's devmap mappings
+ * of locked ddi_umem memory (lkpi_shmem_umem()), which fault without
+ * calling the driver, since no layer object sets illumos_movable
+ * (<drm/drm_gem.h>). Sleeping in the fault while holding a layer
+ * "spinlock" is allowed, as those are adaptive kmutexes. If an object
+ * type ever sets illumos_movable (its faults call illumos_access in the
+ * driver), these must start failing with the bytes not copied instead.
+ */
 #define	pagefault_disable()		((void)0)
 #define	pagefault_enable()		((void)0)
 #define	pagefault_disabled()		0

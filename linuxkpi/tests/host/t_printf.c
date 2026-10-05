@@ -156,9 +156,21 @@ TEST(printf_pext)
 	n = vafmt(buf, sizeof (buf), "a=%d b=%s", 1, "xy");
 	CHECK_STR(buf, "<a=1 b=xy>");
 	CHECK_EQ(n, 10);
-	FMT("ffffff0012345678", "%p", p);
+	/* Only %px prints the address; %p and %pK print a stable hash. */
 	FMT("ffffff0012345678", "%px", p);
-	FMT("ffffff0012345678", "%pK", p);
+	{
+		char h1[32], h2[32], h3[32];
+
+		(void) lkpi_snprintf(h1, sizeof (h1), "%p", p);
+		(void) lkpi_snprintf(h2, sizeof (h2), "%pK", p);
+		(void) lkpi_snprintf(h3, sizeof (h3), "%p", (char *)p + 8);
+		CHECK_EQ(strlen(h1), 16);
+		CHECK(strcmp(h1, "ffffff0012345678") != 0);
+		CHECK_STR(h2, h1);
+		CHECK(strcmp(h3, h1) != 0);
+		(void) lkpi_snprintf(h3, sizeof (h3), "%p", p);
+		CHECK_STR(h3, h1);
+	}
 	FMT("0x0000000000001234", "%pS", (void *)0x1234);
 	FMT("0x0000000000001234", "%ps", (void *)0x1234);
 	FMT("0x0000000000001234", "%pSR", (void *)0x1234);
@@ -172,7 +184,9 @@ TEST(printf_pext)
 	FMT("XR24 (little-endian)", "%p4cc", &fourcc);
 	FMT("XR24 (big-endian)", "%p4cc", &fourcc_be);
 	/* Unknown extensions print the pointer and skip their letters. */
-	FMT("ffffff0012345678.", "%pZz9.", p);
+	n = lkpi_snprintf(buf, sizeof (buf), "%pZz9.", p);
+	CHECK_EQ(n, 17);
+	CHECK(buf[16] == '.' && strncmp(buf, "ffffff0012345678", 16) != 0);
 	FMT("          (null) end", "%p end", NULL);
 	FMT("0000000000000000", "%px", NULL);
 	/* NULL and bad pointers do not fault. */
@@ -185,7 +199,7 @@ TEST(printf_pext)
 	FMT("(efault)", "%s", (char *)ERR_PTR(-EINVAL));
 	/* A width on a plain %p pads as a number. */
 	FMT("     0x10", "%9s", "0x10");
-	FMT("      10", "%8p", (void *)0x10);
+	FMT("      10", "%8px", (void *)0x10);
 }
 
 static int

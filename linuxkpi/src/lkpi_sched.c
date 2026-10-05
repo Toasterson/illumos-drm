@@ -86,13 +86,14 @@ lkpi_task_unbind(void)
 		(void) tsd_set(lkpi_task_key, NULL);
 }
 
+/* The calling thread's task; NULL in an interrupt handler. */
 struct task_struct *
-lkpi_current(void)
+lkpi_task_self(void)
 {
 	struct task_struct *t;
 
 	if (servicing_interrupt() || lkpi_task_key == 0)
-		return (&lkpi_irq_task);
+		return (NULL);
 	t = tsd_get(lkpi_task_key);
 	if (t != NULL)
 		return (t);
@@ -110,9 +111,17 @@ lkpi_current(void)
 	if (tsd_set(lkpi_task_key, t) != 0) {
 		lkpi_task_fini(t);
 		kmem_free(t, sizeof (*t));
-		return (&lkpi_irq_task);
+		return (NULL);
 	}
 	return (t);
+}
+
+struct task_struct *
+lkpi_current(void)
+{
+	struct task_struct *t = lkpi_task_self();
+
+	return (t != NULL ? t : &lkpi_irq_task);
 }
 
 void
@@ -234,10 +243,13 @@ io_schedule(void)
 }
 
 /*
- * Whether the signal that ended t's last interruptible sleep is still
- * pending: a zero-length cv_reltimedwait_sig(9F) does not sleep and
- * returns 0 only if a signal is pending. Only the task's own thread can
- * ask; for other tasks the flag is reported as it is.
+ * signal_pending(): whether a signal is pending for the calling thread.
+ * A zero-length cv_reltimedwait_sig(9F) does not sleep; it returns 0 only
+ * if a signal is pending (kernel threads of system processes never have
+ * one). Its cost is the task mutex, a function call and a few flag tests
+ * (the signal itself is examined only when one is posted), small enough
+ * for every call. Only the task's own thread can ask; for other tasks the
+ * flag set by their last interrupted sleep is reported.
  */
 int
 lkpi_signal_recheck(struct task_struct *t)
@@ -248,11 +260,49 @@ lkpi_signal_recheck(struct task_struct *t)
 	    servicing_interrupt())
 		return (t->sigpending);
 	mutex_enter(&t->lock);
-	if (cv_reltimedwait_sig(&t->cv, &t->lock, 0, TR_CLOCK_TICK) != 0)
-		t->sigpending = 0;
-	pending = t->sigpending;
+	pending = cv_reltimedwait_sig(&t->cv, &t->lock, 0, TR_CLOCK_TICK) == 0;
+	t->sigpending = pending;
 	mutex_exit(&t->lock);
 	return (pending);
+}
+
+/*
+ * read_seqcount_begin() found a write in progress: wait until the count
+ * is even. Linux writers mask interrupts, the layer's do not, so an
+ * interrupt handler may have interrupted the writer on this CPU; the
+ * writer then cannot finish before the handler does. In an interrupt the
+ * wait is therefore bounded (LKPI_SEQ_SPIN_NS): after it, the odd count
+ * is returned and the read proceeds; its read_seqcount_retry() fails if
+ * the writer finished meanwhile, otherwise the reader may see a torn
+ * update, which is reported once. Thread context waits as on Linux,
+ * yielding the processor when illumos wants it.
+ */
+#define	LKPI_SEQ_SPIN_NS	(10LL * NANOSEC / MILLISEC)
+
+unsigned int
+lkpi_seqcount_wait(const seqcount_t *s)
+{
+	unsigned int seq, n = 0;
+	hrtime_t start;
+
+	if (!servicing_interrupt()) {
+		while ((seq = READ_ONCE(s->sequence)) & 1) {
+			cpu_relax();
+			if ((++n & 1023) == 0)
+				lkpi_cond_resched();
+		}
+		return (seq);
+	}
+	start = gethrtime();
+	while ((seq = READ_ONCE(s->sequence)) & 1) {
+		if (gethrtime() - start > LKPI_SEQ_SPIN_NS) {
+			WARN_ONCE(1, "linuxkpi: seqcount %p write in progress "
+			    "during an interrupt, read not retried", (void *)s);
+			break;
+		}
+		cpu_relax();
+	}
+	return (seq);
 }
 
 /*

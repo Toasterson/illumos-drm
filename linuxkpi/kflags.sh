@@ -24,9 +24,12 @@ _lkpi_probe() {
 	"$CC" -m64 -Werror "$@" -c -o "$_lkpi_tmp/probe.o" "$_lkpi_tmp/probe.c" >/dev/null 2>&1
 }
 
-LKPI_CFLAGS="-m64 -O2 -std=gnu11 -fno-strict-aliasing -fno-strict-overflow"
-LKPI_CFLAGS="$LKPI_CFLAGS -fno-optimize-sibling-calls -ffreestanding -mcmodel=kernel"
-LKPI_CFLAGS="$LKPI_CFLAGS -fno-pie -fno-pic -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-avx"
+# The flags a kernel module cannot do without: a compiler that refuses
+# one of them cannot build the layer (checked below, not dropped).
+_lkpi_must="-m64 -O2 -std=gnu11 -fno-strict-aliasing -fno-strict-overflow"
+_lkpi_must="$_lkpi_must -ffreestanding -mcmodel=kernel -fno-pie -fno-pic -mno-red-zone"
+_lkpi_must="$_lkpi_must -mno-mmx -mno-sse -mno-sse2 -mno-avx -mno-80387 -mno-fp-ret-in-387"
+LKPI_CFLAGS="$_lkpi_must -fno-optimize-sibling-calls"
 LKPI_CFLAGS="$LKPI_CFLAGS -fno-builtin -fno-common -fno-asynchronous-unwind-tables"
 LKPI_CFLAGS="$LKPI_CFLAGS -fms-extensions -funsigned-char -fno-delete-null-pointer-checks"
 LKPI_CFLAGS="$LKPI_CFLAGS -fno-jump-tables -fdiagnostics-show-option"
@@ -39,16 +42,27 @@ LKPI_CFLAGS="$LKPI_CFLAGS -Wno-pointer-sign"
 LKPI_CFLAGS="$LKPI_CFLAGS -Werror=implicit-function-declaration -Werror=implicit-int"
 LKPI_CFLAGS="$LKPI_CFLAGS -Werror=incompatible-pointer-types -Werror=int-conversion"
 LKPI_CFLAGS="$LKPI_CFLAGS -Werror=return-type"
+# The gate's flags for DTrace fbt and stack traces (as cw passes them),
+# where the compiler takes them.
 for _f in -msave-args "-mindirect-branch=thunk-extern -mindirect-branch-register" \
     -fno-shrink-wrap -fno-ipa-cp -fno-ipa-icf -fno-clone-functions \
     -fno-reorder-functions -fno-reorder-blocks-and-partition \
+    -fno-inline-small-functions -fno-inline-functions-called-once \
     -fno-aggressive-loop-optimizations -fstack-protector-strong; do
 	if [ "${CROSS:-0}" = 1 ] && [ "$_f" = -msave-args ]; then continue; fi
 	# shellcheck disable=SC2086
 	_lkpi_probe $_f && LKPI_CFLAGS="$LKPI_CFLAGS $_f"
 done
 # shellcheck disable=SC2086
-LKPI_CFLAGS=$(for _f in $LKPI_CFLAGS; do _lkpi_probe "$_f" && printf '%s ' "$_f"; done)
+if ! _lkpi_probe $_lkpi_must; then
+	echo "kflags.sh: $CC does not take the kernel flags $_lkpi_must" >&2
+	rm -rf "$_lkpi_tmp"
+	exit 1
+fi
+# The warning and dialect flags: kept where the compiler takes them
+# (each probed with the kernel flags, which some depend on).
+# shellcheck disable=SC2086
+LKPI_CFLAGS=$(for _f in $LKPI_CFLAGS; do _lkpi_probe $_lkpi_must "$_f" && printf '%s ' "$_f"; done)
 rm -rf "$_lkpi_tmp"
 
 LKPI_CPPFLAGS="-D_KERNEL -D_SYSCALL32 -D_SYSCALL32_IMPL -D_ELF64 -D_DDI_STRICT"

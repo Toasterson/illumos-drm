@@ -19,10 +19,18 @@
  * dma_map_single() or virt_to_page() -- gets a "foreign" descriptor,
  * created on first use and registered; its lifetime rules are:
  *	- the index holds one reference; get_page()/put_page() by users
- *	  nest inside it, so a foreign descriptor normally lives until the
- *	  module is unloaded (it describes an address, not an allocation:
+ *	  nest inside it (it describes an address, not an allocation:
  *	  page_to_phys() asks the HAT each time, so it stays correct if the
  *	  memory behind the address is freed and reused);
+ *	- kfree() and free_pages_exact() drop the index's reference on the
+ *	  foreign descriptors of the pages their buffer covers entirely
+ *	  (lkpi_page_forget_foreign()), so descriptors made by virt_to_page()
+ *	  of kmalloc() memory (i915's GPU error capture, dma_map_single())
+ *	  do not pile up. A page the buffer covers only in part may hold
+ *	  other live allocations, whose users may keep the descriptor
+ *	  without a reference (sg_set_page() does not take one): it stays
+ *	  registered. Such pages are bounded by the kernel heap and reused
+ *	  by address, one descriptor each;
  *	- a page creator (alloc_pages(), a shmem file, a user pin) that
  *	  registers the same address evicts it: the index drops its
  *	  reference and the descriptor is freed at its last put_page();
@@ -70,12 +78,15 @@ struct lkpi_pg {
 	struct lx_page	lp_page;
 	avl_node_t	lp_node;
 	bool		lp_registered;
+	struct lkpi_pg	*lp_next;	/* lkpi_page_forget_foreign()'s list */
 };
 
 static kmem_cache_t *lkpi_pg_cache;	/* descriptors */
 static kmem_cache_t *lkpi_pgmem_cache;	/* alloc_pages() memory */
 static krwlock_t lkpi_pg_lock;		/* the address index */
 static avl_tree_t lkpi_pg_index;
+/* Registered foreign descriptors (lkpi_pg_lock); kfree() skips at zero. */
+static volatile unsigned long lkpi_pg_nforeign;
 
 /* One vmap() or vmap_pfn(). */
 struct lkpi_vmap {
@@ -166,6 +177,7 @@ lkpi_page_create(void *kva, struct lkpi_page_owner *owner, int kmflag)
 	if (old != NULL && old->lp_page.lkpi_owner == &lkpi_foreign_owner) {
 		avl_remove(&lkpi_pg_index, old);
 		old->lp_registered = false;
+		lkpi_pg_nforeign--;
 		evicted = &old->lp_page;
 		old = avl_find(&lkpi_pg_index, pg, &where);
 	}
@@ -194,9 +206,44 @@ lkpi_page_destroy(struct lx_page *page)
 	if (pg->lp_registered) {
 		avl_remove(&lkpi_pg_index, pg);
 		pg->lp_registered = false;
+		if (page->lkpi_owner == &lkpi_foreign_owner)
+			lkpi_pg_nforeign--;
 	}
 	rw_exit(&lkpi_pg_lock);
 	(kmem_cache_free)(lkpi_pg_cache, pg);
+}
+
+void
+lkpi_page_forget_foreign(const void *addr, size_t len)
+{
+	uintptr_t start = P2ROUNDUP((uintptr_t)addr, PAGE_SIZE);
+	uintptr_t end = P2ALIGN((uintptr_t)addr + len, PAGE_SIZE);
+	struct lkpi_pg key, *pg, *next, *list = NULL;
+	avl_index_t where;
+
+	/* Unlocked: a virt_to_page() racing with the free is a bug anyway. */
+	if (lkpi_pg_nforeign == 0 || start >= end)
+		return;
+	key.lp_page.lkpi_kva = (void *)start;
+	rw_enter(&lkpi_pg_lock, RW_WRITER);
+	if ((pg = avl_find(&lkpi_pg_index, &key, &where)) == NULL)
+		pg = avl_nearest(&lkpi_pg_index, where, AVL_AFTER);
+	for (; pg != NULL && (uintptr_t)pg->lp_page.lkpi_kva < end; pg = next) {
+		next = AVL_NEXT(&lkpi_pg_index, pg);
+		if (pg->lp_page.lkpi_owner != &lkpi_foreign_owner)
+			continue;
+		avl_remove(&lkpi_pg_index, pg);
+		pg->lp_registered = false;
+		lkpi_pg_nforeign--;
+		pg->lp_next = list;
+		list = pg;
+	}
+	rw_exit(&lkpi_pg_lock);
+	/* The index's references; put_page() may take lkpi_pg_lock. */
+	for (pg = list; pg != NULL; pg = next) {
+		next = pg->lp_next;
+		put_page(&pg->lp_page);
+	}
 }
 
 struct lx_page *
@@ -277,7 +324,12 @@ lkpi_page_foreign(caddr_t pkva)
 		WARN_ONCE(1, "virt_to_page: %p is not mapped", (void *)pkva);
 		return (NULL);
 	}
-	/* virt_to_page() may be called with spinlocks held: do not sleep. */
+	/*
+	 * virt_to_page() may be called with spinlocks held. The layer's
+	 * spinlocks are adaptive kmutexes (<linux/spinlock.h>), so blocking
+	 * briefly on lkpi_pg_lock below is allowed; what must not happen is
+	 * an unbounded wait for memory under a driver lock, hence KM_NOSLEEP.
+	 */
 	if ((pg = lkpi_pg_alloc(pkva, &lkpi_foreign_owner, KM_NOSLEEP)) ==
 	    NULL) {
 		WARN_ONCE(1, "virt_to_page: no memory for a page descriptor");
@@ -288,6 +340,7 @@ lkpi_page_foreign(caddr_t pkva)
 	if (old == NULL) {
 		avl_insert(&lkpi_pg_index, pg, where);
 		pg->lp_registered = true;
+		lkpi_pg_nforeign++;
 	}
 	rw_exit(&lkpi_pg_lock);
 	if (old != NULL) {
@@ -436,8 +489,10 @@ alloc_pages_exact(size_t size, gfp_t gfp)
 void
 free_pages_exact(void *virt, size_t size)
 {
-	if (virt != NULL)
-		kmem_free(virt, P2ROUNDUP(size, PAGE_SIZE));
+	if (virt == NULL)
+		return;
+	lkpi_page_forget_foreign(virt, P2ROUNDUP(size, PAGE_SIZE));
+	kmem_free(virt, P2ROUNDUP(size, PAGE_SIZE));
 }
 
 /* --- vmap -------------------------------------------------------------- */
@@ -705,6 +760,7 @@ lkpi_page_fini(void)
 	}
 	if (leaked != 0)
 		cmn_err(CE_WARN, "linuxkpi: %lu pages left", leaked);
+	lkpi_pg_nforeign = 0;
 	avl_destroy(&lkpi_pg_index);
 	rw_destroy(&lkpi_pg_lock);
 	(kmem_cache_destroy)(lkpi_pgmem_cache);

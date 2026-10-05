@@ -27,6 +27,32 @@ SPECIAL = {
     "intel_display_device_probe": "return (NULL);",
 }
 
+# Display functions whose work the headless build must still do: the stub
+# stays empty because the illumos glue does that work instead (the note
+# says where). A display symbol not listed here and not answerable with
+# "no display" must be added here or to SPECIAL, never left to the default.
+ELSEWHERE = {
+    "ilk_display_irq_master_disable": "patch 0006",
+    "ilk_display_irq_master_enable": "patch 0006",
+    "intel_display_irq_reset": "patch 0006",
+    "intel_display_irq_postinstall": "patch 0006",
+}
+
+
+def wrap(head, args):
+    """head + args as cstyle lines of at most 80 columns, continued with 4
+    spaces."""
+    parts = [a.strip() for a in args.strip()[1:-1].split(",")]
+    lines, cur = [], head + "("
+    for i, a in enumerate(parts):
+        piece = a + (", " if i < len(parts) - 1 else ")")
+        if len(cur) + len(piece.rstrip()) > 80:
+            lines.append(cur.rstrip())
+            cur = "    "
+        cur += piece
+    lines.append(cur.rstrip())
+    return lines
+
 
 def main():
     tree, symfile = sys.argv[1], sys.argv[2]
@@ -61,7 +87,11 @@ def main():
     out += [f"#include \"{i}\"" for i in sorted(incs)]
     out.append("")
     for struct, name in tables:
-        out += [f"const struct {struct} {name} = {{ 0 }};", ""]
+        line = f"const struct {struct} {name} = {{ 0 }};"
+        if len(line) > 80:
+            out += [f"const struct {struct}", f"    {name} = {{ 0 }};", ""]
+        else:
+            out += [line, ""]
     for s, decl in funcs:
         pre = decl[: decl.index(s)].strip()
         ret = re.sub(r"\b(extern|static|inline|__must_check|__printf\(\d+, *\d+\))\b", "", pre).strip()
@@ -80,7 +110,8 @@ def main():
             body = "return (0);"
         argnames = re.findall(r"(\w+)\s*(?:\[[^]]*\])?\s*(?:,|\)$)", args.strip())
         voids = "".join(f"\t(void) {a};\n" for a in argnames if a != "void")
-        out += [ret, f"{s}{args}", "{", voids.rstrip("\n") if voids else None, f"\t{body}" if body else None, "}", ""]
+        note = [f"/* The illumos glue does this instead ({ELSEWHERE[s]}). */"] if s in ELSEWHERE else []
+        out += note + [ret] + wrap(s, args) + ["{", voids.rstrip("\n") if voids else None, f"\t{body}" if body else None, "}", ""]
     sys.stdout.write("\n".join(x for x in out if x is not None))
 
 

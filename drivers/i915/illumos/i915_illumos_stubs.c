@@ -47,8 +47,15 @@
 int
 intel_region_ttm_device_init(struct drm_i915_private *dev_priv)
 {
-	/* No TTM device: integrated GPUs do not use one. */
-	(void) dev_priv;
+	/*
+	 * No TTM device: integrated GPUs place nothing with TTM (their
+	 * regions are shmem and stolen memory); discrete ones are refused
+	 * at probe (patch 0009).
+	 */
+	if (IS_DGFX(dev_priv)) {
+		I915_ILLUMOS_UNSUPPORTED("a TTM device (discrete GPU)");
+		return (-ENODEV);
+	}
 	return (0);
 }
 
@@ -73,6 +80,11 @@ intel_gt_setup_lmem(struct intel_gt *gt)
 	return (ERR_PTR(-ENODEV));
 }
 
+/*
+ * Suspend and resume of local-memory regions (i915_gem_pm.c calls them
+ * for INTEL_MEMORY_LOCAL regions only): no such region exists in this
+ * build, so they are never reached.
+ */
 int
 i915_ttm_backup_region(struct intel_memory_region *mr, u32 flags)
 {

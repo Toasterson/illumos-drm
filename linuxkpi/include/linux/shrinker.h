@@ -4,12 +4,15 @@
  *
  * Linux's memory shrinkers (include/linux/shrinker.h, GPL-2.0;
  * reimplemented in src/lkpi_shrinker.c). illumos has no shrinker chain;
- * the layer asks registered shrinkers to free memory from the reclaim
- * callback of a kmem cache it creates for that purpose
- * (kmem_cache_create(9F)'s reclaim function, which the kernel calls when
- * memory runs low): count_objects() and then scan_objects() with
- * nr_to_scan = SHRINK_BATCH (128) per call, in thread context, with
+ * when the kernel reaps kmem caches (memory runs low), the reclaim
+ * callback of a kmem cache the layer creates for that purpose
+ * (kmem_cache_create(9F)) queues a shrink pass on the layer's own task
+ * queue: at most one pass at a time and, from kmem, at most one a
+ * second. A pass calls each registered shrinker's count_objects() and
+ * then one scan_objects() with nr_to_scan = min(count, batch)
+ * (SHRINK_BATCH, 128, by default), in thread context, with
  * __GFP_DIRECT_RECLAIM unset (shrinkers must not block on allocation).
+ * There is no swap. shrinker_free() waits for a scan in progress.
  */
 #ifndef _LINUX_SHRINKER_H
 #define	_LINUX_SHRINKER_H
@@ -44,7 +47,8 @@ struct shrinker {
 	unsigned int flags;
 	void *private_data;
 	struct list_head lkpi_list;
-	void *lkpi_cache;
+	uint64_t lkpi_pass;		/* the last pass that saw it */
+	bool lkpi_scanning;		/* a pass is calling it */
 	char lkpi_name[32];
 };
 
@@ -52,5 +56,11 @@ extern struct shrinker *shrinker_alloc(unsigned int flags, const char *fmt, ...)
     __printf(2, 3);
 extern void shrinker_register(struct shrinker *shrinker);
 extern void shrinker_free(struct shrinker *shrinker);
+/*
+ * Layer interface: queue a shrink pass unless one is queued or running.
+ * kmem's reclaim callback passes now = false (rate-limited); the
+ * selftest passes true to run one regardless of the last pass's time.
+ */
+extern void lkpi_shrink_request(bool now);
 
 #endif

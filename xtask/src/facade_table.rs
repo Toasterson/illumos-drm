@@ -140,6 +140,10 @@ pub fn lines() -> Vec<String> {
         format!("offset drm_gem_object_funcs.illumos_mapped {}", offset_of!(f::drm_gem_object_funcs, illumos_mapped)),
         format!("offset drm_gem_object_funcs.illumos_access {}", offset_of!(f::drm_gem_object_funcs, illumos_access)),
         format!("offset drm_gem_object_funcs.illumos_movable {}", offset_of!(f::drm_gem_object_funcs, illumos_movable)),
+        format!(
+            "offset drm_gem_object_funcs.illumos_close_every_handle {}",
+            offset_of!(f::drm_gem_object_funcs, illumos_close_every_handle)
+        ),
         format!("size drm_gem_object {}", size_of::<f::drm_gem_object>()),
         format!("offset drm_gem_object.refcount {}", offset_of!(f::drm_gem_object, refcount)),
         format!("offset drm_gem_object.handle_count {}", offset_of!(f::drm_gem_object, handle_count)),

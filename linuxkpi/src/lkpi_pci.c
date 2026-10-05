@@ -12,11 +12,38 @@
  * Attached devices are kept on a list (ioremap() finds BARs by physical
  * address through lkpi_pci_phys_lookup()).
  *
- * Other PCI functions (the host bridge, the ISA bridge) are found by
- * walking the device tree; they become "foreign" wrappers: read-only
- * config space, no BARs, no interrupts. Such a wrapper reaches a node the
- * driver does not own, so writes are refused (-EPERM) except to a host
- * bridge, where i915 enables MCHBAR (i915_gmch.c); those are logged.
+ * Other PCI functions (the host bridge, the ISA bridge) are found in the
+ * device tree; they become "foreign" wrappers: read-only config space, no
+ * BARs, no interrupts. Such a wrapper reaches a node the driver does not
+ * own, so writes are refused (-EPERM) except to the host-bridge registers
+ * i915 programs to enable MCHBAR (i915_gmch.c: MCHBAR at 0x44 or
+ * 0x48/0x4c, DEVEN at 0x54); those are logged.
+ *
+ * Finding a node: ddi_walk_devs(9F) holds each ancestor busy while it
+ * descends and must not be called from attach(9E)/detach(9E): the
+ * attaching thread owns its parent busy, and a thread that holds the
+ * root busy (devfsadm, a configuring thread) may wait for that parent.
+ * While a layer device attaches or detaches (lp_busy_thread: its probe()
+ * or remove() runs), its parent's children cannot change, so any thread
+ * searches only those children (with ddi_get_child()/
+ * ddi_get_next_sibling(), under lkpi_pci_lock, which keeps the attach
+ * from ending meanwhile); the host bridge (00:00.0) and the ISA bridge
+ * (00:1f.0) are siblings of the iGPU. Otherwise the whole tree is walked.
+ * Wrappers are cached (lkpi_pci_foreign, one reference each) while a
+ * layer device is attached, so config accesses by bus and devfn
+ * (pci_bus_read_config_*()) neither search nor set up a config handle.
+ *
+ * Devices are reference counted through their struct device
+ * (get_device()/put_device(), src/lkpi_device.c): attach holds one
+ * reference, pci_get_*() and pci_dev_get() take one, and the last
+ * put_device() frees the structure (lkpi_pci_dev_release()). Detach
+ * tears the device down (driver, interrupts, mappings, config handle)
+ * and drops the attach reference; a DRM device made on it keeps the
+ * structure alive until the DRM core lets go of it. lkpi_drm_detach_begin()
+ * may veto the detach before remove() runs; if lkpi_drm_detach_end()
+ * fails after it, the node stays attached with the driver torn down
+ * (the module cannot unload) rather than freeing a device the DRM core
+ * still uses.
  *
  * PCI domains: illumos x86 numbers buses in segment 0; every device is
  * in domain 0.
@@ -58,10 +85,13 @@ struct resource intel_graphics_stolen_res = {
 /* A layer PCI device and its illumos state. */
 struct lkpi_pdev {
 	struct pci_dev lp_pdev;
-	struct list_head lp_link;	/* lkpi_pci_devs (attached only) */
+	struct list_head lp_link;	/* lkpi_pci_devs or lkpi_pci_foreign */
 	kmutex_t lp_lock;		/* lp_maps */
 	struct list_head lp_maps;	/* struct lkpi_iomap */
 	bool lp_held;			/* foreign: ndi_hold_devi() */
+	bool lp_cached;			/* foreign: on lkpi_pci_foreign */
+	bool lp_removed;		/* attached: remove() has run */
+	kthread_t *lp_busy_thread;	/* (lkpi_pci_lock) in probe/remove */
 };
 
 /* One pci_iomap() mapping. */
@@ -72,10 +102,17 @@ struct lkpi_iomap {
 };
 
 #define	LKPI_PCI_MAX_DRIVERS	8
-#define	LKPI_PCI_CFG_SIZE	4096	/* PCI Express config space */
+#define	LKPI_PCI_CFG_SIZE	256	/* conventional config space */
+#define	LKPI_PCIE_CFG_SIZE	4096	/* PCI Express config space */
 
-static kmutex_t lkpi_pci_lock;		/* the two tables below */
+/* Host-bridge registers i915_gmch.c writes: MCHBAR (2 dwords), DEVEN. */
+#define	LKPI_HB_MCHBAR_I915	0x44
+#define	LKPI_HB_MCHBAR_END	0x50
+#define	LKPI_HB_DEVEN		0x54
+
+static kmutex_t lkpi_pci_lock;		/* the lists and table below */
 static struct list_head lkpi_pci_devs;
+static struct list_head lkpi_pci_foreign;	/* cached foreign wrappers */
 static struct pci_driver *lkpi_pci_drivers[LKPI_PCI_MAX_DRIVERS];
 static struct pci_dev *lkpi_stolen_owner;
 static bool lkpi_pci_power_logged;
@@ -93,17 +130,21 @@ lkpi_pci_init(void)
 
 	(mutex_init)(&lkpi_pci_lock, NULL, MUTEX_DRIVER, NULL);
 	INIT_LIST_HEAD(&lkpi_pci_devs);
+	INIT_LIST_HEAD(&lkpi_pci_foreign);
 	ret = lkpi_irq_init();
 	if (ret != 0)
 		(mutex_destroy)(&lkpi_pci_lock);
 	return (ret);
 }
 
+static void lkpi_pci_uncache_all(void);
+
 void
 lkpi_pci_fini(void)
 {
 	/* The module cannot unload while a driver using it is loaded. */
 	WARN_ON(!list_empty(&lkpi_pci_devs));
+	lkpi_pci_uncache_all();
 	lkpi_irq_fini();
 	(mutex_destroy)(&lkpi_pci_lock);
 }
@@ -199,10 +240,19 @@ lkpi_cfg_check(const struct pci_dev *dev, int where, int size)
 {
 	if (dev == NULL || dev->lkpi_cfg == NULL)
 		return (-ENODEV);
-	if (where < 0 || where > LKPI_PCI_CFG_SIZE - size ||
+	if (where < 0 || where > dev->cfg_size - size ||
 	    (where & (size - 1)) != 0)
 		return (-EINVAL);
 	return (0);
+}
+
+/* Whether [where, where + size) lies in the writable host-bridge registers. */
+static bool
+lkpi_hb_writable(int where, int size)
+{
+	if (where >= LKPI_HB_MCHBAR_I915 && where + size <= LKPI_HB_MCHBAR_END)
+		return (true);
+	return (where >= LKPI_HB_DEVEN && where + size <= LKPI_HB_DEVEN + 4);
 }
 
 static int
@@ -238,10 +288,12 @@ lkpi_cfg_write(const struct pci_dev *dev, int where, int size, u32 val)
 	if (ret != 0)
 		return (ret);
 	if (dev->lkpi_foreign) {
-		if ((dev->class >> 8) != PCI_CLASS_BRIDGE_HOST) {
+		if ((dev->class >> 8) != PCI_CLASS_BRIDGE_HOST ||
+		    !lkpi_hb_writable(where, size)) {
 			cmn_err(CE_WARN, "linuxkpi: refused config write "
-			    "(offset 0x%x, value 0x%x) to %s, a device the "
-			    "driver does not own", where, val, pci_name(dev));
+			    "(offset 0x%x, %d bytes, value 0x%x) to %s, a "
+			    "device the driver does not own", where, size, val,
+			    pci_name(dev));
 			return (-EPERM);
 		}
 		cmn_err(CE_NOTE, "!linuxkpi: config write (offset 0x%x, "
@@ -345,7 +397,7 @@ pci_find_ext_capability(struct pci_dev *dev, int cap)
 	int pos = 0x100;
 	int ttl = (4096 - 256) / 8;
 
-	if (!pci_is_pcie(dev))
+	if (!pci_is_pcie(dev) || dev->cfg_size <= 0x100)
 		return (0);
 	if (pci_read_config_dword(dev, pos, &hdr) != 0 || hdr == 0 ||
 	    hdr == ~0U)
@@ -870,6 +922,7 @@ lkpi_pci_bars(struct pci_dev *pdev, dev_info_t *dip)
 	ddi_prop_free(data);
 }
 
+/* Frees a device: the struct device's release, at the last put_device(). */
 static void
 lkpi_pci_free(struct lkpi_pdev *lp)
 {
@@ -883,6 +936,12 @@ lkpi_pci_free(struct lkpi_pdev *lp)
 	if (lp->lp_held)
 		ndi_rele_devi(dip);
 	kmem_free(lp, sizeof (*lp));
+}
+
+static void
+lkpi_pci_dev_release(struct device *dev)
+{
+	lkpi_pci_free(lkpi_pdev(to_pci_dev(dev)));
 }
 
 /*
@@ -930,6 +989,7 @@ lkpi_pci_new(dev_info_t *dip, bool foreign)
 	(void) (snprintf)(name, sizeof (name), "%04x:%02x:%02x.%x", 0, bus,
 	    PCI_SLOT(devfn), PCI_FUNC(devfn));
 	lkpi_device_init(&pdev->dev, dip, name);
+	pdev->dev.release = lkpi_pci_dev_release;
 	pdev->dev.bus = &pci_bus_type;
 	pdev->dev.dma_mask = &pdev->dma_mask;
 	pdev->dev.coherent_dma_mask = DMA_BIT_MASK(64);
@@ -942,7 +1002,12 @@ lkpi_pci_new(dev_info_t *dip, bool foreign)
 	}
 	pdev->hdr_type = pci_config_get8(pdev->lkpi_cfg, PCI_CONF_HEADER) &
 	    0x7f;
+	pdev->cfg_size = LKPI_PCI_CFG_SIZE;
 	pdev->pcie_cap = pci_find_capability(pdev, PCI_CAP_ID_EXP);
+	/* As Linux: extended space unless it reads as all ones. */
+	if (pdev->pcie_cap != 0 &&
+	    pci_config_get32(pdev->lkpi_cfg, LKPI_PCI_CFG_SIZE) != ~0U)
+		pdev->cfg_size = LKPI_PCIE_CFG_SIZE;
 	pdev->msi_cap = pci_find_capability(pdev, PCI_CAP_ID_MSI);
 	pdev->msix_cap = pci_find_capability(pdev, PCI_CAP_ID_MSIX);
 
@@ -1132,31 +1197,56 @@ lkpi_pci_dev_of(dev_info_t *dip)
 	return (pdev);
 }
 
+/* Marks the calling thread as running lp's probe() or remove(). */
+static void
+lkpi_pci_set_busy(struct lkpi_pdev *lp, kthread_t *t)
+{
+	mutex_enter(&lkpi_pci_lock);
+	lp->lp_busy_thread = t;
+	mutex_exit(&lkpi_pci_lock);
+}
+
+/* Whether a layer device is attached (lkpi_pci_lock held). */
+static bool
+lkpi_pci_any_attached_locked(void)
+{
+	return (!list_empty(&lkpi_pci_devs));
+}
+
 /*
- * Undoes an attach: the driver's managed resources, its interrupts and
- * BAR mappings, then the device itself.
+ * Undoes an attach after the driver's managed resources are released:
+ * interrupts and BAR mappings, the listing, the config handle, and the
+ * attach reference (the structure itself goes at the last put_device()).
+ * When the last layer device goes, the cached foreign wrappers go too.
  */
 static void
 lkpi_pci_release(struct lkpi_pdev *lp)
 {
 	struct pci_dev *pdev = &lp->lp_pdev;
+	bool last;
 
-	lkpi_devres_release_all(&pdev->dev);
 	pci_free_irq_vectors(pdev);
 	lkpi_pci_unmap_all(lp);
 	ddi_set_driver_private(pdev->dev.lkpi_dip, NULL);
 
 	mutex_enter(&lkpi_pci_lock);
-	list_del(&lp->lp_link);
+	list_del_init(&lp->lp_link);
 	if (lkpi_stolen_owner == pdev) {
 		lkpi_stolen_owner = NULL;
 		intel_graphics_stolen_res.start = 0;
 		intel_graphics_stolen_res.end = ~(resource_size_t)0;
 	}
+	last = !lkpi_pci_any_attached_locked();
 	mutex_exit(&lkpi_pci_lock);
 
+	/* The node is detached: no config access through stale references. */
+	if (pdev->lkpi_cfg != NULL)
+		pci_config_teardown(&pdev->lkpi_cfg);
+	pdev->lkpi_cfg = NULL;
 	pdev->driver = NULL;
-	lkpi_pci_free(lp);
+	if (last)
+		lkpi_pci_uncache_all();
+	put_device(&pdev->dev);
 }
 
 int
@@ -1190,21 +1280,27 @@ lkpi_pci_attach(dev_info_t *dip, ddi_attach_cmd_t cmd, struct pci_driver *drv)
 		dev_err(&pdev->dev, "device %04x:%04x not in the ID table of "
 		    "%s\n", pdev->vendor, pdev->device,
 		    drv->name != NULL ? drv->name : "the driver");
-		lkpi_pci_free(lp);
+		put_device(&pdev->dev);
 		return (DDI_FAILURE);
 	}
 
 	lkpi_intel_stolen(pdev);
 
-	/* Listed before probe: ioremap() during probe finds the BARs. */
+	/*
+	 * Listed before probe: ioremap() during probe finds the BARs, and
+	 * device searches see the attach in progress.
+	 */
 	mutex_enter(&lkpi_pci_lock);
+	lp->lp_busy_thread = curthread;
 	list_add_tail(&lp->lp_link, &lkpi_pci_devs);
 	mutex_exit(&lkpi_pci_lock);
 	ddi_set_driver_private(dip, pdev);
 
 	ret = drv->probe(pdev, id);
+	lkpi_pci_set_busy(lp, NULL);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "probe failed: %d\n", ret);
+		lkpi_devres_release_all(&pdev->dev);
 		lkpi_pci_release(lp);
 		return (DDI_FAILURE);
 	}
@@ -1214,22 +1310,45 @@ lkpi_pci_attach(dev_info_t *dip, ddi_attach_cmd_t cmd, struct pci_driver *drv)
 	return (DDI_SUCCESS);
 }
 
+/*
+ * Detach: the DRM glue may veto it before the driver is told
+ * (lkpi_drm_detach_begin()); then remove() and the managed resources;
+ * then the DRM glue must have let go of the device
+ * (lkpi_drm_detach_end()), otherwise the node stays attached with the
+ * driver torn down, keeping the attach reference (a later detach retries
+ * only that step).
+ */
 int
 lkpi_pci_detach(dev_info_t *dip, ddi_detach_cmd_t cmd, struct pci_driver *drv)
 {
 	struct pci_dev *pdev;
+	struct lkpi_pdev *lp;
 
 	if (cmd != DDI_DETACH)
 		return (DDI_FAILURE);
 	pdev = lkpi_pci_dev_of(dip);
 	if (pdev == NULL)
 		return (DDI_FAILURE);
+	lp = lkpi_pdev(pdev);
 	if (drv != NULL && pdev->driver != drv)
 		dev_warn(&pdev->dev, "detach with another driver than "
 		    "attach\n");
-	if (pdev->driver != NULL && pdev->driver->remove != NULL)
-		pdev->driver->remove(pdev);
-	lkpi_pci_release(lkpi_pdev(pdev));
+	if (!lp->lp_removed) {
+		if (lkpi_drm_detach_begin(&pdev->dev) != 0)
+			return (DDI_FAILURE);
+		lkpi_pci_set_busy(lp, curthread);
+		if (pdev->driver != NULL && pdev->driver->remove != NULL)
+			pdev->driver->remove(pdev);
+		lkpi_pci_set_busy(lp, NULL);
+		lkpi_devres_release_all(&pdev->dev);
+		lp->lp_removed = true;
+	}
+	if (lkpi_drm_detach_end(&pdev->dev) != 0) {
+		dev_warn(&pdev->dev, "the DRM device is still in use; the "
+		    "node stays attached without its driver\n");
+		return (DDI_FAILURE);
+	}
+	lkpi_pci_release(lp);
 	return (DDI_SUCCESS);
 }
 
@@ -1296,57 +1415,179 @@ lkpi_pci_find_cb(dev_info_t *dip, void *arg)
 }
 
 /*
- * Walks the device tree for a PCI node. The attached layer device of the
- * node is returned as is; any other node becomes a foreign wrapper,
- * released by lkpi_pci_dev_put().
- *
- * ddi_walk_devs(9F) is documented as not callable from autoconfiguration
- * entry points, but i915 looks up the host bridge from probe, i.e. from
- * attach(9E). The walk enters nodes top-down from the root, the same
- * order the framework uses, and the attaching thread already owns the
- * nodes above its own; the callback takes no other locks.
+ * Searches for the node (see the top of the file): the siblings of the
+ * layer devices being attached or detached, or else the whole tree.
+ */
+static void
+lkpi_pci_search(struct lkpi_pci_find *f)
+{
+	struct lkpi_pdev *lp, *prev;
+	dev_info_t *parent, *c;
+	bool busy = false, seen;
+
+	f->lf_found = NULL;
+	mutex_enter(&lkpi_pci_lock);
+	list_for_each_entry(lp, &lkpi_pci_devs, lp_link) {
+		if (lp->lp_busy_thread == NULL)
+			continue;
+		busy = true;
+		parent = ddi_get_parent(lp->lp_pdev.dev.lkpi_dip);
+		/* Each parent once. */
+		seen = false;
+		list_for_each_entry(prev, &lkpi_pci_devs, lp_link) {
+			if (prev == lp)
+				break;
+			if (prev->lp_busy_thread != NULL &&
+			    ddi_get_parent(prev->lp_pdev.dev.lkpi_dip) ==
+			    parent) {
+				seen = true;
+				break;
+			}
+		}
+		if (seen || parent == NULL)
+			continue;
+		for (c = ddi_get_child(parent); c != NULL;
+		    c = ddi_get_next_sibling(c)) {
+			if (lkpi_pci_find_cb(c, f) == DDI_WALK_TERMINATE)
+				break;
+		}
+		if (f->lf_found != NULL)
+			break;
+	}
+	mutex_exit(&lkpi_pci_lock);
+	if (!busy)
+		ddi_walk_devs(ddi_root_node(), lkpi_pci_find_cb, f);
+}
+
+/* An attached layer device (referenced) by node or by bus/devfn. */
+static struct pci_dev *
+lkpi_pci_attached_get(dev_info_t *dip, int bus, int devfn)
+{
+	struct lkpi_pdev *lp;
+
+	mutex_enter(&lkpi_pci_lock);
+	list_for_each_entry(lp, &lkpi_pci_devs, lp_link) {
+		struct pci_dev *pdev = &lp->lp_pdev;
+
+		if ((dip != NULL && pdev->dev.lkpi_dip == dip) ||
+		    (dip == NULL && pdev->bus->number == bus &&
+		    (int)pdev->devfn == devfn)) {
+			(void) get_device(&pdev->dev);
+			mutex_exit(&lkpi_pci_lock);
+			return (pdev);
+		}
+	}
+	mutex_exit(&lkpi_pci_lock);
+	return (NULL);
+}
+
+/* A cached foreign wrapper (referenced) by node or by bus/devfn. */
+static struct pci_dev *
+lkpi_pci_cached_get_locked(dev_info_t *dip, int bus, int devfn)
+{
+	struct lkpi_pdev *lp;
+
+	list_for_each_entry(lp, &lkpi_pci_foreign, lp_link) {
+		struct pci_dev *pdev = &lp->lp_pdev;
+
+		if ((dip != NULL && pdev->dev.lkpi_dip == dip) ||
+		    (dip == NULL && pdev->bus->number == bus &&
+		    (int)pdev->devfn == devfn)) {
+			(void) get_device(&pdev->dev);
+			return (pdev);
+		}
+	}
+	return (NULL);
+}
+
+/*
+ * The device of a found (held) node: the attached layer device, a cached
+ * wrapper, or a new wrapper, cached while a layer device is attached.
+ * Returned referenced; the hold is consumed.
  */
 static struct pci_dev *
-lkpi_pci_find(struct lkpi_pci_find *f)
+lkpi_pci_wrap(dev_info_t *dip)
 {
 	struct lkpi_pdev *lp;
 	struct pci_dev *pdev;
 
-	f->lf_found = NULL;
-	ddi_walk_devs(ddi_root_node(), lkpi_pci_find_cb, f);
-	if (f->lf_found == NULL)
-		return (NULL);
-	pdev = lkpi_pci_dev_of(f->lf_found);
+	pdev = lkpi_pci_attached_get(dip, -1, -1);
+	if (pdev == NULL) {
+		mutex_enter(&lkpi_pci_lock);
+		pdev = lkpi_pci_cached_get_locked(dip, -1, -1);
+		mutex_exit(&lkpi_pci_lock);
+	}
 	if (pdev != NULL) {
-		ndi_rele_devi(f->lf_found);
+		ndi_rele_devi(dip);
 		return (pdev);
 	}
-	lp = lkpi_pci_new(f->lf_found, true);
+
+	lp = lkpi_pci_new(dip, true);
 	if (lp == NULL) {
-		ndi_rele_devi(f->lf_found);
+		ndi_rele_devi(dip);
 		return (NULL);
 	}
 	lp->lp_held = true;
+	mutex_enter(&lkpi_pci_lock);
+	pdev = lkpi_pci_cached_get_locked(dip, -1, -1);
+	if (pdev == NULL && lkpi_pci_any_attached_locked()) {
+		/* The cache's reference is the initial one. */
+		lp->lp_cached = true;
+		list_add_tail(&lp->lp_link, &lkpi_pci_foreign);
+		(void) get_device(&lp->lp_pdev.dev);
+	}
+	mutex_exit(&lkpi_pci_lock);
+	if (pdev != NULL) {
+		/* Another thread cached the node first. */
+		put_device(&lp->lp_pdev.dev);
+		return (pdev);
+	}
 	return (&lp->lp_pdev);
+}
+
+/* Drops the cache's references to the foreign wrappers. */
+static void
+lkpi_pci_uncache_all(void)
+{
+	struct lkpi_pdev *lp;
+
+	for (;;) {
+		mutex_enter(&lkpi_pci_lock);
+		if (list_empty(&lkpi_pci_foreign)) {
+			mutex_exit(&lkpi_pci_lock);
+			return;
+		}
+		lp = list_first_entry(&lkpi_pci_foreign, struct lkpi_pdev,
+		    lp_link);
+		list_del_init(&lp->lp_link);
+		lp->lp_cached = false;
+		mutex_exit(&lkpi_pci_lock);
+		put_device(&lp->lp_pdev.dev);
+	}
+}
+
+static struct pci_dev *
+lkpi_pci_find(struct lkpi_pci_find *f)
+{
+	lkpi_pci_search(f);
+	if (f->lf_found == NULL)
+		return (NULL);
+	return (lkpi_pci_wrap(f->lf_found));
 }
 
 struct pci_dev *
 pci_get_domain_bus_and_slot(int domain, unsigned int bus, unsigned int devfn)
 {
 	struct lkpi_pci_find f;
-	struct lkpi_pdev *lp;
-	struct pci_dev *pdev = NULL;
+	struct pci_dev *pdev;
 
 	if (domain != 0 || bus > 0xff || devfn > 0xff)
 		return (NULL);
+	pdev = lkpi_pci_attached_get(NULL, (int)bus, (int)devfn);
+	if (pdev != NULL)
+		return (pdev);
 	mutex_enter(&lkpi_pci_lock);
-	list_for_each_entry(lp, &lkpi_pci_devs, lp_link) {
-		if (lp->lp_pdev.bus->number == bus &&
-		    lp->lp_pdev.devfn == devfn) {
-			pdev = &lp->lp_pdev;
-			break;
-		}
-	}
+	pdev = lkpi_pci_cached_get_locked(NULL, (int)bus, (int)devfn);
 	mutex_exit(&lkpi_pci_lock);
 	if (pdev != NULL)
 		return (pdev);
@@ -1393,13 +1634,19 @@ pci_get_class(unsigned int cls, struct pci_dev *from)
 	return (pdev);
 }
 
-/* Frees a foreign wrapper; attached devices are not reference counted. */
+struct pci_dev *
+lkpi_pci_dev_get(struct pci_dev *dev)
+{
+	if (dev != NULL)
+		(void) get_device(&dev->dev);
+	return (dev);
+}
+
 void
 lkpi_pci_dev_put(struct pci_dev *dev)
 {
-	if (dev == NULL || !dev->lkpi_foreign)
-		return;
-	lkpi_pci_free(lkpi_pdev(dev));
+	if (dev != NULL)
+		put_device(&dev->dev);
 }
 
 /* --- config access by bus and devfn ------------------------------------ */

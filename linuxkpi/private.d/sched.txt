@@ -7,3 +7,6 @@ tsd_create	# non-DDI kernel interface (<sys/proc.h>): the key of `current`, the 
 tsd_destroy	# non-DDI kernel interface (<sys/proc.h>): frees every thread's task at module unload
 tsd_get	# non-DDI kernel interface (<sys/proc.h>): `current` lookup
 tsd_set	# non-DDI kernel interface (<sys/proc.h>): binds a new task (or a kthread's task) to the calling thread
+ncpus	# non-DDI kernel interface (<sys/cpuvar.h>): sizes the workqueue worker pools (at least 8, more with more CPUs) and num_online_cpus()
+mod_getctl	# non-DDI kernel interface (<sys/modctl.h>): lkpi_module_quiesce() finds the unloading driver's modctl and its text range (mod_text, mod_text_size) from the driver's modlinkage
+# Structure fields read (not symbols): cpu_t.cpu_runrun and cpu_kprunrun, kthread_t.t_preempt (<sys/cpuvar.h>, <sys/thread.h>) in lkpi_cond_resched(), the test kpreempt() itself relies on (it preempts unconditionally); modctl_t.mod_text and mod_text_size in lkpi_module_quiesce()

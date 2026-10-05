@@ -123,6 +123,16 @@ jobs:
           LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile carried/build.sh &&
           elfdump -d target/carried/drm_helpers | grep NEEDED &&
           elfdump -d target/carried/drm_helpers_test | grep NEEDED
+      # The i915n link gate: the pinned Linux tree (a shallow fetch) with
+      # the illumos patches, every Linux input licence-checked, all TUs
+      # compiled with the layer's flags (any failure fails the step) and
+      # linked with -z defs against the facade, layer, helpers and DDI.
+      - run: >
+          drivers/i915/fetch-and-patch.sh target/linux &&
+          LINUX=target/linux DDI_MAPFILE=target/ddi.mapfile
+          LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile OUT=target/i915 JOBS=4
+          drivers/i915/build.sh all &&
+          elfdump -d target/i915/i915n | grep NEEDED
       # The layer's host tests (trees, xarray/IDR, bitmaps, lists, refcount,
       # printf, strings) and the carried helpers' as userland programs.
       - run: CC=gcc linuxkpi/tests/host/host-test.sh

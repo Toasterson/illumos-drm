@@ -4,12 +4,13 @@
 # Copyright 2026 The illumos-drm authors
 #
 # Writes the licence file of the i915n package: the copyright lines of
-# every Linux file compiled into i915n (the TUs of tus.txt, the i915
-# headers they include, the MIT headers of mit-headers.txt), then the MIT
-# permission notice they carry (SPDX "MIT" or the notice in full).
-# fetch-and-patch.sh has refused any TU or header that is not MIT.
+# every Linux file compiled into i915n, then the MIT permission notice they
+# carry (SPDX "MIT" or the notice in full) and the HPND notice of the files
+# under it. The files are those of `inputs` (build.sh's linux-inputs.txt:
+# every Linux file the compiler read, which check-licences.py accepted);
+# without it, the TUs of tus.txt, i915's own headers and mit-headers.txt.
 #
-#   drivers/i915/gen-license.sh <patched Linux tree> <output file>
+#   drivers/i915/gen-license.sh <patched Linux tree> <output file> [inputs]
 set -euo pipefail
 PATH=/usr/gnu/bin:$PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -17,14 +18,21 @@ LINUX=${1:?usage: gen-license.sh <linux> <out>}
 out=${2:?usage: gen-license.sh <linux> <out>}
 I915=drivers/gpu/drm/i915
 
-{
-	grep -v '^#' "$HERE/tus.txt" | grep . | grep -v '^illumos/' | sed "s|^|$I915/|"
-	# i915's own headers, minus display and self-tests (not compiled)
-	(cd "$LINUX" && find "$I915" -name '*.h' ! -path '*/display/*' \
-	    ! -path '*/selftests/*' ! -name 'selftest_*' ! -path '*/gvt/*' \
-	    ! -name '*_trace.h')
-	grep -v '^#' "$HERE/mit-headers.txt" | grep .
-} | sort -u > "$out.files"
+inputs=${3:-}
+if [ -n "$inputs" ]; then
+	# The tree's copies of the MIT headers stand for their originals.
+	sed 's|^\.illumos/mit-include/uapi/|include/uapi/|; s|^\.illumos/mit-include/|include/|' \
+	    "$inputs" | sort -u > "$out.files"
+else
+	{
+		grep -v '^#' "$HERE/tus.txt" | grep . | grep -v '^illumos/' | sed "s|^|$I915/|"
+		# i915's own headers, minus self-tests (not compiled)
+		(cd "$LINUX" && find "$I915" -name '*.h' \
+		    ! -path '*/selftests/*' ! -name 'selftest_*' ! -path '*/gvt/*' \
+		    ! -name '*_trace.h')
+		grep -v '^#' "$HERE/mit-headers.txt" | grep .
+	} | sort -u > "$out.files"
+fi
 
 {
 	echo "i915n is built from these files of Linux $(sed -n 's/^LINUX_TAG=//p' "$HERE/PIN") (drivers/gpu/drm/i915,"

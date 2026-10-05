@@ -10,7 +10,7 @@ ddi_umem_iosetup	# documented 9F (ddi_umem_iosetup(9F)): a buf for the locked us
 bp_mapin	# documented 9F (bp_mapin(9F)): kernel mapping of a pinned user range; the pages' kernel addresses
 bp_mapout	# documented 9F (bp_mapout(9F)): unmaps a pinned user range at unpin
 freerbuf	# documented 9F (getrbuf(9F)): frees the buf ddi_umem_iosetup() allocated, at unpin
-hat_getpfnum	# non-DDI kernel interface (vm/hat.h): page_to_phys()/virt_to_phys() of a layer page, frames of the pages vmap() maps; the DDI has no kernel-address-to-frame call
+hat_getpfnum	# non-DDI kernel interface (vm/hat.h): page_to_phys()/virt_to_phys() of a layer page, frames of the pages vmap() maps, and the DMA check that a streaming binding needs no rootnex copy buffer (lkpi_dma.c); the DDI has no kernel-address-to-frame call
 hat_devload	# non-DDI kernel interface (vm/hat.h): vmap()/vmap_pfn() load page frames into a kernel heap range with WB/WC/UC caching, as gfx_private's gfxp_map_kernel_space() does
 hat_unload	# non-DDI kernel interface (vm/hat.h): vunmap() unloads the range vmap()/vmap_pfn() loaded
 kas	# non-DDI kernel interface (vm/as.h): the kernel address space, whose a_hat the hat_*() calls take

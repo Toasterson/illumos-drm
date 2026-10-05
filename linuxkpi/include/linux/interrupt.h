@@ -10,10 +10,14 @@
  * of an allocated vector. request_irq() adds and enables the handler,
  * refusing (-EINVAL) a vector whose priority is at or above
  * ddi_intr_get_hilevel_pri(9F), because the layer's spinlocks are adaptive
- * mutexes. Handlers run in illumos interrupt-thread context.
- * synchronize_irq() waits for a running handler; disable_irq() disables
- * the vector and waits. Threaded handlers run the thread function from
- * the interrupt (no separate thread). Tasklets run on a layer worker
+ * mutexes. Handlers run in illumos interrupt-thread context; a threaded
+ * handler's thread function runs on a thread of the vector (thread
+ * context). synchronize_irq() waits for both; disable_irq() masks the
+ * vector and waits. disable_irq_nosync()/enable_irq() also work in
+ * interrupt handlers: MSI vectors are masked in software and an interrupt
+ * that arrives meanwhile is delivered after enable_irq() (src/lkpi_irq.c).
+ * free_irq() and synchronize_irq() are refused in interrupt context.
+ * Tasklets run on a layer worker
  * thread (thread context, src/lkpi_work.c), one at a time per tasklet, as
  * on Linux; a tasklet scheduled while disabled runs after tasklet_enable()
  * (or, if enabled behind the layer's back, at the next one-tick poll).

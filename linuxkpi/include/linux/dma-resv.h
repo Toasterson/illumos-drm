@@ -44,6 +44,14 @@ struct dma_resv_iter {
 	bool is_restarted;
 	bool locked;
 	u8 *lkpi_usages;
+	/*
+	 * illumos: the snapshot the walk runs on. A locked walk
+	 * (dma_resv_for_each_fence()) releases it at its end or when the
+	 * object is unlocked, so it needs no dma_resv_iter_end(), as on Linux;
+	 * do not call dma_resv_iter_end() on a locked walk after the unlock.
+	 * An unlocked walk ends with dma_resv_iter_end().
+	 */
+	void *lkpi_snap;
 };
 
 extern struct dma_fence *dma_resv_iter_first_unlocked(

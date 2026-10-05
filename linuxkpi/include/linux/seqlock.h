@@ -7,6 +7,10 @@
  * it writes; a reader retries when the count was odd or changed. Every
  * seqcount variant starts with its seqcount_t, so the accessors take any
  * of them. Writers must be serialised by their own lock, as on Linux.
+ * Writers do not mask interrupts here (<linux/irqflags.h>), so a reader
+ * in an interrupt handler that finds a write in progress waits only a
+ * bounded time (lkpi_seqcount_wait(), src/lkpi_sched.c): the writer may
+ * be the thread the handler interrupted.
  */
 #ifndef _LINUX_SEQLOCK_H
 #define	_LINUX_SEQLOCK_H
@@ -62,13 +66,15 @@ typedef struct {
 #define	seqcount_rwlock_init(s, l)	seqcount_spinlock_init(s, l)
 #define	seqcount_latch_init(s)		seqcount_init(s)
 
+extern unsigned int lkpi_seqcount_wait(const seqcount_t *s);
+
 static inline unsigned int
 lkpi_read_seqcount_begin(const seqcount_t *s)
 {
-	unsigned int seq;
+	unsigned int seq = READ_ONCE(s->sequence);
 
-	while ((seq = READ_ONCE(s->sequence)) & 1)
-		cpu_relax();
+	if ((seq & 1) != 0)
+		seq = lkpi_seqcount_wait(s);
 	smp_rmb();
 	return (seq);
 }

@@ -70,6 +70,7 @@ SYMBOL_SCOPE {
 		drm_dev_illumos_set_dma_attr;
 		drm_dev_illumos_set_fence_priority;
 		drm_dev_illumos_set_mode_config;
+		drm_dev_illumos_unplug;
 		drm_dev_put;
 		drm_dev_register;
 		drm_dev_set_unique;

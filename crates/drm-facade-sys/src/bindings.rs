@@ -67,6 +67,7 @@ pub const GFP_ATOMIC: u32 = 0;
 pub const DRM_FACADE_MAJOR: u32 = 1;
 pub const DRM_FACADE_MINOR: u32 = 1;
 pub const DRM_FACADE_MAX_SIZES: u32 = 64;
+pub const DRM_ILLUMOS_RESV_SIGNALED: u32 = 1;
 pub const KERN_SOH: &[u8; 2] = b"\x01\0";
 pub const KERN_EMERG: &[u8; 3] = b"\x010\0";
 pub const KERN_ALERT: &[u8; 3] = b"\x011\0";
@@ -464,6 +465,9 @@ unsafe extern "C" {
     pub fn drm_dev_unregister(dev: *mut drm_device) -> core::ffi::c_int;
 }
 unsafe extern "C" {
+    pub fn drm_dev_illumos_unplug(dev: *mut drm_device) -> core::ffi::c_int;
+}
+unsafe extern "C" {
     pub fn drm_dev_get(dev: *mut drm_device);
 }
 unsafe extern "C" {
@@ -828,7 +832,7 @@ unsafe extern "C" {
     pub fn drm_illumos_resv_trylock_ctx(obj: *mut dma_resv, stamp: u64) -> bool;
 }
 unsafe extern "C" {
-    pub fn drm_illumos_resv_unlock_ctx(obj: *mut dma_resv, stamp: u64);
+    pub fn drm_illumos_resv_unlock_ctx(obj: *mut dma_resv, stamp: u64) -> core::ffi::c_int;
 }
 unsafe extern "C" {
     pub fn drm_illumos_resv_is_locked(obj: *mut dma_resv) -> bool;
@@ -837,7 +841,9 @@ unsafe extern "C" {
     pub fn drm_illumos_resv_fences(
         obj: *mut dma_resv,
         usage: dma_resv_usage,
+        flags: u32,
         fences: *mut *mut dma_fence,
+        usages: *mut u8,
         max: u32,
         count: *mut u32,
     ) -> core::ffi::c_int;
@@ -908,6 +914,7 @@ pub struct drm_gem_object_funcs {
         ) -> core::ffi::c_int,
     >,
     pub illumos_movable: bool,
+    pub illumos_close_every_handle: bool,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
@@ -926,6 +933,8 @@ const _: () = {
         [::core::mem::offset_of!(drm_gem_object_funcs, illumos_access) - 48usize];
     ["Offset of field: drm_gem_object_funcs::illumos_movable"]
         [::core::mem::offset_of!(drm_gem_object_funcs, illumos_movable) - 56usize];
+    ["Offset of field: drm_gem_object_funcs::illumos_close_every_handle"]
+        [::core::mem::offset_of!(drm_gem_object_funcs, illumos_close_every_handle) - 57usize];
 };
 #[repr(C)]
 pub struct drm_gem_object {

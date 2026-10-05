@@ -45,6 +45,19 @@ get_order(unsigned long size)
 #define	page_address(page)	((page)->lkpi_kva)
 #define	lowmem_page_address(page)	page_address(page)
 #define	folio_address(f)	((f)->lkpi_kva)
+/*
+ * page_to_pfn() is the kernel virtual frame number, the inverse of the
+ * layer's pfn_to_page(); it is not a physical frame (see
+ * <linux/mm_types.h>; page_to_phys() is physical). i915's uses are
+ * virtual-safe: for_each_sgt_page() feeds it back to pfn_to_page(), and
+ * shmem_sg_alloc_table() compares folio_pfn()s to merge contiguous pages
+ * (which the layer's DMA runs need virtually contiguous). The one
+ * hardware use, ring_setup_phys_status_page() (gt/intel_ring_submission.c,
+ * set_hws_pga()), runs only on HWS_NEEDS_PHYSICAL platforms (gen2/gen3,
+ * hws_needs_physical in i915_pci.c), which the layer does not support.
+ * A physical pfn would break the pfn_to_page() round trip: there is no
+ * physical-frame-to-descriptor index.
+ */
 #define	page_to_pfn(page)	((unsigned long)(page)->lkpi_kva >> PAGE_SHIFT)
 #define	folio_pfn(f)		page_to_pfn(&(f)->page)
 #define	page_to_phys(page)	lkpi_page_to_phys(page)
@@ -97,7 +110,8 @@ extern void lkpi_page_release(struct lx_page *page);
 #define	pfn_to_page(pfn)	lkpi_virt_to_page((void *)((unsigned long)(pfn) << PAGE_SHIFT))
 #define	pfn_valid(pfn)		true
 #define	virt_to_folio(kva)	page_folio(lkpi_virt_to_page(kva))
-#define	virt_to_phys(kva)	lkpi_page_to_phys(lkpi_virt_to_page(kva))
+#define	virt_to_phys(kva) \
+	(lkpi_page_to_phys(lkpi_virt_to_page(kva)) + offset_in_page(kva))
 #define	page_mapping(p)		((p)->mapping)
 #define	folio_mapping(f)	((f)->mapping)
 #define	page_index(p)		((p)->index)

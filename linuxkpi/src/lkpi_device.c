@@ -70,6 +70,42 @@ lkpi_device_init(struct device *dev, dev_info_t *dip, const char *name)
 	dev->lkpi_dma_attr = lkpi_default_dma_attr;
 	(mutex_init)(&dev->lkpi_devres_lock, NULL, MUTEX_DRIVER, NULL);
 	INIT_LIST_HEAD(&dev->lkpi_devres);
+	dev->lkpi_refs = 1;
+}
+
+struct device *
+get_device(struct device *dev)
+{
+	if (dev != NULL &&
+	    __atomic_fetch_add(&dev->lkpi_refs, 1, __ATOMIC_SEQ_CST) == 0)
+		WARN_ONCE(1, "linuxkpi: get_device() of a released device %s",
+		    dev_name(dev));
+	return (dev);
+}
+
+/* Drops a reference; the last one releases the device. */
+void
+put_device(struct device *dev)
+{
+	uint32_t old;
+
+	if (dev == NULL)
+		return;
+	old = __atomic_load_n(&dev->lkpi_refs, __ATOMIC_SEQ_CST);
+	do {
+		if (old == 0) {
+			WARN_ONCE(1, "linuxkpi: put_device() of a released "
+			    "device %s", dev_name(dev));
+			return;
+		}
+	} while (!__atomic_compare_exchange_n(&dev->lkpi_refs, &old, old - 1,
+	    B_FALSE, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+	if (old != 1)
+		return;
+	if (dev->release != NULL)
+		dev->release(dev);
+	else if (dev->type != NULL && dev->type->release != NULL)
+		dev->type->release(dev);
 }
 
 /* Releases what is left of the device's managed resources. */

@@ -6,7 +6,11 @@
  * reimplemented in src/lkpi_timer.c on the layer's timer_list). The
  * resolution is illumos' clock tick, not nanoseconds: an hrtimer fires
  * at the first tick at or after its expiry. HRTIMER_RESTART re-arms at
- * the timer's (forwarded) expiry, as on Linux.
+ * the timer's (forwarded) expiry, as on Linux. hrtimer_is_queued() is
+ * true while the timer is armed, hrtimer_callback_running() while its
+ * function runs, hrtimer_active() while either is. schedule_hrtimeout()
+ * sleeps in the caller's task state until the absolute (CLOCK_MONOTONIC)
+ * or relative expiry: 0 when it expired, -EINTR when woken earlier.
  */
 #ifndef _LINUX_HRTIMER_H
 #define	_LINUX_HRTIMER_H
@@ -65,14 +69,17 @@ extern void hrtimer_start_range_ns(struct hrtimer *t, ktime_t tim,
 extern int hrtimer_cancel(struct hrtimer *t);
 extern int hrtimer_try_to_cancel(struct hrtimer *t);
 extern bool hrtimer_active(const struct hrtimer *t);
+extern bool hrtimer_is_queued(const struct hrtimer *t);
+extern bool hrtimer_callback_running(const struct hrtimer *t);
+extern int schedule_hrtimeout(ktime_t *expires, const enum hrtimer_mode mode);
 extern u64 hrtimer_forward(struct hrtimer *t, ktime_t now, ktime_t interval);
 
 #define	hrtimer_init(t, clock, mode)	hrtimer_setup(t, NULL, clock, mode)
 #define	hrtimer_setup_on_stack(t, fn, c, m)	hrtimer_setup(t, fn, c, m)
 #define	destroy_hrtimer_on_stack(t)	((void)(t))
 #define	hrtimer_start(t, tim, mode)	hrtimer_start_range_ns(t, tim, 0, mode)
-#define	hrtimer_is_queued(t)		hrtimer_active(t)
-#define	hrtimer_callback_running(t)	0
+#define	schedule_hrtimeout_range(e, delta, mode) \
+	schedule_hrtimeout(e, mode)
 #define	hrtimer_get_expires(t)		((t)->expires)
 #define	hrtimer_get_expires_ns(t)	ktime_to_ns((t)->expires)
 #define	hrtimer_set_expires(t, tim)	((t)->expires = (tim))
