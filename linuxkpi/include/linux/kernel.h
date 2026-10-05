@@ -71,6 +71,8 @@ enum system_states {
 };
 #define	system_state	SYSTEM_RUNNING
 
-extern int sscanf(const char *buf, const char *fmt, ...);
+extern int sscanf(const char *buf, const char *fmt, ...) __scanf(2, 3);
+extern int vsscanf(const char *buf, const char *fmt, va_list ap)
+    __scanf(2, 0);
 
 #endif

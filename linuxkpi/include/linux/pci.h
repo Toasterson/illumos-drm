@@ -222,6 +222,26 @@ extern int pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar);
 #define	pcie_get_speed_cap(p)		0
 #define	pcie_get_width_cap(p)		0
 
+/*
+ * The illumos side of a Linux PCI driver: the driver's attach(9E) and
+ * detach(9E) call these with its struct pci_driver. Attach builds the
+ * struct pci_dev of the node, matches the ID table and calls probe();
+ * detach calls remove() and releases the device's managed resources.
+ * DDI_SUSPEND/DDI_RESUME are refused (DDI_FAILURE).
+ */
+extern int lkpi_pci_attach(dev_info_t *dip, ddi_attach_cmd_t cmd,
+    struct pci_driver *drv);
+extern int lkpi_pci_detach(dev_info_t *dip, ddi_detach_cmd_t cmd,
+    struct pci_driver *drv);
+extern struct pci_dev *lkpi_pci_dev_of(dev_info_t *dip);
+
+/*
+ * The driver registered with pci_register_driver() under the Linux name
+ * (drv->name), or NULL: the illumos glue of a driver whose struct
+ * pci_driver is static (i915) finds it here for lkpi_pci_attach().
+ */
+extern struct pci_driver *lkpi_pci_driver_lookup(const char *name);
+
 #define	module_pci_driver(drv) \
 	int lkpi_module_init_pci(void) { return (pci_register_driver(&(drv))); } \
 	void lkpi_module_exit_pci(void) { pci_unregister_driver(&(drv)); }

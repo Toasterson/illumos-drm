@@ -14,7 +14,10 @@
 
 enum string_size_units {
 	STRING_UNITS_10,
-	STRING_UNITS_2
+	STRING_UNITS_2,
+	STRING_UNITS_MASK = 1,
+	STRING_UNITS_NO_SPACE = 1 << 30,
+	STRING_UNITS_NO_BYTES = 1U << 31
 };
 
 extern int string_get_size(u64 size, u64 blk_size, enum string_size_units units,

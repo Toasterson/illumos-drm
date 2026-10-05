@@ -18,7 +18,6 @@
 #include <linux/idr.h>
 #include <linux/srcu.h>
 #include <linux/ww_mutex.h>
-#include <drm/drm_util.h>
 #include_next <drm/drm_device.h>
 
 #define	DRM_WEDGE_RECOVERY_NONE		(1U << 0)

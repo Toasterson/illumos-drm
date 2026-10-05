@@ -3,11 +3,15 @@
  * Copyright 2026 The illumos-drm authors
  *
  * Linux's reservation objects: the DRM facade's (<drm/dma_resv.h>,
- * misc/drm_core) plus the Linux helpers built on them in the layer
- * (src/lkpi_resv.c): iterators over a snapshot of the fences
- * (dma_resv_get_fences()), dma_resv_get_singleton(), the
- * transaction-aware lock wrappers and the assertions. The fence lists
- * themselves are the core's.
+ * misc/drm_core; dma_resv_init/fini/trylock are the facade's since 1.1)
+ * plus the Linux helpers built on them in the layer (src/lkpi_resv.c):
+ * iterators over snapshots of the fences (drm_illumos_resv_fences(), one
+ * per usage level so each fence reports its usage), dma_resv_get_fences(),
+ * dma_resv_get_singleton() (a fence array for several), wound/wait
+ * transactions over the core's (drm_illumos_resv_lock_ctx()), and
+ * dma_resv_held(). The fence lists themselves are the core's; the
+ * iterators see the core's views of the fences (new structures, so a
+ * driver's own fences come back as foreign ones).
  */
 #ifndef _LINUX_DMA_RESV_H
 #define	_LINUX_DMA_RESV_H
@@ -39,6 +43,7 @@ struct dma_resv_iter {
 	unsigned int num_fences;
 	bool is_restarted;
 	bool locked;
+	u8 *lkpi_usages;
 };
 
 extern struct dma_fence *dma_resv_iter_first_unlocked(
@@ -53,12 +58,11 @@ extern int dma_resv_get_fences(struct dma_resv *obj,
     struct dma_fence ***fences);
 extern int dma_resv_get_singleton(struct dma_resv *obj,
     enum dma_resv_usage usage, struct dma_fence **fence);
-extern void dma_resv_init(struct dma_resv *obj);
-extern void dma_resv_fini(struct dma_resv *obj);
 extern int lkpi_dma_resv_lock(struct dma_resv *obj,
     struct ww_acquire_ctx *ctx, bool intr);
+extern int lkpi_dma_resv_lock_slow(struct dma_resv *obj,
+    struct ww_acquire_ctx *ctx, bool intr);
 extern void lkpi_dma_resv_unlock(struct dma_resv *obj);
-extern bool dma_resv_trylock(struct dma_resv *obj);
 extern bool lkpi_dma_resv_held(struct dma_resv *obj);
 extern void dma_resv_describe(struct dma_resv *obj, struct seq_file *seq);
 extern void dma_resv_set_deadline(struct dma_resv *obj,
@@ -98,8 +102,8 @@ dma_resv_iter_is_restarted(struct dma_resv_iter *cursor)
 
 #define	dma_resv_lock(obj, ctx)		lkpi_dma_resv_lock((obj), (ctx), false)
 #define	dma_resv_lock_interruptible(obj, ctx)	lkpi_dma_resv_lock((obj), (ctx), true)
-#define	dma_resv_lock_slow(obj, ctx)	((void)lkpi_dma_resv_lock((obj), (ctx), false))
-#define	dma_resv_lock_slow_interruptible(obj, ctx)	lkpi_dma_resv_lock((obj), (ctx), true)
+#define	dma_resv_lock_slow(obj, ctx)	((void)lkpi_dma_resv_lock_slow((obj), (ctx), false))
+#define	dma_resv_lock_slow_interruptible(obj, ctx)	lkpi_dma_resv_lock_slow((obj), (ctx), true)
 #define	dma_resv_unlock(obj)		lkpi_dma_resv_unlock(obj)
 #define	dma_resv_held(obj)		lkpi_dma_resv_held(obj)
 #define	dma_resv_assert_held(obj)	((void)(obj))

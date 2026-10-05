@@ -10,6 +10,8 @@
 #ifndef _LINUX_HIGHMEM_H
 #define	_LINUX_HIGHMEM_H
 
+#include <linux/kernel.h>
+#include <linux/jump_label.h>
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <asm/cacheflush.h>

@@ -1,0 +1,73 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 04] i915: execbuffer out-fences through the illumos DRM core
+
+I915_EXEC_FENCE_OUT returns a sync-file descriptor. Linux reserves the
+descriptor first (get_unused_fd_flags()) and installs the sync file at the
+end (fd_install()). On illumos descriptors are the DRM core's:
+drm_sync_file_install() makes and installs the descriptor for a fence in
+one step, after the submission succeeded. The layer's sync_file_create()
+only holds the fence for this.
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+index 1f303d4ea..85526e5e1 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+@@ -3418,11 +3418,19 @@ i915_gem_do_execbuffer(struct drm_device *dev,
+ #undef IN_FENCES
+ 
+ 	if (args->flags & I915_EXEC_FENCE_OUT) {
++#ifdef __illumos__
++		/*
++		 * The DRM core makes the descriptor when the fence is
++		 * installed (drm_sync_file_install()); 0 means "requested".
++		 */
++		out_fence_fd = 0;
++#else
+ 		out_fence_fd = get_unused_fd_flags(O_CLOEXEC);
+ 		if (out_fence_fd < 0) {
+ 			err = out_fence_fd;
+ 			goto err_in_fence;
+ 		}
++#endif
+ 	}
+ 
+ 	err = eb_create(&eb);
+@@ -3494,6 +3502,19 @@ i915_gem_do_execbuffer(struct drm_device *dev,
+ 	}
+ 
+ 	if (out_fence) {
++#ifdef __illumos__
++		int fd;
++
++		if (err == 0)
++			err = drm_sync_file_install(out_fence->fence, true, &fd);
++		if (err == 0) {
++			args->rsvd2 &= GENMASK_ULL(31, 0); /* keep in-fence */
++			args->rsvd2 |= (u64)fd << 32;
++		}
++		out_fence_fd = -1;
++		dma_fence_put(out_fence->fence);
++		kfree(out_fence);
++#else
+ 		if (err == 0) {
+ 			fd_install(out_fence_fd, out_fence->file);
+ 			args->rsvd2 &= GENMASK_ULL(31, 0); /* keep in-fence */
+@@ -3502,6 +3523,7 @@ i915_gem_do_execbuffer(struct drm_device *dev,
+ 		} else {
+ 			fput(out_fence->file);
+ 		}
++#endif
+ 	}
+ 
+ 	if (!out_fence && eb.composite_fence)
+@@ -3523,8 +3545,10 @@ i915_gem_do_execbuffer(struct drm_device *dev,
+ err_destroy:
+ 	eb_destroy(&eb);
+ err_out_fence:
++#ifndef __illumos__
+ 	if (out_fence_fd != -1)
+ 		put_unused_fd(out_fence_fd);
++#endif
+ err_in_fence:
+ 	dma_fence_put(in_fence);
+ err_ext:

@@ -3,4 +3,6 @@
 #ifndef _ASM_SMP_H
 #define	_ASM_SMP_H
 #include <linux/smp.h>
+/* Linux reaches the kernel FPU section through <asm/smp.h> on x86. */
+#include <asm/fpu/api.h>
 #endif

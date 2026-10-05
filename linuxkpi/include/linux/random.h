@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * Linux's random numbers over illumos random_get_pseudo_bytes(9F)
- * (src/lkpi_misc.c).
+ * Linux's random numbers over illumos random_get_pseudo_bytes()
+ * (<sys/random.h>; src/lkpi_misc.c).
  */
 #ifndef _LINUX_RANDOM_H
 #define	_LINUX_RANDOM_H

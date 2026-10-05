@@ -3,9 +3,8 @@
  * Copyright 2026 The illumos-drm authors
  *
  * Linux's <drm/drm_syncobj.h>: the facade's sync objects (include_next)
- * plus drm_syncobj_create()/drm_syncobj_get()/drm_syncobj_fence_get(),
- * which ask the core (sync objects are the core's; their structure is
- * opaque to C).
+ * (drm_syncobj_create() and drm_syncobj_fence_get() are the facade's
+ * since 1.1; sync objects are the core's and opaque to C).
  */
 #ifndef _LKPI_DRM_SYNCOBJ_H
 #define	_LKPI_DRM_SYNCOBJ_H
@@ -17,11 +16,5 @@
 
 #define	DRM_SYNCOBJ_CREATE_SIGNALED	(1 << 0)
 
-extern int drm_syncobj_create(struct drm_syncobj **out_syncobj,
-    uint32_t flags, struct dma_fence *fence);
-extern void drm_syncobj_get(struct drm_syncobj *obj);
-extern struct dma_fence *drm_syncobj_fence_get(struct drm_syncobj *syncobj);
-extern int drm_syncobj_get_handle(struct drm_file *file_private,
-    struct drm_syncobj *syncobj, u32 *handle);
 
 #endif

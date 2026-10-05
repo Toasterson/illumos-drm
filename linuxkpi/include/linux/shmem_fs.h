@@ -20,6 +20,8 @@
 
 #define	VM_NORESERVE_SHMEM	0x00200000
 
+struct swap_iocb;
+
 extern struct lx_file *shmem_file_setup(const char *name, loff_t size,
     vma_flags_t flags);
 extern struct lx_file *shmem_file_setup_with_mnt(struct vfsmount *mnt,

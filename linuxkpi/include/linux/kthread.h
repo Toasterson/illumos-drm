@@ -2,11 +2,14 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * Linux's kernel threads over illumos thread_create()
- * (src/lkpi_kthread.c). kthread_run() starts a thread at once;
+ * Linux's kernel threads (src/lkpi_kthread.c), each the one thread of its
+ * own ddi_taskq(9F) (thread_create() is not part of the DDI). The thread
+ * exists from kthread_create() on but calls the function only after the
+ * first wake_up_process(); kthread_run() starts it at once;
  * kthread_stop() sets the stop flag, wakes the thread and waits for it to
- * return; kthread_should_stop() is the flag. kthread_park() is not
- * supported (returns -ENOSYS).
+ * return; kthread_should_stop() is the flag. A kthread whose function
+ * returns by itself keeps its (idle) thread until kthread_stop() or
+ * module unload. kthread_park() is not supported (returns -ENOSYS).
  */
 #ifndef _LINUX_KTHREAD_H
 #define	_LINUX_KTHREAD_H

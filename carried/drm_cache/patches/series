@@ -1,3 +1,5 @@
-# The illumos patch series of drm_cache, applied in this order with
-# patch -p1 in the Linux tree root by ../../fetch-and-patch.
-0001-build-only-drm_clflush_virt_range-without-struct-page.patch
+# The illumos patch series of drm_cache, applied in this order with patch
+# -p1 in the Linux tree root by ../../fetch-and-patch. Empty: drm_cache.c
+# builds unmodified on linuxkpi's page, scatterlist, iosys-map, static-key
+# and kernel-FPU models (R5c). R5e's patch 0001, which built only
+# drm_clflush_virt_range() until those models existed, is gone.

@@ -4,7 +4,8 @@
  *
  * Linux's sleepable RCU (include/linux/srcu.h, GPL-2.0; reimplemented):
  * each srcu_struct counts its readers like the layer's RCU
- * (<linux/rcupdate.h>), and readers may sleep.
+ * (<linux/rcupdate.h>), and readers may sleep (src/lkpi_rcu.c). A
+ * zero-filled srcu_struct (DEFINE_SRCU()) is valid.
  */
 #ifndef _LINUX_SRCU_H
 #define	_LINUX_SRCU_H
@@ -14,6 +15,8 @@
 
 struct srcu_struct {
 	volatile uint32_t readers;
+	volatile uint32_t waiters;	/* synchronize_srcu() callers waiting */
+	volatile uint32_t epoch;	/* reader count reached 0 (with waiters) */
 	kmutex_t lock;
 	kcondvar_t cv;
 };

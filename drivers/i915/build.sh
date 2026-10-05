@@ -23,7 +23,8 @@
 #   DDI_MAPFILE  the gate's usr/src/uts/common/mapfiles/ddi.mapfile
 #   OUT          build directory [./out-i915]
 #   JOBS         parallel compiles [2]
-#   TUS          list of TUs relative to drivers/gpu/drm/i915 [tus.txt]
+#   TUS          list of TUs relative to drivers/gpu/drm/i915 [tus.txt]; entries
+#                illumos/*.c are this directory's own sources (MIT)
 #   CROSS        set to 1 when CC is a Linux-hosted x86_64 cross gcc (the
 #                measurement container): drops illumos-only flags and
 #                undefines the Linux target macros.
@@ -43,54 +44,11 @@ I915=$LINUX/drivers/gpu/drm/i915
 mode=${1:-all}
 
 rm -rf "$OUT/log"
-mkdir -p "$OUT/obj" "$OUT/log" "$OUT/sysinc"
-# Only the kernel header directories of the system include tree, so a
-# Linux header the layer lacks is an error and not a userland header.
-for d in sys vm asm ia32 amd64 netinet inet net rpc; do
-	[ -e "$SYSINC/$d" ] && ln -sfn "$SYSINC/$d" "$OUT/sysinc/$d"
-done
-
-TMPD=$(mktemp -d /tmp/i915-build.XXXXXX)
-trap 'rm -rf "$TMPD"' EXIT
-printf 'int probe;\n' > "$TMPD/probe.c"
-probe() {
-	"$CC" -m64 -Werror "$@" -c -o "$TMPD/probe.o" "$TMPD/probe.c" >/dev/null 2>&1
-}
-
-# The gate's 64-bit kernel flags (as drivers/cdrmnull/build.sh), with the
-# Linux dialect i915 needs: gnu11, -fms-extensions (anonymous struct
-# members by tag), unsigned char, no strict aliasing/overflow.
-CFLAGS="-m64 -O2 -std=gnu11 -fno-strict-aliasing -fno-strict-overflow"
-CFLAGS="$CFLAGS -fno-optimize-sibling-calls -ffreestanding -mcmodel=kernel"
-CFLAGS="$CFLAGS -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-avx"
-CFLAGS="$CFLAGS -fno-builtin -fno-common -fno-asynchronous-unwind-tables"
-CFLAGS="$CFLAGS -fms-extensions -funsigned-char -fno-delete-null-pointer-checks"
-CFLAGS="$CFLAGS -fno-jump-tables -fdiagnostics-show-option"
-CFLAGS="$CFLAGS -Wall -Wno-unused-parameter -Wno-sign-compare"
-CFLAGS="$CFLAGS -Wno-missing-field-initializers -Wno-unused-function"
-CFLAGS="$CFLAGS -Wno-address-of-packed-member -Wno-format-truncation"
-CFLAGS="$CFLAGS -Wno-microsoft-anon-tag -Wno-override-init"
-CFLAGS="$CFLAGS -Werror=implicit-function-declaration -Werror=implicit-int"
-CFLAGS="$CFLAGS -Werror=incompatible-pointer-types -Werror=int-conversion"
-CFLAGS="$CFLAGS -Werror=return-type"
-for f in -msave-args "-mindirect-branch=thunk-extern -mindirect-branch-register" \
-    -fno-shrink-wrap -fno-ipa-cp -fno-ipa-icf -fno-clone-functions \
-    -fno-reorder-functions -fno-reorder-blocks-and-partition \
-    -fno-aggressive-loop-optimizations -fstack-protector-strong; do
-	# shellcheck disable=SC2086
-	if [ "$CROSS" = 1 ] && [ "$f" = -msave-args ]; then continue; fi
-	# shellcheck disable=SC2086
-	probe $f && CFLAGS="$CFLAGS $f"
-done
-# shellcheck disable=SC2086
-CFLAGS=$(for f in $CFLAGS; do probe "$f" && printf '%s ' "$f"; done)
-
-CPPFLAGS="-D_KERNEL -D_SYSCALL32 -D_SYSCALL32_IMPL -D_ELF64 -D_DDI_STRICT"
-CPPFLAGS="$CPPFLAGS -Dsun -D__sun -D__SVR4 -D__illumos__ -D_ASM_INLINES"
-CPPFLAGS="$CPPFLAGS -D__KERNEL__ -DMODULE -DI915 -DKBUILD_MODNAME=\"i915\""
-if [ "$CROSS" = 1 ]; then
-	CPPFLAGS="$CPPFLAGS -U__linux__ -U__linux -Ulinux -U__gnu_linux__ -U__unix__ -Uunix"
-fi
+mkdir -p "$OUT/obj" "$OUT/log"
+# shellcheck disable=SC1091
+. "$REPO/linuxkpi/kflags.sh"
+CFLAGS=$LKPI_CFLAGS
+CPPFLAGS="$LKPI_CPPFLAGS -DI915 -DKBUILD_MODNAME=\"i915\""
 CPPFLAGS="$CPPFLAGS -nostdinc -I$REPO/linuxkpi/include -I$REPO/include"
 CPPFLAGS="$CPPFLAGS -I$LINUX/.illumos/mit-include -I$LINUX/.illumos/mit-include/uapi"
 CPPFLAGS="$CPPFLAGS -I$I915 -I$OUT/sysinc"
@@ -105,8 +63,12 @@ compile_one() {
 	log=$OUT/log/$(echo "${tu%.c}" | tr / _).log
 	mkdir -p "$(dirname "$obj")"
 	# shellcheck disable=SC2086
+	case "$tu" in
+	illumos/*) src=$HERE/$tu ;;
+	*) src=$I915/$tu ;;
+	esac
 	if "$CC" $CFLAGS $CPPFLAGS -DKBUILD_BASENAME=\"$(basename "${tu%.c}")\" \
-	    -c "$I915/$tu" -o "$obj" > "$log" 2>&1; then
+	    -c "$src" -o "$obj" > "$log" 2>&1; then
 		echo "OK $tu"
 	else
 		rm -f "$obj"
@@ -114,7 +76,7 @@ compile_one() {
 	fi
 }
 export -f compile_one
-export CC CFLAGS CPPFLAGS OUT I915
+export CC CFLAGS CPPFLAGS OUT I915 HERE
 
 if [ "$mode" = compile ] || [ "$mode" = all ]; then
 	grep -v '^#' "$TUS" | grep . | xargs -P "$JOBS" -I{} bash -c 'compile_one {}' \
@@ -135,4 +97,29 @@ if [ "$mode" = compile ] || [ "$mode" = all ]; then
 		    sed -E "s/'[^']*'/X/g" | sort | uniq -c | sort -rn | head -60
 	} > "$OUT/summary.txt"
 	head -1 "$OUT/summary.txt"
+fi
+
+if [ "$mode" = link ] || [ "$mode" = all ]; then
+	# The link gate: every undefined symbol must be declared by one of
+	# the mapfiles of the modules i915n depends on, or the DDI's.
+	: "${DDI_MAPFILE:?set DDI_MAPFILE to the ddi.mapfile of illumos-gate}"
+	: "${LKPI_MAPFILE:?set LKPI_MAPFILE to linuxkpi.mapfile from linuxkpi/build.sh}"
+	HELPERS_MAPFILE=${HELPERS_MAPFILE:-$REPO/carried/drm_helpers/drm_helpers.mapfile}
+	objs=$(find "$OUT/obj" -name '*.o' | sort)
+	echo "\$ $LD -ztype=kmod -N misc/drm_core -N misc/linuxkpi -N misc/drm_helpers -z defs" \
+	    "-M $DDI_MAPFILE -M $REPO/include/drm/drm_facade.mapfile -M $LKPI_MAPFILE" \
+	    "-M $HELPERS_MAPFILE -M $HERE/private.mapfile -o $OUT/i915n <$(echo "$objs" | wc -l) objects>" \
+	    | tee "$OUT/link.txt"
+	# shellcheck disable=SC2086
+	if "$LD" -ztype=kmod -N misc/drm_core -N misc/linuxkpi -N misc/drm_helpers \
+	    -z defs -M "$DDI_MAPFILE" -M "$REPO/include/drm/drm_facade.mapfile" \
+	    -M "$LKPI_MAPFILE" -M "$HELPERS_MAPFILE" -M "$HERE/private.mapfile" \
+	    -o "$OUT/i915n" $objs >> "$OUT/link.txt" 2>&1; then
+		echo "link: OK, 0 unresolved" | tee -a "$OUT/link.txt"
+	else
+		grep -c 'symbol referencing errors\|undefined' "$OUT/link.txt" || true
+		sed -n '/Undefined/,/symbol referencing errors/p' "$OUT/link.txt" | head -80
+		echo "link: FAILED (see $OUT/link.txt)"
+		exit 1
+	fi
 fi

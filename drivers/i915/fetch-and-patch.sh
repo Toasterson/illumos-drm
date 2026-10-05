@@ -8,6 +8,12 @@
 # the MIT-licensed Linux headers of mit-headers.txt. The Linux source stays
 # outside illumos-drm; only the patches and this script are in it.
 #
+# Licences: every TU of tus.txt must be MIT (SPDX or the MIT notice), else
+# the script refuses the tree. i915's two tracepoint headers are GPL-2.0;
+# they are replaced in the tree by MIT no-op headers that
+# illumos/gen-trace-stubs.py writes from the original's event names
+# (TRACE_HEADERS below), so no GPL text reaches the build.
+#
 #   drivers/i915/fetch-and-patch.sh <directory>
 #
 # <directory> is created (git init + fetch of the pinned commit, about
@@ -15,6 +21,8 @@
 # tree must be clean or carry exactly this patch series; the script never
 # discards changes of its own accord.
 set -euo pipefail
+# GNU grep and sed first on illumos (\b in the licence checks)
+PATH=/usr/gnu/bin:$PATH
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck disable=SC1091
@@ -34,6 +42,12 @@ if [ "$head" != "$LINUX_REV" ]; then
 	exit 1
 fi
 
+I915=drivers/gpu/drm/i915
+TRACE_HEADERS="$I915/i915_trace.h $I915/intel_uncore_trace.h"
+# git pathspecs that leave out the generated headers
+keep=()
+for h in $TRACE_HEADERS; do keep+=(":(exclude)$h"); done
+
 series=$( (cd "$HERE" && ls patches/*.patch 2>/dev/null || true) | sort)
 sum=$(cd "$HERE" && cat /dev/null $series | sha256sum 2>/dev/null | cut -d' ' -f1 ||
     cat /dev/null $series | digest -a sha256)
@@ -41,11 +55,13 @@ stamp=$dest/.illumos/applied
 if [ -f "$stamp" ] && [ "$(sed -n 1p "$stamp")" = "$sum" ]; then
 	echo "fetch-and-patch: series already applied ($sum)"
 else
-	if [ -n "$(git -C "$dest" status --porcelain --untracked-files=no)" ]; then
+	if [ -n "$(git -C "$dest" status --porcelain --untracked-files=no -- . "${keep[@]}")" ]; then
 		echo "fetch-and-patch: $dest has changes that are not this series;" \
 		    "check them out (git -C $dest checkout -- .) yourself" >&2
 		exit 1
 	fi
+	# shellcheck disable=SC2086
+	git -C "$dest" checkout -- $TRACE_HEADERS
 	for p in $series; do
 		echo "fetch-and-patch: applying $p"
 		git -C "$dest" apply --whitespace=nowarn "$HERE/$p"
@@ -53,6 +69,22 @@ else
 	mkdir -p "$dest/.illumos"
 	{ echo "$sum"; echo "$series"; } > "$stamp"
 fi
+
+# The tracepoint headers: MIT no-op replacements (see above), from the
+# pinned originals.
+for h in $TRACE_HEADERS; do
+	git -C "$dest" show "HEAD:$h" > "$dest/.illumos/$(basename "$h").orig"
+	python3 "$HERE/illumos/gen-trace-stubs.py" "$dest/.illumos/$(basename "$h").orig" "$dest/$h"
+	rm -f "$dest/.illumos/$(basename "$h").orig"
+done
+
+# The TUs: MIT only.
+grep -v '^#' "$HERE/tus.txt" | grep . | grep -v '^illumos/' | while read -r f; do
+	if ! head -40 "$dest/$I915/$f" | grep -q -E 'SPDX-License-Identifier:[[:space:]]*MIT\b|Permission is hereby granted, free of charge'; then
+		echo "fetch-and-patch: $I915/$f is not MIT-licensed; refusing it" >&2
+		exit 1
+	fi
+done
 
 mit=$dest/.illumos/mit-include
 rm -rf "$mit"

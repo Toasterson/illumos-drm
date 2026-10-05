@@ -2,17 +2,27 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * Linux's timers over illumos callouts (include/linux/timer.h, GPL-2.0;
- * reimplemented in src/lkpi_timer.c).
+ * Linux's timers (include/linux/timer.h, GPL-2.0; reimplemented in
+ * src/lkpi_timer.c).
  *
- * mod_timer() arms a timeout(9F) callout for the remaining jiffies
- * (rounded up to illumos' tick) with a separately allocated arm record;
- * the timer function runs in callout context and must not sleep, as on
- * Linux. timer_delete() (del_timer()) disarms without waiting: the
- * callout, if it still fires, finds its record cancelled and does
- * nothing. timer_delete_sync() also waits until the function is not
- * running. The timer structure is never touched after its function
- * returns, so a timer function may free its own timer.
+ * Pending timers are kept in one tree ordered by expiry, served by one
+ * layer thread (a single-thread ddi_taskq(9F)) that sleeps with
+ * cv_reltimedwait(9F) until the earliest expiry, so a timer fires at the
+ * first illumos clock tick at or after its expiry. Arming, re-arming and
+ * deleting only take the layer's timer lock: they never allocate and
+ * never wait, so they work in interrupt handlers and under spinlocks.
+ * Timer functions run one at a time on that thread (thread context, but
+ * like Linux they must not sleep: they delay every other timer).
+ * timer_delete() (del_timer()) disarms without waiting;
+ * timer_delete_sync() also waits until the function is not running. The
+ * timer structure is never touched after its function returns, so a
+ * timer function may free its own timer.
+ *
+ * Deviation from the first design (one timeout(9F) callout per arming
+ * with an allocated arm record): a callout cannot be cancelled without
+ * possibly waiting for it (untimeout(9F)), so every disarmed callout
+ * would have needed a record that outlives the timer and a way to cancel
+ * it at module unload; the timer thread has neither problem.
  */
 #ifndef _LINUX_TIMER_H
 #define	_LINUX_TIMER_H

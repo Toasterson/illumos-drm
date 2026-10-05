@@ -19,6 +19,7 @@
 struct kobject;
 struct lx_module;
 struct bin_attribute;
+struct vm_area_struct;
 
 struct attribute {
 	const char *name;

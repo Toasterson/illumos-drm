@@ -3,7 +3,7 @@
  * Copyright 2026 The illumos-drm authors
  *
  * Linux's notifier chains (include/linux/notifier.h, GPL-2.0;
- * reimplemented in src/lkpi_misc.c): blocking chains under a rw
+ * reimplemented in src/lkpi_notifier.c): blocking chains under a rw
  * semaphore, atomic chains under a spinlock, called in priority order.
  */
 #ifndef _LINUX_NOTIFIER_H

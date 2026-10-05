@@ -9,8 +9,11 @@
  * a layer spinlock; xa_*() take it, __xa_*() expect the caller to hold it.
  * Readers under RCU are not lock-free here: xa_load() takes the lock.
  * Entries must be pointers aligned to 4 bytes or xa_mk_value() values, as
- * on Linux; storing NULL erases. Marks are not supported (XA_MARK_*
- * searches find nothing, xa_set_mark() does nothing).
+ * on Linux; storing NULL erases, except in an allocating array
+ * (XA_FLAGS_ALLOC*), where it reserves the index as on Linux (xa_load()
+ * returns NULL, the allocators skip it, xa_erase()/xa_release() free it).
+ * Marks are not supported (XA_MARK_* searches find nothing, xa_set_mark()
+ * does nothing).
  */
 #ifndef _LINUX_XARRAY_H
 #define	_LINUX_XARRAY_H
@@ -83,7 +86,7 @@ static inline bool
 xa_is_err(const void *entry)
 {
 	return (((unsigned long)entry & 3) == 2 &&
-	    (unsigned long)entry >= (unsigned long)((-4095L << 2) | 2));
+	    (unsigned long)entry >= (((unsigned long)-4095L << 2) | 2UL));
 }
 
 static inline int
@@ -97,7 +100,7 @@ xa_err(void *entry)
 static inline void *
 xa_mk_err(long err)
 {
-	return ((void *)((err << 2) | 2));
+	return ((void *)(((unsigned long)err << 2) | 2UL));
 }
 
 #define	xa_is_zero(e)		false
@@ -133,6 +136,7 @@ extern void *xa_find(struct xarray *xa, unsigned long *index,
 extern void *xa_find_after(struct xarray *xa, unsigned long *index,
     unsigned long max, xa_mark_t filter);
 extern void *lkpi_xa_slot(struct xarray *xa, unsigned long index);
+extern void lkpi_xa_release(struct xarray *xa, unsigned long index);
 
 static inline void
 xa_init(struct xarray *xa)
@@ -162,7 +166,7 @@ xa_empty(const struct xarray *xa)
 #define	xa_alloc_irq(xa, id, e, l, g)	xa_alloc(xa, id, e, l, g)
 #define	xa_alloc_cyclic_irq(xa, id, e, l, n, g)	xa_alloc_cyclic(xa, id, e, l, n, g)
 #define	xa_alloc_bh(xa, id, e, l, g)	xa_alloc(xa, id, e, l, g)
-#define	xa_release(xa, i)		((void)(xa), (void)(i))
+#define	xa_release(xa, i)		lkpi_xa_release((xa), (i))
 #define	xa_set_mark(xa, i, m)		((void)(xa), (void)(i))
 #define	xa_clear_mark(xa, i, m)		((void)(xa), (void)(i))
 #define	__xa_set_mark(xa, i, m)		((void)(xa), (void)(i))

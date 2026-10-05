@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/* Copyright 2026 The illumos-drm authors. list_sort() (src/lkpi_list_sort.c: a stable merge sort). */
+/* Copyright 2026 The illumos-drm authors. list_sort() (src/lkpi_misc.c: a stable merge sort). */
 #ifndef _LINUX_LIST_SORT_H
 #define	_LINUX_LIST_SORT_H
 #include <linux/list.h>

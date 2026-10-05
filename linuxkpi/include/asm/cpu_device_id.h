@@ -16,6 +16,8 @@
 
 #define	X86_VENDOR_INTEL	0
 #define	X86_VENDOR_AMD		2
+#define	X86_VENDOR_HYGON	9
+#define	X86_VENDOR_UNKNOWN	0xff
 #define	X86_VENDOR_ANY		0xfffe
 #define	X86_FAMILY_ANY		0
 #define	X86_MODEL_ANY		0

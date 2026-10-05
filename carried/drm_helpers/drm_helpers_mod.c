@@ -14,23 +14,21 @@
  * carried/drm_helpers/drm_helpers.mapfile for the exported functions and
  * the README's "R5e: carried helpers" for what else is and is not carried.
  *
- * The module's only state is the processor facts drm_cache reads
- * (linuxkpi/lib/x86_cpu.c), filled in _init before mod_install(9F) and
- * read-only afterwards; _init refuses a processor without CLFLUSH. The
+ * The module has no state. It depends on misc/linuxkpi (-N), whose red-
+ * black trees, pages, scatterlists and processor facts (boot_cpu_data,
+ * filled when misc/linuxkpi loads, i.e. before this module's _init) the
+ * carried code uses; _init refuses a processor without CLFLUSH. The
  * kernel keeps the module loaded while a module that depends on it
- * (-N misc/drm_helpers) is loaded. It depends on nothing but the kernel;
- * it neither uses nor guards against either DRM core, which is the job of
- * misc/drm_core and gfx-drm's misc/drm (a driver that links this module
- * also links misc/drm_core). Legacy gfx-drm's misc/drm exports drm_mm
- * functions under the same names; krtld resolves each module's symbols in
- * its own dependencies first, so the two never mix.
+ * (-N misc/drm_helpers) is loaded. misc/linuxkpi depends on misc/drm_core,
+ * so the module belongs to the illumos-drm stack and is kept from loading
+ * with it by drmadm's exclusion of misc/drm_core. Legacy gfx-drm's
+ * misc/drm exports drm_mm functions under the same names; krtld resolves
+ * each module's symbols in its own dependencies first, so the two never
+ * mix.
  */
 
-#include <sys/types.h>
-#include <sys/modctl.h>
-#include <sys/cmn_err.h>
-
 #include <asm/processor.h>
+#include <asm/cpufeature.h>
 
 static struct modlmisc drm_helpers_modlmisc = {
 	&mod_miscops,
@@ -45,12 +43,11 @@ static struct modlinkage drm_helpers_modlinkage = {
 int
 _init(void)
 {
-	int err;
-
-	if ((err = lkpi_x86_cpu_init()) != 0) {
+	if (!boot_cpu_has(X86_FEATURE_CLFLUSH) ||
+	    boot_cpu_data.x86_clflush_size == 0) {
 		cmn_err(CE_WARN, "drm_helpers: the processor lacks CLFLUSH "
 		    "(or reports no CLFLUSH line size); not loading");
-		return (err);
+		return (ENOTSUP);
 	}
 	return (mod_install(&drm_helpers_modlinkage));
 }

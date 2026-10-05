@@ -25,7 +25,6 @@ intel_pcode.c
 intel_runtime_pm.c
 intel_step.c
 intel_uncore.c
-intel_uncore_trace.c
 intel_wakeref.c
 vlv_iosf_sb.c
 vlv_suspend.c
@@ -123,7 +122,6 @@ i915_gem_ww.c
 i915_query.c
 i915_request.c
 i915_scheduler.c
-i915_trace_points.c
 i915_vma.c
 i915_vma_resource.c
 gt/uc/intel_gsc_fw.c
@@ -154,3 +152,6 @@ pxp/intel_pxp.c
 pxp/intel_pxp_huc.c
 pxp/intel_pxp_tee.c
 i915_vgpu.c
+illumos/i915_illumos.c
+illumos/i915_nodisplay.c
+illumos/i915_illumos_stubs.c

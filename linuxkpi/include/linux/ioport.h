@@ -56,6 +56,14 @@ resource_overlaps(const struct resource *r1, const struct resource *r2)
 }
 
 extern struct resource iomem_resource;
+
+/*
+ * The firmware-reserved ("stolen") memory of an Intel integrated GPU, as
+ * Linux's x86 early quirk records it: the PCI glue fills it when an Intel
+ * display-class device attaches, from the device's BDSM and GMCH control
+ * registers (gen6 to gen9.5). Empty (resource_size() == 0) otherwise.
+ */
+extern struct resource intel_graphics_stolen_res;
 #define	request_mem_region(start, n, name)	((struct resource *)&iomem_resource)
 #define	release_mem_region(start, n)		((void)(start))
 #define	request_resource(root, new_r)		0

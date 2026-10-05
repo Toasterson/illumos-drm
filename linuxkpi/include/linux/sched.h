@@ -11,10 +11,15 @@
  * interrupt handler `current` is a shared placeholder that cannot sleep.
  * The task holds the sleep state of the set_current_state() /
  * schedule_timeout() / wake_up_process() protocol, a mutex and a
- * condition variable. TASK_INTERRUPTIBLE sleeps end early on a signal
- * (cv_reltimedwait_sig(9F)); signal_pending() then reports it until the
- * task's next interruptible sleep. Other task fields are fixed: comm is
- * "illumos", mm is NULL (no Linux address spaces), flags 0.
+ * condition variable. TASK_INTERRUPTIBLE and TASK_KILLABLE sleeps end
+ * early on any signal (cv_reltimedwait_sig(9F); illumos does not tell
+ * fatal signals apart) and set the task's sigpending flag.
+ * signal_pending() is false while the flag is clear; when it is set, it
+ * asks illumos again (a zero-length cv_reltimedwait_sig(), which does not
+ * sleep), so a flag left from an earlier system call cannot fail a later
+ * one. Other task fields are fixed: comm is "illumos" (a kthread's name
+ * for kthreads), mm is NULL (no Linux address spaces), pid is the
+ * process ID (ddi_get_pid(9F); 0 for kernel threads).
  */
 #ifndef _LINUX_SCHED_H
 #define	_LINUX_SCHED_H
@@ -40,6 +45,7 @@
 #define	TASK_NEW		0x00000800
 #define	TASK_KILLABLE		(TASK_WAKEKILL | TASK_UNINTERRUPTIBLE)
 #define	TASK_IDLE		(TASK_UNINTERRUPTIBLE | TASK_NOLOAD)
+#undef	TASK_NORMAL	/* <sys/task.h>: a task flag of illumos' own */
 #define	TASK_NORMAL		(TASK_INTERRUPTIBLE | TASK_UNINTERRUPTIBLE)
 #define	TASK_COMM_LEN		16
 #define	PF_KTHREAD		0x00200000
@@ -98,16 +104,21 @@ extern void lkpi_cond_resched(void);
 #define	yield()				lkpi_cond_resched()
 #define	cpu_relax_yield()		lkpi_cond_resched()
 
+/* Whether t's signal is still pending (src/lkpi_sched.c). */
+extern int lkpi_signal_recheck(struct task_struct *t);
+
 static inline int
 signal_pending(struct task_struct *t)
 {
-	return (t->sigpending);
+	if (t->sigpending == 0)
+		return (0);
+	return (lkpi_signal_recheck(t));
 }
 
 static inline int
 fatal_signal_pending(struct task_struct *t)
 {
-	return (t->sigpending);
+	return (signal_pending(t));
 }
 
 static inline int

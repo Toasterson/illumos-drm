@@ -74,11 +74,25 @@ fls_long(unsigned long l)
 	return (fls64(l));
 }
 
-#define	hweight8(w)	((unsigned int)__builtin_popcount((u8)(w)))
-#define	hweight16(w)	((unsigned int)__builtin_popcount((u16)(w)))
-#define	hweight32(w)	((unsigned int)__builtin_popcount((u32)(w)))
-#define	hweight64(w)	((unsigned int)__builtin_popcountll((u64)(w)))
-#define	hweight_long(w)	((unsigned long)__builtin_popcountl((unsigned long)(w)))
+/*
+ * Population counts with bit arithmetic: __builtin_popcount() without
+ * -mpopcnt is a libgcc call, which a kernel module cannot link. Constant
+ * arguments fold.
+ */
+static inline unsigned int
+lkpi_hweight64(u64 w)
+{
+	w = w - ((w >> 1) & 0x5555555555555555ULL);
+	w = (w & 0x3333333333333333ULL) + ((w >> 2) & 0x3333333333333333ULL);
+	w = (w + (w >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
+	return ((unsigned int)((w * 0x0101010101010101ULL) >> 56));
+}
+
+#define	hweight8(w)	lkpi_hweight64((u8)(w))
+#define	hweight16(w)	lkpi_hweight64((u16)(w))
+#define	hweight32(w)	lkpi_hweight64((u32)(w))
+#define	hweight64(w)	lkpi_hweight64((u64)(w))
+#define	hweight_long(w)	((unsigned long)lkpi_hweight64((unsigned long)(w)))
 
 static inline u32
 rol32(u32 w, unsigned int s)

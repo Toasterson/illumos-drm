@@ -36,6 +36,10 @@ enum hrtimer_restart {
 	HRTIMER_RESTART
 };
 
+/* Linux's clock IDs (illumos' <sys/time.h> numbers its own differently). */
+#undef	CLOCK_REALTIME
+#undef	CLOCK_MONOTONIC
+#undef	CLOCK_BOOTTIME
 #define	CLOCK_REALTIME		0
 #define	CLOCK_MONOTONIC		1
 #define	CLOCK_BOOTTIME		7
