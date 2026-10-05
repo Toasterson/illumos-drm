@@ -23,9 +23,30 @@ SPECIAL = {
     # dumb buffers: no plane limits without a display; never force paging
     # alignment of the pitch.
     "intel_dumb_fb_max_stride": "return (INT_MAX);",
-    # i915_driver_probe(): no display device (NULL, not an error).
-    "intel_display_device_probe": "return (NULL);",
+    # i915_driver_probe(): a device without a display, as Linux models
+    # one (intel_display_device_probe's no_display case): i915->display
+    # is never NULL in Linux, and the core code outside display/ reads
+    # it through macros and inlines (HAS_FPGA_DBG_UNCLAIMED in
+    # intel_uncore_init_mmio() was the first, a NULL dereference at the
+    # first attach on a ThinkPad X230). The empty device info answers
+    # every DISPLAY_INFO/DISPLAY_RUNTIME_INFO question with "no display".
+    "intel_display_device_probe": "\n\t".join([
+        "static const struct intel_display_device_info no_display = { 0 };",
+        "struct intel_display *display;",
+        "display = kzalloc(sizeof (*display), GFP_KERNEL);",
+        "if (display == NULL)",
+        "\treturn (ERR_PTR(-ENOMEM));",
+        "display->drm = pci_get_drvdata(pdev);",
+        "display->parent = parent;",
+        "DISPLAY_INFO(display) = &no_display;",
+        "return (display);"]),
+    # i915_driver_late_release(): frees what the probe above allocated.
+    "intel_display_device_remove": "kfree(display);",
 }
+
+# Headers the SPECIAL bodies need beyond the declarations' own headers
+# (struct intel_display for intel_display_device_probe).
+EXTRA_INCLUDES = ["display/intel_display_core.h"]
 
 # Display functions whose work the headless build must still do: the stub
 # stays empty because the illumos glue does that work instead (the note
@@ -82,9 +103,11 @@ def main():
            " * where i915's display is not built (decision of R5c: headless first).",
            " * Each answers as a device without a display would: nothing happens,",
            " * false, NULL, 0, or -ENODEV for the display ioctls. The display",
-           " * parent interfaces are empty tables.",
+           " * parent interfaces are empty tables. The display device itself",
+           " * exists, with Linux's \"no display\" device info, so that code",
+           " * outside display/ never sees a NULL i915->display.",
            " */", "", "#include <drm/intel/display_parent_interface.h>", "", "#include \"i915_drv.h\""]
-    out += [f"#include \"{i}\"" for i in sorted(incs)]
+    out += [f"#include \"{i}\"" for i in sorted(incs | set(EXTRA_INCLUDES))]
     out.append("")
     for struct, name in tables:
         line = f"const struct {struct} {name} = {{ 0 }};"
