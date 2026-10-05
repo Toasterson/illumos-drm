@@ -89,6 +89,8 @@ extern int lkpi_shrinker_init(void);
 extern void lkpi_shrinker_fini(void);
 
 /* src/lkpi_drm.c: the DRM driver-table copies, the unplug SRCU. */
+extern int lkpi_ww_init(void);
+extern void lkpi_ww_fini(void);
 extern int lkpi_drm_init(void);
 extern void lkpi_drm_fini(void);
 /*

@@ -45,6 +45,7 @@ static const struct {
 	{ "rcu", lkpi_rcu_init, lkpi_rcu_fini },
 	{ "timer", lkpi_timer_init, lkpi_timer_fini },
 	{ "work", lkpi_work_init, lkpi_work_fini },
+	{ "ww", lkpi_ww_init, lkpi_ww_fini },
 	{ "drm", lkpi_drm_init, lkpi_drm_fini },
 	{ "shrinker", lkpi_shrinker_init, lkpi_shrinker_fini },
 	{ "dmi", lkpi_dmi_init, lkpi_dmi_fini },

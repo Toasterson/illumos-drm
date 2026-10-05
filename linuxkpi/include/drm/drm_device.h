@@ -45,8 +45,19 @@ struct drm_vblank_crtc;
 	spinlock_t vbl_lock; \
 	u32 max_vblank_count; \
 	struct list_head vblank_event_list; \
-	struct drm_mode_config mode_config;
+	struct drm_mode_config mode_config; \
+	bool illumos_kms_registered;
 #define	LKPI_DRM_KMS	1
+/*
+ * Linux's dev->registered as the carried KMS code means it: the device's
+ * mode-setting objects are registered (drm_modeset_register_all() ran).
+ * The layer registers the device with the core earlier, in
+ * devm_drm_dev_alloc(), so drm_device.registered is already true while
+ * i915 creates its static mode objects; misc/drm_kms sets this flag
+ * around drm_modeset_register_all()/drm_modeset_unregister_all() as
+ * Linux's drm_dev_register()/drm_dev_unregister() set dev->registered.
+ */
+#define	drm_kms_dev_registered(dev)	((dev)->illumos_kms_registered)
 #endif
 
 #include_next <drm/drm_device.h>
