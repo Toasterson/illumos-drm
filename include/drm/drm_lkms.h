@@ -30,13 +30,15 @@ extern "C" {
 struct drm_device;
 struct drm_file;
 struct drm_event;
+struct drm_illumos_mode_config;
 
 /*
  * The hooks of a Linux KMS implementation (drm_driver.illumos_lkms). The
  * core uses them for a device whose drm_device.driver_features has
  * DRIVER_MODESET when drm_dev_register() runs; otherwise the mode-setting
  * ioctls fail with EOPNOTSUPP as for a render-only driver. Every hook runs
- * in thread context without core locks held. Required: ioctl.
+ * in thread context without core locks held. Required: ioctl, file_open,
+ * file_close, register_dev, unregister_dev, mode_config.
  *
  * ioctl	a mode-setting ioctl of the core's mode-setting table
  *		(DRM_IOCTL_MODE_*, WAIT_VBLANK, MODESET_CTL,
@@ -56,11 +58,18 @@ struct drm_event;
  *		(Linux's drm_file_free() order).
  * lastclose	after the last open file of the device closed (Linux's
  *		drm_lastclose()). Optional.
- * register	at the end of a successful drm_dev_register(), the minor
+ * register_dev	at the end of a successful drm_dev_register(), the minor
  *		nodes exist (Linux's drm_modeset_register_all()). A negative
  *		errno makes drm_dev_register() undo the registration and fail.
- * unregister	in a drm_dev_unregister() that is going to succeed, before
+ * unregister_dev
+ *		in a drm_dev_unregister() that is going to succeed, before
  *		the minor nodes go (Linux's drm_modeset_unregister_all()).
+ * mode_config	fills in the mode-setting limits GET_CAP reports (cursor
+ *		size, preferred depth, shadow preference, modifiers,
+ *		asynchronous flips) from the KMS code's configuration
+ *		(Linux's drm_mode_config); called once by drm_dev_register()
+ *		before register_dev, instead of the driver calling
+ *		drm_dev_illumos_set_mode_config(). Required.
  */
 struct drm_illumos_lkms_funcs {
 	int (*ioctl)(struct drm_device *dev, unsigned int nr, void *data,
@@ -70,6 +79,8 @@ struct drm_illumos_lkms_funcs {
 	void (*lastclose)(struct drm_device *dev);
 	int (*register_dev)(struct drm_device *dev);
 	void (*unregister_dev)(struct drm_device *dev);
+	void (*mode_config)(struct drm_device *dev,
+	    struct drm_illumos_mode_config *out);
 };
 
 /*
