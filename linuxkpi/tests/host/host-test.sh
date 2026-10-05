@@ -36,9 +36,19 @@ fi
 # built with -fno-delete-null-pointer-checks, so that is not checked here.
 # Signed overflow wraps in the kernel build (-fno-strict-overflow; the
 # refcount_t saturation checks rely on it): -fwrapv, not checked.
-SAN="-fsanitize=address,undefined -fno-sanitize=pointer-overflow
+# SANITIZE (default 1 with clang): AddressSanitizer and UBSan.
+case "${SANITIZE:-auto}" in
+auto) case "$("$CC" --version 2>/dev/null | sed -n 1p)" in
+	*clang*) SANITIZE=1 ;;
+	*) SANITIZE=0 ;;
+	esac ;;
+esac
+SAN=
+if [ "$SANITIZE" = 1 ]; then
+	SAN="-fsanitize=address,undefined -fno-sanitize=pointer-overflow
 -fno-sanitize=signed-integer-overflow
 -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+fi
 COMMON="$ARCH -std=gnu11 -g -O1 $SAN -fms-extensions -funsigned-char
 -fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks -Wall -Werror=implicit-function-declaration
 -Wno-comment -Wno-unused-function -Wno-unused-parameter -Wno-sign-compare

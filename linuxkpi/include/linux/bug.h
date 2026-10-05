@@ -15,6 +15,8 @@
 #include <linux/once_lite.h>
 #include <linux/instrumentation.h>
 
+/* WARN()s fired since misc/linuxkpi loaded (lkpi_printf.c). */
+extern volatile uint64_t lkpi_warnings;
 extern void lkpi_warn(const char *file, int line, const char *fmt, ...)
     __printf(3, 4) __cold;
 extern void lkpi_bug(const char *file, int line) __noreturn __cold;

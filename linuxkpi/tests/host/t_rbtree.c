@@ -326,11 +326,10 @@ TEST(interval_tree)
 	CHECK(aug_ok);
 	CHECK(query_ok);
 	{
-		size_t count = 0, live = 0;
+		size_t live = 0;
 
 		for (i = 0; i < NIT; i++)
 			live += its[i].in;
-		(void) rb_check(NULL, NULL, NULL, NULL, &count);
 		for (i = 0; i < NIT; i++) {
 			if (its[i].in)
 				itt_remove(&its[i], &root);

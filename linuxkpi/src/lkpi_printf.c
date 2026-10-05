@@ -952,6 +952,9 @@ print_hex_dump(const char *level, const char *prefix_str, int prefix_type,
 
 /* --- WARN() and BUG() -------------------------------------------------- */
 
+/* The number of WARN()s that fired since the layer loaded (tests read it). */
+volatile uint64_t lkpi_warnings;
+
 void
 lkpi_warn(const char *file, int line, const char *fmt, ...)
 {
@@ -959,6 +962,7 @@ lkpi_warn(const char *file, int line, const char *fmt, ...)
 	va_list ap;
 	size_t len;
 
+	atomic_inc_64(&lkpi_warnings);
 	msg[0] = '\0';
 	if (fmt != NULL) {
 		va_start(ap, fmt);
