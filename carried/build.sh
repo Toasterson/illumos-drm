@@ -107,8 +107,9 @@ done
 CPPFLAGS="-D_KERNEL -D_SYSCALL32 -D_SYSCALL32_IMPL -D_ELF64 -D_DDI_STRICT"
 CPPFLAGS="$CPPFLAGS -Dsun -D__sun -D__SVR4 -D_ASM_INLINES"
 # The Linux configuration of the carried code (Linux passes its Kconfig on
-# the command line as well): x86-64. CONFIG_LKPI_STRUCT_PAGE stays
-# undefined until R5c's page model exists (carried/drm_cache/patches).
+# the command line as well): x86-64. CONFIG_LKPI_STRUCT_PAGE and
+# CONFIG_LKPI_IOSYS_MAP stay undefined until R5c's page and iosys-map
+# models exist (carried/drm_cache/patches).
 CPPFLAGS="$CPPFLAGS -DCONFIG_X86=1 -DCONFIG_X86_64=1"
 # Carried Linux headers, then linuxkpi's linux/*.h, then the facade's
 # drm/*.h (drm_print.h and the base types), then the system headers.

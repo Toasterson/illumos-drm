@@ -1550,13 +1550,15 @@ and dual-licensed files may be vendored, GPL-only ones may not (the script
 refuses them, and files `SOURCES` does not list). `drm_mm` builds without
 a change: `CONFIG_DRM_DEBUG_MM` is off (its stack depot is GPL-2.0-only),
 and every difference from Linux lives in the compatibility headers.
-`drm_cache` has one patch, which only adds conditionals: its page,
-scatterlist, swiotlb and write-combining-copy functions need R5c's
-`struct page`, `sg_table` and `iosys_map`, so they and their headers are
+`drm_cache` has one patch, which only adds conditionals: its page and
+scatterlist functions need R5c's `struct page` and `sg_table` and are
 built only with `CONFIG_LKPI_STRUCT_PAGE`, which R5c's layer defines once
-those exist; then `drm_clflush_sg` (which i915 imports) compiles
-unchanged, joins the mapfiles and the patch can go. Until then the module
-builds `drm_clflush_virt_range` alone. Linux's fallback for processors
+those exist (then `drm_clflush_sg`, which i915 imports, compiles unchanged
+and joins the mapfiles); its swiotlb and write-combining-copy functions
+need `iosys_map`, Xen and memory-encryption state, static keys and the
+kernel FPU, which i915's headless build does not use, and are built only
+with `CONFIG_LKPI_IOSYS_MAP`. Until then the module builds
+`drm_clflush_virt_range` alone; with both defined the patch can go. Linux's fallback for processors
 without CLFLUSH, `wbinvd_on_all_cpus()`, has no definition here: CLFLUSH
 is a constant true after `_init`'s check, the compiler drops the call, and
 the `-z defs` link would fail if it did not. The configuration of the
