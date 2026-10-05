@@ -10,8 +10,9 @@ use core::ptr::{self, NonNull};
 
 use ddi::sys;
 use ddi::{DmaAttr, Errno, IntrPriority, OwnNode};
+use drm_core::Device;
 use drm_core::driver::BUS_ID_MAX;
-use drm_core::{Device, ModeConfig};
+use drm_core::lkms::LkmsHooks;
 use drm_facade_sys as f;
 
 use crate::cdriver::CDriver;
@@ -120,14 +121,11 @@ pub unsafe extern "C" fn drm_dev_illumos_set_mode_config(
         return neg(Errno::EINVAL);
     }
     // SAFETY: the caller's structure.
-    let c = unsafe { &*cfg };
-    let m = ModeConfig {
-        cursor_width: c.cursor_width,
-        cursor_height: c.cursor_height,
-        preferred_depth: c.preferred_depth,
-        prefer_shadow: c.prefer_shadow,
-        fb_modifiers: c.fb_modifiers,
-    };
+    let mut m = crate::cdriver::mode_config_of(unsafe { &*cfg });
+    // The core's mode setting (R3) has no asynchronous flips; a Linux-KMS
+    // device reports its own through the KMS code's mode_config hook,
+    // which replaces this configuration at registration.
+    m.async_page_flip = false;
     // SAFETY: not registered; the driver's attach is the only user.
     unsafe { core.set_mode_config(m) };
     0
@@ -144,16 +142,40 @@ pub unsafe extern "C" fn drm_dev_register(dev: *mut f::drm_device, flags: u64) -
     if flags != 0 {
         return neg(Errno::EINVAL);
     }
+    // The features are the device's (Linux's drm_core_check_feature()
+    // reads drm_device.driver_features, which a driver may change before
+    // registering: i915 clears DRIVER_MODESET on hardware without a
+    // display). A Linux-KMS driver's mode setting does not start here but
+    // in drm_dev_illumos_lkms_register() (ffi::lkms).
+    // SAFETY: the caller's live device, not registered: nothing else
+    // reads the settings yet.
+    let driver_features = unsafe { (*dev).driver_features };
+    // SAFETY: as above.
+    unsafe { core.set_features(crate::devcore::features(core.table, driver_features)) };
     if let Some(k) = &core.kms {
         k.bind(core);
     }
+    match register_device(dev, core, &ctx) {
+        Ok(_) => 0,
+        Err(e) => neg(e),
+    }
+}
+
+/// The registration proper: the core device with its minor nodes,
+/// published for facade calls and in the device table. Returns the
+/// published device.
+fn register_device(
+    dev: *mut f::drm_device,
+    core: &DevCore,
+    ctx: &ddi::Sleepable,
+) -> Result<*mut Device<CDriver>, Errno> {
     // SAFETY: the driver passed its own node to drm_dev_alloc in its
     // attach(9E), which is still running (registration belongs there); the
     // node outlives the registration, which its detach(9E) ends.
     let node = unsafe { OwnNode::from_raw(core.dip.as_raw()) };
-    let d = match Device::attach(node, CDriver::new(NonNull::from(core)), &ctx) {
+    let d = match Device::attach(node, CDriver::new(NonNull::from(core)), ctx) {
         Ok(d) => Box::new(d),
-        Err(_) => return neg(Errno::EINVAL),
+        Err(_) => return Err(Errno::EINVAL),
     };
     let index = d.index();
     // SAFETY: the minor descriptors live in the state; nothing reads them
@@ -184,7 +206,7 @@ pub unsafe extern "C" fn drm_dev_register(dev: *mut f::drm_device, flags: u64) -
     // SAFETY: just published, alive until unregistered.
     crate::table::publish(unsafe { &*raw });
     core.setup.lock().registered = true;
-    0
+    Ok(raw)
 }
 
 /// The bus ID as the device reports it, for `drm_device.unique`.
@@ -233,10 +255,12 @@ pub(crate) unsafe fn unregister(dev: *mut f::drm_device, core: &DevCore) -> i32 
         }
         d.index()
     };
-    // Out of the device table (no entry point finds it any more), then out
-    // of the facade (waiting for every call that uses it), then torn down
-    // and freed.
+    // Out of the device table (no entry point finds it any more), then the
+    // KMS code's unregister_dev (facade 2.0; once, and not again after an
+    // unplug ran it), then out of the facade (waiting for every call that
+    // uses it), then torn down and freed with the minor nodes.
     crate::table::withdraw(index);
+    lkms_unregister(core, &ctx);
     let raw = core.withdraw();
     if raw.is_null() {
         return neg(Errno::EINVAL);
@@ -293,7 +317,23 @@ pub unsafe extern "C" fn drm_dev_illumos_unplug(dev: *mut f::drm_device) -> i32 
         return neg(Errno::EBUSY);
     }
     core.setup.lock().unplugged = true;
+    drop(d);
+    // Facade 2.0: Linux's drm_dev_unplug() unregisters at once, the mode
+    // setting included (drm_modeset_unregister_all), while the driver's
+    // KMS state still exists; the driver's remove() and release, which
+    // free it, follow, and the last put's unregistration owes nothing more.
+    // SAFETY: documented for detach(9E), thread context.
+    lkms_unregister(core, &unsafe { super::sleepable() });
     0
+}
+
+/// The KMS code's unregister_dev of a Linux-KMS device, if it is owed.
+pub(crate) fn lkms_unregister(core: &DevCore, ctx: &ddi::Sleepable) {
+    let mut reg = ::core::mem::take(&mut core.setup.lock().lkms_reg);
+    if reg.is_registered() {
+        let drv = CDriver::new(NonNull::from(core));
+        reg.unregister(&drv as &dyn LkmsHooks, ctx);
+    }
 }
 
 #[unsafe(no_mangle)]

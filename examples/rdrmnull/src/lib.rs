@@ -831,6 +831,8 @@ impl Driver for RDrmNull {
                 preferred_depth: 24,
                 prefer_shadow: true,
                 fb_modifiers: true,
+                // R3 has no asynchronous page flips.
+                async_page_flip: false,
             }),
             unique: None,
         };

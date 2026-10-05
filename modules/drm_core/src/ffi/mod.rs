@@ -13,12 +13,14 @@
 //! it (their callers are ioctl handlers, attach and detach); the few that
 //! a driver may call from an interrupt handler (`dma_fence_signal`,
 //! `dma_fence_put`, `drm_gem_object_put`, ...) ask illumos-ddi which
-//! context they run in.
+//! context they run in; the event functions of `drm_lkms.h` never block
+//! in either.
 
 pub(crate) mod device;
 pub(crate) mod fence;
 pub(crate) mod gem;
 pub(crate) mod illumos;
+pub(crate) mod lkms;
 pub(crate) mod managed;
 pub(crate) mod prime;
 pub(crate) mod print;

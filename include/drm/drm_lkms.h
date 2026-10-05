@@ -34,11 +34,12 @@ struct drm_illumos_mode_config;
 
 /*
  * The hooks of a Linux KMS implementation (drm_driver.illumos_lkms). The
- * core uses them for a device whose drm_device.driver_features has
- * DRIVER_MODESET when drm_dev_register() runs; otherwise the mode-setting
- * ioctls fail with EOPNOTSUPP as for a render-only driver. Every hook runs
- * in thread context without core locks held. Required: ioctl, file_open,
- * file_close, register_dev, unregister_dev, mode_config.
+ * core uses them once drm_dev_illumos_lkms_register() (below) has started
+ * mode setting on the device; before that, and for a device it does not
+ * start, the mode-setting ioctls fail with EOPNOTSUPP and GET_CAP and
+ * SET_CLIENT_CAP answer as for a device without DRIVER_MODESET. Every
+ * hook runs in thread context without core locks held. Required: ioctl,
+ * file_open, file_close, register_dev, unregister_dev, mode_config.
  *
  * ioctl	a mode-setting ioctl of the core's mode-setting table
  *		(DRM_IOCTL_MODE_*, WAIT_VBLANK, MODESET_CTL,
@@ -51,25 +52,35 @@ struct drm_illumos_mode_config;
  *		implementation does not know).
  * file_open	after the core set the file up, before the driver's open:
  *		initialise the file's KMS area (framebuffer and blob lists,
- *		pending events). A negative errno fails the open.
- * file_close	at close(9E), before the core releases the file's GEM
+ *		pending events). A negative errno fails the open. Only for
+ *		files opened after mode setting started; a file opened before
+ *		gets none of the hooks and EOPNOTSUPP for the mode-setting
+ *		ioctls.
+ * file_close	at close(9E) of a file file_open accepted, before the core
+ *		releases the file's GEM
  *		handles and calls the driver's postclose: unlink the file's
  *		pending events, remove its framebuffers and user blobs
  *		(Linux's drm_file_free() order).
  * lastclose	after the last open file of the device closed (Linux's
  *		drm_lastclose()). Optional.
- * register_dev	at the end of a successful drm_dev_register(), the minor
- *		nodes exist (Linux's drm_modeset_register_all()). A negative
- *		errno makes drm_dev_register() undo the registration and fail.
+ * register_dev	in drm_dev_illumos_lkms_register(), after mode_config; the
+ *		device is registered and its minor nodes exist (Linux's
+ *		drm_modeset_register_all()). A negative errno fails
+ *		drm_dev_illumos_lkms_register(): mode setting stays off, the
+ *		device stays registered.
  * unregister_dev
- *		in a drm_dev_unregister() that is going to succeed, before
- *		the minor nodes go (Linux's drm_modeset_unregister_all()).
+ *		once, if register_dev succeeded: in a drm_dev_unregister()
+ *		that is going to succeed, before the minor nodes go, or in a
+ *		successful drm_dev_illumos_unplug() (Linux's
+ *		drm_modeset_unregister_all() in drm_dev_unregister() and
+ *		drm_dev_unplug()).
  * mode_config	fills in the mode-setting limits GET_CAP reports (cursor
  *		size, preferred depth, shadow preference, modifiers,
  *		asynchronous flips) from the KMS code's configuration
- *		(Linux's drm_mode_config); called once by drm_dev_register()
- *		before register_dev, instead of the driver calling
- *		drm_dev_illumos_set_mode_config(). Required.
+ *		(Linux's drm_mode_config); called once by
+ *		drm_dev_illumos_lkms_register() before register_dev, instead
+ *		of the driver calling drm_dev_illumos_set_mode_config().
+ *		Required.
  */
 struct drm_illumos_lkms_funcs {
 	int (*ioctl)(struct drm_device *dev, unsigned int nr, void *data,
@@ -82,6 +93,25 @@ struct drm_illumos_lkms_funcs {
 	void (*mode_config)(struct drm_device *dev,
 	    struct drm_illumos_mode_config *out);
 };
+
+/*
+ * Starts Linux mode setting on a registered device (Linux's
+ * drm_dev_register() as far as mode setting goes: the LinuxKPI layer
+ * calls it where the driver calls drm_dev_register(), once the driver's
+ * mode configuration exists and it has settled drm_device.driver_features).
+ * drm_dev_register() never starts it. If the device's driver_features has
+ * DRIVER_MODESET and its table has illumos_lkms: mode_config (the GET_CAP
+ * limits), register_dev, and from then on the mode-setting ioctls of
+ * files opened afterwards go to the ioctl hook; GET_CAP and
+ * SET_CLIENT_CAP follow driver_features (DRIVER_MODESET, DRIVER_ATOMIC)
+ * as read here. Returns 0 (also when the device has no DRIVER_MODESET or
+ * no illumos_lkms: then nothing is done), -EINVAL for a device that is
+ * not registered (or unplugged), -EBUSY for a second call or while a file
+ * of the device is open (the call is not counted then), or register_dev's
+ * negative errno (mode setting stays off; the device stays registered).
+ * Thread context, no core locks held.
+ */
+extern int drm_dev_illumos_lkms_register(struct drm_device *dev);
 
 /*
  * Events of a Linux-KMS device's files. These may be called in thread

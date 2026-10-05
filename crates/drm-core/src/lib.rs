@@ -30,6 +30,10 @@
 //! and `poll(2)`, and EDID parsing, for drivers that implement
 //! [`kms::KmsDriver`] and return it from [`Driver::kms`].
 //!
+//! Since facade 2.0 a C driver may do its mode setting with Linux's KMS
+//! code instead ([`lkms`]): the core forwards the mode-setting ioctls to it
+//! and keeps the files, their event queues and the client capabilities.
+//!
 //! The handle and name tables are `alloc::collections::BTreeMap`s, so the
 //! driver module must provide a global allocator: enable the
 //! `global-alloc-sleep` feature of the `ddi` crate, as `rdrmnull` does. The
@@ -93,6 +97,8 @@ mod kmem;
 pub mod kms;
 pub mod ksync;
 pub mod kvec;
+#[cfg(feature = "kernel")]
+pub mod lkms;
 #[cfg(feature = "kernel")]
 pub mod managed;
 #[cfg(feature = "kernel")]

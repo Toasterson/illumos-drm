@@ -350,6 +350,8 @@ impl<D: Driver> Tables for D {
         illumos_before_detach: Some(before_detach_thunk::<D>),
         illumos_before_teardown: Some(before_teardown_thunk::<D>),
         illumos_rkms: if D::KMS { kms::funcs::<D>() } else { ptr::null() },
+        // Linux's KMS code in C (drm_lkms.h) is for C drivers only.
+        illumos_lkms: ptr::null(),
     };
 }
 

@@ -171,6 +171,20 @@ impl ArgIo for CoreArg<'_> {
     }
 }
 
+impl crate::lkms::StructArg for CoreArg<'_> {
+    fn size_plan(&self) -> SizePlan {
+        self.plan
+    }
+    unsafe fn copy_in(&self, dst: *mut u8, len: usize) -> Result<(), Errno> {
+        // SAFETY: the caller's contract is copy_in_struct's.
+        unsafe { self.copy_in_struct(dst, len) }
+    }
+    unsafe fn copy_out(&self, src: *const u8, len: usize) -> Result<(), Errno> {
+        // SAFETY: as above.
+        unsafe { self.copy_out_struct(src, len) }
+    }
+}
+
 /// A `#[repr(C)]` uAPI structure for which every bit pattern is a valid
 /// value: integers and raw pointers only.
 ///

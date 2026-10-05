@@ -53,6 +53,7 @@ const MINE: [(usize, &str); N] = {
         drm_rkms_fb_info => DRM_FACADE_SZ_drm_rkms_fb_info,
         drm_rkms_rect => DRM_FACADE_SZ_drm_rkms_rect,
         drm_printer => DRM_FACADE_SZ_drm_printer,
+        drm_illumos_lkms_funcs => DRM_FACADE_SZ_drm_illumos_lkms_funcs,
     }
     // The private tails: the last field of each structure, so its size is
     // what follows its offset.

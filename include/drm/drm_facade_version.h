@@ -28,8 +28,9 @@
  * (dma_resv_init/fini, dma_resv_get_fences, transactions in
  * dma_resv_lock); 2.0 (R5i, i915n display) Linux mode setting carried
  * in C: the KMS areas of drm_device and drm_file, the client-capability
- * booleans of drm_file, drm_driver.illumos_lkms and drm_lkms.h's hooks
- * and event functions, drm_illumos_mode_config.async_page_flip.
+ * booleans of drm_file, drm_driver.illumos_lkms and drm_lkms.h's hooks,
+ * drm_dev_illumos_lkms_register and the event functions,
+ * drm_illumos_mode_config.async_page_flip.
  */
 
 #ifndef _DRM_FACADE_VERSION_H
