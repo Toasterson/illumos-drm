@@ -1,0 +1,36 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 12] i915: mode setting through misc/drm_kms
+
+On illumos the DRM core (misc/drm_core) owns the ioctl entry, files and
+events, and forwards the mode-setting ioctls of a Linux-KMS device to
+Linux's KMS code, which misc/drm_kms carries (facade 2.0, drm_lkms.h).
+The display build of i915n (I915N_DISPLAY, drivers/i915/build.sh) points
+the driver table's illumos_lkms at misc/drm_kms' hook table. The core
+uses it only if the device still has DRIVER_MODESET when the LinuxKPI
+layer's drm_dev_register() starts mode setting: a platform without
+display (patch 0011) has cleared it by then and stays headless. The
+headless build (I915_DISPLAY=0) leaves the hook out and does not link
+against misc/drm_kms.
+
+--- a/drivers/gpu/drm/i915/i915_driver.c
++++ b/drivers/gpu/drm/i915/i915_driver.c
+@@ -1888,11 +1888,19 @@
+ #define DRIVER_MAJOR		1
+ #define DRIVER_MINOR		6
+ #define DRIVER_PATCHLEVEL	0
++
++#if defined(__illumos__) && defined(I915N_DISPLAY)
++/* misc/drm_kms: Linux's KMS code behind the DRM core (facade 2.0). */
++extern const struct drm_illumos_lkms_funcs drm_kms_illumos_funcs;
++#endif
+ 
+ static const struct drm_driver i915_drm_driver = {
+ #ifdef __illumos__
+ 	DRM_FACADE_DRIVER_VERSION,
+ #endif
++#if defined(__illumos__) && defined(I915N_DISPLAY)
++	.illumos_lkms = &drm_kms_illumos_funcs,
++#endif
+ 	.driver_features =
+ 	    DRIVER_GEM |
+ 	    DRIVER_RENDER | DRIVER_MODESET | DRIVER_ATOMIC | DRIVER_SYNCOBJ |

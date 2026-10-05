@@ -2,10 +2,11 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * The illumos module of Linux's i915 driver (headless build): the kernel
- * module "i915n" (the name G7 reserved for this stack's Intel driver; its
- * package ships the driver without PCI aliases and `drmadm select new`
- * moves the Intel GPU aliases to it).
+ * The illumos module of Linux's i915 driver: the kernel module "i915n"
+ * (the name G7 reserved for this stack's Intel driver; its package ships
+ * the driver without PCI aliases and `drmadm select new` moves the Intel
+ * GPU aliases to it), with display on Ivy Bridge (build.sh's default) or
+ * headless (I915_DISPLAY=0).
  *
  * _init checks the DRM facade and the LinuxKPI layer it was built
  * against, runs i915's module_init (which registers its struct pci_driver
@@ -16,7 +17,7 @@
  *
  * Also here: the GEM handle lookups patch 0003 routes to the DRM core,
  * the user mappings of patch 0005, and the display-engine interrupt
- * registers that patch 0006 needs without the display code.
+ * registers that patch 0006 needs on a device without display.
  */
 
 #include <linux/pci.h>
@@ -29,6 +30,9 @@
 #include "i915_irq.h"
 #include "intel_uncore.h"
 #include "gem/i915_gem_object.h"
+#include "display/intel_display_core.h"
+#include "display/intel_display_device.h"
+#include "display/intel_display_irq.h"
 
 extern int lkpi_module_init(void);
 extern void lkpi_module_exit(void);
@@ -74,7 +78,11 @@ static struct dev_ops i915n_dev_ops = {
 
 static struct modldrv i915n_modldrv = {
 	.drv_modops = &mod_driverops,
+#ifdef I915N_DISPLAY
+	.drv_linkinfo = "Intel GPU (Linux i915)",
+#else
 	.drv_linkinfo = "Intel GPU (Linux i915, headless)",
+#endif
 	.drv_dev_ops = &i915n_dev_ops,
 };
 
@@ -278,9 +286,14 @@ i915_illumos_mmap_offset(struct drm_i915_gem_object *obj,
  * GT's included, is DE_MASTER_IRQ_CONTROL in DEIER, a display-engine
  * register; on gen8+ the display engine has interrupt registers of its
  * own that must be quiet when the master enable is set. The display code
- * that owns them is not built (headless): these keep the display sources
- * masked and disabled, and run the master enable as i915's display code
- * would. Register offsets as in Linux's display/intel_display_regs.h.
+ * owns them, but does nothing with them on a device without display: the
+ * headless build (its display functions are stubs) and, in the display
+ * build, every platform but Ivy Bridge (patch 0011). There these keep
+ * the display sources masked and disabled, and run the master enable as
+ * i915's display code would. With a display, Linux's display code does
+ * all of it: the reset and postinstall here do nothing, the handler's
+ * master disable/enable are Linux's. Register offsets as in Linux's
+ * display/intel_display_regs.h.
  */
 #define	ILLUMOS_DEIMR		_MMIO(0x44004)
 #define	ILLUMOS_DEIIR		_MMIO(0x44008)
@@ -309,6 +322,13 @@ illumos_irq_regs(i915_reg_t imr, i915_reg_t ier, i915_reg_t iir)
 	return (r);
 }
 
+/* Whether i915's display code handles the display interrupts itself. */
+static bool
+illumos_has_display(struct drm_i915_private *i915)
+{
+	return (HAS_DISPLAY(i915->display));
+}
+
 /* The south display engine (PCH) exists on every platform these run on. */
 static bool
 illumos_has_pch(struct drm_i915_private *i915)
@@ -323,6 +343,8 @@ i915_illumos_de_irq_reset(struct drm_i915_private *i915)
 {
 	struct intel_uncore *uncore = &i915->uncore;
 
+	if (illumos_has_display(i915))
+		return;
 	gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_DEIMR, ILLUMOS_DEIER,
 	    ILLUMOS_DEIIR));
 	if (GRAPHICS_VER(i915) == 7)
@@ -341,6 +363,8 @@ i915_illumos_de_irq_reset(struct drm_i915_private *i915)
 void
 i915_illumos_de_irq_postinstall(struct drm_i915_private *i915)
 {
+	if (illumos_has_display(i915))
+		return;
 	gen2_irq_init(&i915->uncore, illumos_irq_regs(ILLUMOS_DEIMR,
 	    ILLUMOS_DEIER, ILLUMOS_DEIIR), 0xffffffff, ILLUMOS_DE_MASTER);
 }
@@ -352,6 +376,10 @@ i915_illumos_de_master_disable(struct drm_i915_private *i915, u32 *de_ier,
 {
 	struct intel_uncore *uncore = &i915->uncore;
 
+	if (illumos_has_display(i915)) {
+		ilk_display_irq_master_disable(i915->display, de_ier, sde_ier);
+		return;
+	}
 	*de_ier = intel_uncore_read_fw(uncore, ILLUMOS_DEIER);
 	intel_uncore_write_fw(uncore, ILLUMOS_DEIER,
 	    *de_ier & ~ILLUMOS_DE_MASTER);
@@ -368,6 +396,10 @@ i915_illumos_de_master_enable(struct drm_i915_private *i915, u32 de_ier,
 {
 	struct intel_uncore *uncore = &i915->uncore;
 
+	if (illumos_has_display(i915)) {
+		ilk_display_irq_master_enable(i915->display, de_ier, sde_ier);
+		return;
+	}
 	intel_uncore_write_fw(uncore, ILLUMOS_DEIER, de_ier);
 	if (sde_ier != 0)
 		intel_uncore_write_fw(uncore, ILLUMOS_SDEIER, sde_ier);
@@ -385,6 +417,8 @@ i915_illumos_gen8_de_irq_reset(struct drm_i915_private *i915)
 {
 	struct intel_uncore *uncore = &i915->uncore;
 
+	if (illumos_has_display(i915))
+		return;
 	gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_GEN8_DE_PIPE_A_IMR,
 	    ILLUMOS_GEN8_DE_PIPE_A_IER, ILLUMOS_GEN8_DE_PIPE_A_IIR));
 	gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_GEN8_DE_PORT_IMR,

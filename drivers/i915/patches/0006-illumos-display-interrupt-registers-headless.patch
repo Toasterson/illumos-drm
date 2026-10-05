@@ -1,15 +1,20 @@
 From: illumos-drm <illumos-drm@code.aopc.cloud>
-Subject: [PATCH 06] i915: display-engine interrupt registers without the display code
+Subject: [PATCH 06] i915: display-engine interrupt registers without a display
 
-The headless build leaves out the display code, which owns the display
-engine's interrupt registers. On gen5 to gen7 (ILK..HSW) the master
-enable of every interrupt, the GT's included, is DE_MASTER_IRQ_CONTROL
-in DEIER: without the display code nothing sets it, and an Ivy Bridge
-GPU (ThinkPad X230) would never interrupt. On gen8+ the display
-registers must be quiet before the master interrupt is enabled. The
-reset, postinstall and the handler's master disable/enable call
-drivers/i915/illumos/i915_illumos.c instead, which keeps every display
-source masked and only sets the master enable.
+The display code owns the display engine's interrupt registers, and does
+nothing with them on a device without display (!HAS_DISPLAY): the
+headless build (no display code at all) and, in the display build, every
+platform but Ivy Bridge (patch 0011). On gen5 to gen7 (ILK..HSW) the
+master enable of every interrupt, the GT's included, is
+DE_MASTER_IRQ_CONTROL in DEIER: without the display code nothing sets
+it, and the GPU would never interrupt (an Ivy Bridge, ThinkPad X230,
+headless). On gen8+ the display registers must be quiet before the
+master interrupt is enabled. The reset, postinstall and the handler's
+master disable/enable also call drivers/i915/illumos/i915_illumos.c,
+which on a device without display keeps every display source masked and
+only sets the master enable, and on a device with display does nothing
+beyond Linux's own calls (reset, postinstall) or calls Linux's
+ilk_display_irq_master_disable()/_enable() (the handler).
 
 --- a/drivers/gpu/drm/i915/i915_irq.c
 +++ b/drivers/gpu/drm/i915/i915_irq.c
@@ -19,7 +24,7 @@ source masked and only sets the master enable.
   */
 +#ifdef __illumos__
 +/*
-+ * The display-engine interrupt registers, without the display code
++ * The display-engine interrupt registers on a device without display
 + * (drivers/i915/illumos/i915_illumos.c).
 + */
 +extern void i915_illumos_de_irq_reset(struct drm_i915_private *i915);
