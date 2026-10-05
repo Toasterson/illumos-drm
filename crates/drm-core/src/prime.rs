@@ -17,9 +17,9 @@
 //! accepted and does nothing, as the memory is coherent.
 //!
 //! `PRIME_FD_TO_HANDLE` imports a dma-buf of the same device: it returns
-//! the handle the calling file already has for the object, or creates one
-//! (Linux's same-device fast path). A dma-buf of another device of the
-//! same driver is `ENOTSUP`, because importing across devices needs the
+//! the handle the calling file already has for the object, with no driver
+//! hook, or creates one (Linux's same-device fast path). A dma-buf of
+//! another device of the same driver is `ENOTSUP`, because importing across devices needs the
 //! attach and scatter/gather mapping of a real import, which no driver has
 //! yet; a descriptor that is not a dma-buf is `EINVAL`, a closed one
 //! `EBADF`. The `flags` field must be 0 (Linux ignores it; nothing else
@@ -132,30 +132,29 @@ impl<O: GemObject> SyncCore<O> {
                 return Err(Errno::EINVAL);
             }
         };
-        let obj = if KArc::ptr_eq(obj.core(), gem) {
-            obj
+        // As Linux's drm_gem_prime_fd_to_handle: a file that holds the
+        // object already gets its handle back and no driver hook runs, so
+        // the import cannot take anything away from that handle (DRI3
+        // imports buffers the X server holds).
+        let handle = if KArc::ptr_eq(obj.core(), gem) {
+            gem.import_handle(c, |r| r.same(&obj), |_| Ok(obj.clone()), ctx)
         } else {
             // Another device's buffer (R5a: every device is served by the
-            // one core module). As Linux's drm_gem_prime_fd_to_handle, a
-            // file that imported it before gets its handle again;
-            // otherwise the driver makes an object of this device for it
-            // (gem_prime_import). Two threads of one file importing the same
-            // buffer at once may each make one; Linux serialises that with
-            // the file's PRIME lock.
-            let mine = gem.handle_find(c, |r| r.object().imported_from().is_some_and(|e| e.same(&obj)));
-            if let Some(h) = mine {
-                obj.put(ctx);
-                // SAFETY: a field assignment.
-                unsafe { a.get_mut() }.handle = h;
-                return a.write(arg);
-            }
-            let imported = dev.driver().prime_import(dev, &obj, ctx);
-            obj.put(ctx);
-            imported?
+            // one core module). A file that imported it before gets that
+            // import's handle; otherwise the driver makes an object of this
+            // device for it (gem_prime_import), with the file's hook lock
+            // held, so two threads of one file importing the same buffer at
+            // once get one object.
+            gem.import_handle(
+                c,
+                |r| r.object().imported_from().is_some_and(|e| e.same(&obj)),
+                |ctx| dev.driver().prime_import(dev, &obj, ctx),
+                ctx,
+            )
         };
-        let handle = gem.handle_find_or_create(c, obj, ctx)?;
+        obj.put(ctx);
         // SAFETY: a field assignment.
-        unsafe { a.get_mut() }.handle = handle;
+        unsafe { a.get_mut() }.handle = handle?;
         a.write(arg)
     }
 

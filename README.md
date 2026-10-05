@@ -280,6 +280,37 @@ were tested on the host and linked on illumos, and wait for the next
 guest run, as does `cargo xtask kernel-check` with `misc/drm_minor`
 loaded (R5a's guest runs covered both, on `misc/drm_core`).
 
+G8 (a re-import no longer detaches a buffer; see *Driver hooks per file
+and object (G8)*), 3 October 2026, on a fresh guest of `golden-20260930`
+(illumos `7e802e88a3`, libdrm 2.4.134) with `-device virtio-gpu-gl-pci`:
+at commit `c2ea15b`, `tools/test/run-g8-test.sh` passed with
+`drm_g8_test` at 143 checks and none failed: on `cdrmnull`, `rdrmnull`
+and `virtio_gpu`, a file that imports its own buffer twice gets its own
+handle and the `gem` kstat's handles, attachments, objects, memory and
+open-hook calls do not move; a second file's double import adds one
+handle, one attachment and one open; `GEM_OPEN` and `MODE_GETFB` add a
+second handle and no attachment; each other driver's double import makes
+one import object. On `virtio_gpu` (virgl), after the server file and a
+client file each imported a 1024x768 texture twice, the server's virgl
+clear and a `TRANSFER_TO_HOST` round trip through its first handle read
+back exactly, the texture shown with `SETCRTC` and flushed with
+`DIRTYFB` (`RESOURCE_FLUSH`) appeared in a host screendump, and the
+client's drawing and its close left the server's context intact; QEMU
+logged nothing. With the archives of the base `2306e85` and the same
+test, 53 checks failed: the server's clear and transfers read back the
+old contents, the display stayed red, and virglrenderer logged "Illegal
+resource". `run-r5a-test.sh` (R0 to R4, G6, R5a, three reattach orders,
+R1 with two `cdrmnull` devices) passed with 167 checks, among them
+`drm_r1_test`'s second handle by `GEM_OPEN`. After a `pkg update` to
+osnet 23298 (illumos `2cafbda106`) and G3's Mesa 25.3.6, G3's two-process
+reproducer `tools/test/dmabuf_import_test.c` passed in all three modes
+(import twice, once, draw first) and failed with the base's archives
+exactly as G3 saw it (the importer's drawing into the twice-imported
+buffer lost). Xorg's DRI3 path itself (`dri3_probe` of G4) could not be
+run: OpenIndiana's xorg-server 1.19.7 needs `EGL_MESA_drm_image` for
+glamor, which Mesa removed in 25.2. Logs:
+`logs/hephaistos/illumos-drm/20261003-g8-*` in the workspace.
+
 ## What is in the repository
 
 `crates/drm-uapi` is the DRM userland interface as Rust types: the
@@ -764,8 +795,9 @@ file, `devmap(9E)` maps a dma-buf, and imports find the object by minor.
 [docs/anon-fd.md](docs/anon-fd.md) gives the design, the alternatives
 and why. `PRIME_HANDLE_TO_FD` honours `DRM_CLOEXEC` and `DRM_RDWR` and
 gives one dma-buf per object; `PRIME_FD_TO_HANDLE` returns the calling
-file's existing handle or creates one, for dma-bufs of the same device
-(`ENOTSUP` for another device of the driver, because importing across
+file's existing handle (with no driver hook, since G8) or creates one,
+for dma-bufs of the same device (`ENOTSUP` for another device of the
+driver, because importing across
 devices needs an attach and a scatter/gather mapping no driver has yet;
 `EINVAL` for other files). Sync files answer `SYNC_IOC_MERGE` and
 `SYNC_IOC_FILE_INFO`, dma-bufs `DMA_BUF_IOCTL_SYNC`: the start of CPU
@@ -1185,7 +1217,43 @@ Linux. PRIME import between devices of
 different drivers is supported and returns the exporter's object (one
 handle per object per file), which R2 refused with `ENOTSUP`; a C
 driver's import of another device's buffer exports that buffer again,
-as on Linux.
+as on Linux. An object's `funcs->open` and `funcs->close` run once per
+file and object (the file's first handle in, its last handle out), not
+once per handle as on Linux; see *Driver hooks per file and object (G8)*.
+
+**Driver hooks per file and object (G8).** Until G8,
+`PRIME_FD_TO_HANDLE` of an object the calling file held already ran the
+driver's open hook before looking for the file's handle and, on finding
+it, undid the hook with the close hook. `virtio_gpu`'s hooks attach the
+resource to the file's virgl context and detach it, and the host does not
+count attachments, so the undo detached the resource from the context of
+the handle the file already had: after Xorg's DRI3 `PixmapFromBuffer` of
+its own front buffer, glamor's context lost the buffer (virglrenderer:
+"Illegal resource") and the screen stayed black (G3 and G4 found it with
+Mesa's dma-buf import). Linux's per-handle callbacks would have the same
+effect for a second handle from `GEM_OPEN` or `MODE_GETFB` closed again
+(Linux's virtio-gpu detaches on every close). Now each file's handle
+table (`drm_core::objects::FileTable`) calls the open hook when the file
+gets its first handle to an object and the close hook when its last one
+goes, under a per-file hook lock held across the decision, the hook and
+the change of the table (Linux's per-file PRIME lock). `PRIME_FD_TO_HANDLE`
+looks for the file's handle under that lock first, for buffers of the
+same device and for another driver's (whose import, `gem_prime_import`,
+is now made under the lock too, so two threads of one file importing one
+buffer get one import), and runs no hook when it finds one. `GEM_OPEN`,
+`MODE_GETFB` and `drm_gem_handle_create()` still make a second handle when
+the file holds the object, as Linux does (R1's test checks it, and
+userland that opens a name, reads the size and closes the handle would
+otherwise close its own buffer), but run no hook for it, so closing it
+leaves the attachment alone. A handle creation that fails after the open
+hook ran undoes only that hook; one that fails for an object the file
+held runs none. Drivers that count their open and close calls, as
+Linux's amdgpu, radeon and nouveau do, see the same balance. The `gem`
+kstat counts the file and object pairs whose open hook ran (`attached`)
+and the open hook's calls (`opens`). The host tests in
+`crates/drm-core/src/objects.rs` drive the table from eight threads with
+hooks that assert they alternate; they fail with the old behaviour and
+without the hook lock.
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
@@ -1221,10 +1289,12 @@ entries (`RESOURCE_ATTACH_BACKING`, or the entries of
 (32 bits per pixel only, rows exactly `width` pixels, as the device
 copies 2D resources with their own stride), through the new
 `Driver::dumb_object` hook. With virgl, `RESOURCE_CREATE` makes 3D
-resources; a handle attaches the resource to the file's rendering context
-and removing it detaches it (the new `GemObject::handle_opened` and
-`handle_closed` hooks, Linux's GEM open and close callbacks), and a file's
-context is destroyed in the new `Driver::file_close` hook. An object's
+resources; a file's first handle to an object attaches the resource to the
+file's rendering context and removing its last one detaches it (the new
+`GemObject::handle_opened` and `handle_closed` hooks, Linux's GEM open and
+close callbacks, called once per file and object since G8: see *Driver
+hooks per file and object (G8)*), and a file's context is destroyed in the
+new `Driver::file_close` hook. An object's
 destruction (the new `GemObject::release` hook) sends `RESOURCE_UNREF` and
 frees the memory only after the device answered; without an answer the
 memory is leaked with a warning.

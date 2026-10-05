@@ -136,7 +136,10 @@ extern int devmap_umem_remap(devmap_cookie_t dhp, dev_info_t *dip,
 /* A buffer object: a dumb buffer or a movable test object. */
 struct cdrmnull_bo {
 	struct drm_gem_object base;
-	/* Handles to the object (funcs->open and funcs->close). */
+	/*
+	 * Files with a handle to the object (funcs->open and funcs->close,
+	 * which the core calls once per file and object).
+	 */
 	volatile uint32_t handles;
 	/*
 	 * Movable objects: the backing in use, 0 or 1. Changed only by MOVE
@@ -147,7 +150,7 @@ struct cdrmnull_bo {
 
 /* The per-file state (drm_file.driver_priv). */
 struct cdrmnull_file {
-	/* Handles of this driver's objects on the file. */
+	/* Objects of this driver the file has a handle to. */
 	volatile uint32_t handles;
 	/* Test fences made through the file. */
 	volatile uint32_t fences;

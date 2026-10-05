@@ -128,12 +128,16 @@ pub trait GemObject: Send + Sync + Sized + 'static {
         let _ = (gem, m);
         f.default_access()
     }
-    /// A handle was created on `file`; an error refuses it.
+    /// `file` gets its first handle to the object; an error refuses it.
+    /// Once per file and object, not per handle (see `funcs->open` in
+    /// `include/drm/drm_gem.h`): a second handle, or the import of an
+    /// object the file holds, causes no call.
     fn open(gem: &Gem<Self>, file: &File) -> Result<(), Errno> {
         let _ = (gem, file);
         Ok(())
     }
-    /// The last handle on `file` was closed.
+    /// The last handle on `file` was closed, or the handle [`GemObject::open`]
+    /// was just called for could not be made.
     fn close(gem: &Gem<Self>, file: &File) {
         let _ = (gem, file);
     }

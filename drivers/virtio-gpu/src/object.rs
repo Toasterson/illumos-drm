@@ -14,10 +14,12 @@
 //! (`RESOURCE_CREATE_3D`) or a blob with guest memory (`BLOB_MEM_GUEST`,
 //! `BLOB_MEM_HOST3D_GUEST`).
 //!
-//! With virgl, a handle to an object attaches its resource to the file's
-//! rendering context and removing the handle detaches it
+//! With virgl, a file's first handle to an object attaches its resource to
+//! the file's rendering context and removing its last handle detaches it
 //! (`CTX_ATTACH_RESOURCE`, `CTX_DETACH_RESOURCE`, Linux's GEM open and
-//! close callbacks). When the object is destroyed, `RESOURCE_UNREF` tells
+//! close callbacks, which the core calls once per file and object: the
+//! host does not count attachments, so a second handle or a re-import must
+//! neither attach nor detach again). When the object is destroyed, `RESOURCE_UNREF` tells
 //! the host to drop the resource and its backing, and the driver waits for
 //! the device's answer before the core frees the memory. If the device
 //! does not answer, the warning says so; the core frees the memory anyway,
