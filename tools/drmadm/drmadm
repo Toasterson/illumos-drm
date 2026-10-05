@@ -75,7 +75,8 @@ LEGACY_MODULES="misc/drm drv/i915 drv/radeon"
 NEW_MODULES="misc/drm_core drv/i915n drv/virtio_gpu drv/cdrmnull drv/rdrmnull"
 LEGACY_PKGS="driver/graphics/drm driver/graphics/agpgart"
 NEW_PKGS="driver/graphics/drm-core driver/graphics/virtio-gpu driver/graphics/cdrmnull"
-NEW_PKGS="$NEW_PKGS driver/graphics/linuxkpi driver/graphics/drm-helpers driver/graphics/i915n"
+NEW_PKGS="$NEW_PKGS driver/graphics/linuxkpi driver/graphics/drm-helpers driver/graphics/drm-kms"
+NEW_PKGS="$NEW_PKGS driver/graphics/i915n"
 SHARED_PKGS="driver/graphics/drm-devlink driver/graphics/drmadm x11/library/libdrm"
 
 LOGINDEVPERM=etc/logindevperm
