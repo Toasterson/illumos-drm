@@ -671,6 +671,10 @@ st_test_schedule_hrtimeout(void)
 	    e1 < 1000000000LL);
 	CHECK("schedule_hrtimeout absolute", r2 == 0 && e2 >= 20000000LL &&
 	    e2 < 1000000000LL);
+	if (r2 != 0 || e2 < 20000000LL)
+		pr_info("linuxkpi_selftest: schedule_hrtimeout absolute: "
+		    "r1 %d e1 %lld r2 %d e2 %lld\n", r1, (long long)e1, r2,
+		    (long long)e2);
 	CHECK("schedule_hrtimeout in the past", r3 == 0 &&
 	    task_is_running(current));
 }
@@ -1025,6 +1029,7 @@ static struct st_q {
 	volatile int hold;
 	volatile int kexit;
 	struct completion started;
+	struct completion kstarted;
 	atomic_t runs;
 } st_q;
 
@@ -1050,6 +1055,7 @@ st_q_timer(struct timer_list *t)
 static int
 st_q_kthread(void *arg)
 {
+	complete(&st_q.kstarted);
 	while (!kthread_should_stop())
 		msleep(1);
 	st_q.kexit = 1;
@@ -1070,6 +1076,7 @@ st_test_quiesce(void)
 
 	bzero(q, sizeof (*q));
 	init_completion(&q->started);
+	init_completion(&q->kstarted);
 	atomic_set(&q->runs, 0);
 	INIT_DELAYED_WORK(&q->dw, st_q_work);
 	INIT_WORK(&q->blocker, st_q_blocker);
@@ -1087,6 +1094,9 @@ st_test_quiesce(void)
 	(void) queue_delayed_work(wq, &q->dw, msecs_to_jiffies(10000));
 	(void) mod_timer(&q->t, jiffies + msecs_to_jiffies(10000));
 	q->k = kthread_run(st_q_kthread, NULL, "st_q");
+	/* Linux's kthread_stop() of a thread that never ran skips its body. */
+	if (!IS_ERR(q->k))
+		(void) st_wait(&q->kstarted, ST_WAIT_MS);
 
 	lkpi_module_quiesce_range((const void *)st_q_work, 1);
 	lkpi_module_quiesce_range((const void *)st_q_timer, 1);
@@ -1094,6 +1104,11 @@ st_test_quiesce(void)
 		lkpi_module_quiesce_range((const void *)st_q_kthread, 1);
 	ok = !work_pending(&q->queued) && !delayed_work_pending(&q->dw) &&
 	    !timer_pending(&q->t) && (IS_ERR(q->k) || q->kexit);
+	if (!ok)
+		pr_info("linuxkpi_selftest: quiesce: queued %d delayed %d "
+		    "timer %d kthread %d\n", work_pending(&q->queued),
+		    delayed_work_pending(&q->dw), timer_pending(&q->t),
+		    IS_ERR(q->k) ? -1 : q->kexit);
 	q->hold = 0;
 	flush_workqueue(wq);
 	CHECK("lkpi_module_quiesce_range removes work, timers, kthreads",

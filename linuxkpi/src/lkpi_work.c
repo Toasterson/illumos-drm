@@ -390,6 +390,7 @@ lkpi_wq_free(struct workqueue_struct *wq)
 struct workqueue_struct *
 lkpi_alloc_workqueue(const char *name, unsigned int flags, int max_active)
 {
+	char tqname[TASKQ_NAMELEN + 1];
 	struct workqueue_struct *wq;
 	int i, n;
 
@@ -411,7 +412,8 @@ lkpi_alloc_workqueue(const char *name, unsigned int flags, int max_active)
 	cv_init(&wq->cv, NULL, CV_DRIVER, NULL);
 	(mutex_init)(&wq->flush_lock, NULL, MUTEX_DRIVER, NULL);
 
-	wq->tq = ddi_taskq_create(NULL, wq->name, n,
+	lkpi_taskq_name(tqname, sizeof (tqname), wq->name);
+	wq->tq = ddi_taskq_create(NULL, tqname, n,
 	    (flags & WQ_HIGHPRI) != 0 ? LKPI_PRI_HIGH : TASKQ_DEFAULTPRI, 0);
 	if (wq->tq == NULL) {
 		lkpi_wq_free(wq);

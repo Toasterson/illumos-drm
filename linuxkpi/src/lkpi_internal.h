@@ -87,6 +87,12 @@ extern void lkpi_shrinker_fini(void);
 /* src/lkpi_drm.c: the DRM driver-table copies, the unplug SRCU. */
 extern int lkpi_drm_init(void);
 extern void lkpi_drm_fini(void);
+/*
+ * A task queue name for `base` that no other task queue of the layer has:
+ * illumos names each task queue's kstat after it, and Linux lets kthreads
+ * and workqueues share names (src/lkpi_kthread.c).
+ */
+extern void lkpi_taskq_name(char *buf, size_t len, const char *base);
 /* src/lkpi_resv.c: snapshots of locked walks never unlocked again. */
 extern void lkpi_resv_fini(void);
 

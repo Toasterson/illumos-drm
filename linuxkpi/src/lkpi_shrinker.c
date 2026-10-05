@@ -194,7 +194,7 @@ lkpi_shrinker_init(void)
 	INIT_LIST_HEAD(&lkpi_shrinkers);
 	lkpi_shrink_busy = 0;
 	lkpi_shrink_last = 0;
-	lkpi_shrinker_tq = ddi_taskq_create(NULL, "lkpi_shrinker", 1,
+	lkpi_shrinker_tq = ddi_taskq_create(NULL, "lkpi_shrink_tq", 1,
 	    TASKQ_DEFAULTPRI, 0);
 	if (lkpi_shrinker_tq == NULL) {
 		cv_destroy(&lkpi_shrinker_cv);

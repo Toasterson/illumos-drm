@@ -468,8 +468,13 @@ schedule_hrtimeout(ktime_t *expires, const enum hrtimer_mode mode)
 		__set_current_state(TASK_RUNNING);
 		return (0);
 	}
-	/* Whole jiffies, rounded up: the sleep never ends before target. */
-	j = nsecs_to_jiffies64((u64)(target - now)) + 1;
+	/*
+	 * Until the jiffy that starts at or after target: jiffies count
+	 * whole milliseconds of the same clock, so the sleep never ends
+	 * before target. A wake-up before then is -EINTR, as on Linux.
+	 */
+	j = (u64)target / (NSEC_PER_SEC / HZ) + 1 -
+	    (u64)now / (NSEC_PER_SEC / HZ);
 	if (j >= (u64)MAX_SCHEDULE_TIMEOUT)
 		j = MAX_SCHEDULE_TIMEOUT - 1;
 	(void) schedule_timeout((long)j);
