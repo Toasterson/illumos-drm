@@ -65,6 +65,8 @@ extern crate alloc;
 pub mod anon_fd;
 #[cfg(feature = "kernel")]
 pub mod caps;
+#[cfg(feature = "kernel")]
+pub mod cfence;
 pub mod defer;
 #[cfg(not(test))]
 #[cfg(feature = "kernel")]
@@ -92,6 +94,8 @@ pub mod kms;
 pub mod ksync;
 pub mod kvec;
 #[cfg(feature = "kernel")]
+pub mod managed;
+#[cfg(feature = "kernel")]
 pub mod minor;
 #[cfg(feature = "kernel")]
 pub mod objects;
@@ -99,11 +103,15 @@ pub mod offsets;
 #[cfg(not(test))]
 #[cfg(feature = "kernel")]
 pub mod prime;
+pub mod print;
 pub mod published;
+pub mod refcount;
 #[cfg(feature = "kernel")]
 pub mod resv;
 #[cfg(feature = "kernel")]
 pub mod slots;
+#[cfg(feature = "kernel")]
+mod spinlock;
 #[cfg(feature = "kernel")]
 pub mod state;
 #[cfg(feature = "kernel")]

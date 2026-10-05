@@ -29,6 +29,7 @@ panic-drill = []
 # docs/anon-fd.md).
 ddi = { workspace = true, features = ["unstable-gate-cda5b9a49f"] }
 drm-uapi.workspace = true
+drm-facade-sys.workspace = true
 
 [package.metadata.kmod]
 # The core is the library of the kernel module misc/drm_core (modules/drm_core), the

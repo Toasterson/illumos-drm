@@ -254,12 +254,16 @@ impl Driver for CDriver {
         Ok(r)
     }
 
-    fn before_detach(&self, _ctx: &Sleepable) {
+    fn before_detach(&self, ctx: &Sleepable) {
         let core = self.core();
         if let Some(cb) = core.table.illumos_before_detach {
             // SAFETY: the driver's callback with its device.
             unsafe { cb(core.ddev()) };
         }
+        // Releases of fence structures parked in interrupt context (the
+        // driver's last signals and puts) hold core fences of this device:
+        // run them before the detach counts the device's fences.
+        crate::module_fences().barrier(ctx);
     }
 
     fn before_teardown(&self, _ctx: &Sleepable) {
@@ -309,6 +313,7 @@ fn link_file(core: &DevCore, fp: *mut f::drm_file) {
         (*(*head).prev).next = node;
         (*head).prev = node;
         sys::mutex_exit(ptr::addr_of_mut!((*d).filelist_mutex.m) as *mut sys::kmutex_t);
+        sys::atomic_inc_32(ptr::addr_of_mut!((*d).open_count.counter) as *mut u32);
     }
 }
 
@@ -328,6 +333,7 @@ fn forget_file(core: &DevCore, file: CloneId) {
         (*(*node).prev).next = (*node).next;
         (*(*node).next).prev = (*node).prev;
         sys::mutex_exit(ptr::addr_of_mut!((*d).filelist_mutex.m) as *mut sys::kmutex_t);
+        sys::atomic_dec_32(ptr::addr_of_mut!((*d).open_count.counter) as *mut u32);
         (*fp.as_ptr()).__core[1] = 0;
         drop(Box::from_raw(fp.as_ptr()));
     }

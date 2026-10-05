@@ -13,9 +13,16 @@
  * version and the same or a later minor version, and only if every
  * structure size it was compiled with matches the core's
  * (drm_facade_check() at _init(9E); drm_dev_alloc() checks the version
- * again). Version 0 is the first, unstable version: expect a new major
- * version with every facade milestone (public-layout base objects R5b,
- * the compatibility layer R5c, mode setting R5i).
+ * again). The sizes cover every facade structure and the private tail
+ * (__core) of every structure that has one, so a change of the core's
+ * private state is caught even when it leaves the structure's size alone.
+ *
+ * History: 0.1 (R5a) the first, unstable version; 1.0 (R5b) the
+ * public-layout base objects: Linux v7.2's fence flag numbering (the
+ * signalled bit moved from 2 to 3), drm_device.managed and open_count,
+ * fences and GEM reference counts that are the objects' state,
+ * drm_printer, and the tails in the handshake. Expect a new major version
+ * with the compatibility layer (R5c) and mode setting (R5i).
  */
 
 #ifndef _DRM_FACADE_VERSION_H
@@ -27,8 +34,8 @@
 extern "C" {
 #endif
 
-#define	DRM_FACADE_MAJOR	0
-#define	DRM_FACADE_MINOR	1
+#define	DRM_FACADE_MAJOR	1
+#define	DRM_FACADE_MINOR	0
 
 /*
  * The structures whose sizes are part of the version, in the order of
@@ -62,7 +69,20 @@ extern "C" {
 	X(drm_rkms_plane_state) \
 	X(drm_rkms_connector_state) \
 	X(drm_rkms_fb_info) \
-	X(drm_rkms_rect)
+	X(drm_rkms_rect) \
+	X(drm_printer)
+
+/*
+ * The structures with a private tail (__core), whose sizes follow the
+ * structures' in drm_facade_version.sizes[]. Append only.
+ */
+#define	DRM_FACADE_TAILS(X) \
+	X(drm_device) \
+	X(drm_file) \
+	X(drm_gem_object) \
+	X(dma_fence) \
+	X(dma_resv) \
+	X(dma_buf)
 
 enum drm_facade_struct {
 	DRM_FACADE_SZ_drm_device = 0,
@@ -93,6 +113,13 @@ enum drm_facade_struct {
 	DRM_FACADE_SZ_drm_rkms_connector_state,
 	DRM_FACADE_SZ_drm_rkms_fb_info,
 	DRM_FACADE_SZ_drm_rkms_rect,
+	DRM_FACADE_SZ_drm_printer,
+	DRM_FACADE_TAIL_drm_device,
+	DRM_FACADE_TAIL_drm_file,
+	DRM_FACADE_TAIL_drm_gem_object,
+	DRM_FACADE_TAIL_dma_fence,
+	DRM_FACADE_TAIL_dma_resv,
+	DRM_FACADE_TAIL_dma_buf,
 	DRM_FACADE_NSIZES
 };
 

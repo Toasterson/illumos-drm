@@ -23,6 +23,7 @@ name = "drm-core"
 version = "0.0.1"
 dependencies = [
  "ddi",
+ "drm-facade-sys",
  "drm-uapi",
 ]
 

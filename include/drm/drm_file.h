@@ -9,7 +9,9 @@
  * authentication, master, client-capability, handle, sync-object, event
  * and PRIME state stays in the core (behind __core). Linux's object_idr
  * and table_lock, which drivers use to walk a file's handles, are not
- * provided; a handle iterator replaces them in a later facade version.
+ * provided: drm_illumos_gem_for_each_handle() (drm_gem.h) walks them, and
+ * drm_gem_object_lookup() finds one (with a reference; Linux's lockless
+ * idr_find() under RCU has no counterpart).
  * This file is a reimplementation for illumos, MIT-licensed.
  */
 

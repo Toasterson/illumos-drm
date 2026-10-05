@@ -43,6 +43,9 @@ extern "C" {
 #define	DRM_CDRMNULL_BO_WAIT		0x06
 #define	DRM_CDRMNULL_PRIME_SELFTEST	0x07
 #define	DRM_CDRMNULL_FENCE_SELFTEST	0x08
+#define	DRM_CDRMNULL_FENCE_OPS_SELFTEST	0x09
+#define	DRM_CDRMNULL_HANDLES		0x0a
+#define	DRM_CDRMNULL_PRINT_SELFTEST	0x0b
 
 /*
  * CREATE_MOVABLE: a test object with two backings of the same size, the
@@ -121,9 +124,15 @@ struct cdrmnull_fence {
 #define	CDRMNULL_FENCE_BO_WRITE		(1u << 1)
 #define	CDRMNULL_FENCE_BO_READ		(1u << 2)
 #define	CDRMNULL_FENCE_SYNC_FILE	(1u << 3)
+/*
+ * cdrmnull only (R5b): the fence's context is the timeline's second one,
+ * so that two fences can make an array when merged (fences of one context
+ * merge into the later one).
+ */
+#define	CDRMNULL_FENCE_CONTEXT2		(1u << 4)
 #define	CDRMNULL_FENCE_FLAGS		(CDRMNULL_FENCE_SYNCOBJ | \
 	CDRMNULL_FENCE_BO_WRITE | CDRMNULL_FENCE_BO_READ | \
-	CDRMNULL_FENCE_SYNC_FILE)
+	CDRMNULL_FENCE_SYNC_FILE | CDRMNULL_FENCE_CONTEXT2)
 
 /*
  * BO_WAIT: waits for the reservation of the buffer handle: with
@@ -170,10 +179,10 @@ struct cdrmnull_prime_selftest {
  *		while the fence signals through another structure.
  * REMOVE	a callback removed before the fence signals never runs.
  * SIGNALED	adding a callback to a signalled fence fails with ENOENT.
- * RELEASED	a callback still added when its structure is released never
- *		runs.
- * QUEUED	a callback queued behind one that releases the structure
- *		never runs.
+ * RELEASED	a callback still added when its structure is released runs
+ *		once, with -EDEADLK (Linux's rule; facade 1.0).
+ * QUEUED	a callback queued behind one that drops the structure's last
+ *		reference still runs (the release waits; facade 1.0).
  */
 struct cdrmnull_fence_selftest {
 	__u32 syncobj;
@@ -188,6 +197,115 @@ struct cdrmnull_fence_selftest {
 #define	CDRMNULL_FENCE_T_RELEASED	(1u << 3)
 #define	CDRMNULL_FENCE_T_QUEUED		(1u << 4)
 #define	CDRMNULL_FENCE_T_ALL		0x1fu
+
+/*
+ * FENCE_OPS_SELFTEST (R5b): drives fences with driver ops through the
+ * facade, from a mock fence type with counting ops and from the device's
+ * test timeline (timer, soft interrupt, enable_signaling and signaled as
+ * a GPU driver implements them). syncobj in (a sync object of the
+ * caller's file), passed out (the CDRMNULL_OPS_T_* bits of the checks
+ * that passed), rounds in (of the STRESS check, 1 to 1000; 0 is 200);
+ * pad must be 0. Render nodes may call it. Thread context.
+ *
+ * ENABLE	enable_signaling is not called at init, once for two
+ *		callbacks, and sets DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT.
+ * ENABLE_FALSE	enable_signaling returning false makes add_callback -ENOENT
+ *		and signals the fence.
+ * POLL		dma_fence_is_signaled() and dma_fence_get_status() poll
+ *		ops->signaled; true signals and runs the callbacks.
+ * WAIT_OP	dma_fence_wait_timeout() calls ops->wait once.
+ * DEFAULT_WAIT	a timeline fence: a short wait times out (0), a long one
+ *		returns when the soft interrupt signals (> 0), and
+ *		enable_signaling ran.
+ * POLL_ONLY	a timeline fence nobody enabled is completed by the
+ *		"hardware" without an interrupt-level signal: its signalled
+ *		bit stays clear until dma_fence_is_signaled() polls.
+ * DEFERRED	a timeline fence whose last reference the soft interrupt
+ *		drops is released later in thread context (ops->release
+ *		sees no interrupt context).
+ * QUEUED	a callback that drops a native fence's last reference: the
+ *		release waits, the callback after it runs.
+ * EDEADLK	a native fence released unsignalled with a callback: the
+ *		callback runs once with -EDEADLK.
+ * BY_HAND	a fence in a sync object, signalled by hand as i915 does
+ *		(bit, list, timestamp, callbacks under the lock): the sync
+ *		object's fence is signalled.
+ * NAMES	dma_fence_driver_name()/timeline_name() and set_deadline.
+ * SEQNO64	dma_fence_init64() and the 32/64-bit comparisons.
+ * LOCKED	callbacks run with the fence's lock held.
+ * STRESS	rounds of a timeline fence signalled by the soft interrupt
+ *		while this thread adds and removes callbacks: each runs at
+ *		most once, a removed one never, a kept one exactly once.
+ * PROXY	a callback on a sync object's second structure for a core
+ *		fence runs when the first structure is signalled (relay).
+ */
+struct cdrmnull_fence_ops_selftest {
+	__u32 syncobj;
+	__u32 passed;
+	__u32 rounds;
+	__u32 pad;
+};
+
+#define	CDRMNULL_OPS_T_ENABLE		(1u << 0)
+#define	CDRMNULL_OPS_T_ENABLE_FALSE	(1u << 1)
+#define	CDRMNULL_OPS_T_POLL		(1u << 2)
+#define	CDRMNULL_OPS_T_WAIT_OP		(1u << 3)
+#define	CDRMNULL_OPS_T_DEFAULT_WAIT	(1u << 4)
+#define	CDRMNULL_OPS_T_POLL_ONLY	(1u << 5)
+#define	CDRMNULL_OPS_T_DEFERRED		(1u << 6)
+#define	CDRMNULL_OPS_T_QUEUED		(1u << 7)
+#define	CDRMNULL_OPS_T_EDEADLK		(1u << 8)
+#define	CDRMNULL_OPS_T_BY_HAND		(1u << 9)
+#define	CDRMNULL_OPS_T_NAMES		(1u << 10)
+#define	CDRMNULL_OPS_T_SEQNO64		(1u << 11)
+#define	CDRMNULL_OPS_T_LOCKED		(1u << 12)
+#define	CDRMNULL_OPS_T_STRESS		(1u << 13)
+#define	CDRMNULL_OPS_T_PROXY		(1u << 14)
+#define	CDRMNULL_OPS_T_ALL		0x7fffu
+
+/*
+ * HANDLES (R5b): walks the caller's file with
+ * drm_illumos_gem_for_each_handle(). flags in: CDRMNULL_HANDLES_LOOKUP
+ * looks every handle up from inside the walk, CDRMNULL_HANDLES_STOP stops
+ * the walk after stop_at handles (the walk then returns 1 in ret). Out:
+ * count, handle_sum and bytes of the walked handles, lookups (the
+ * lookups that found the walked object), ret (the walk's result). With
+ * refs_handle non-zero: refs is that object's refcount as the driver
+ * reads it (kref) minus the ioctl's own lookup reference, and kref_ok 1
+ * if a kref_get_unless_zero() and drm_gem_object_put() round trip changed
+ * it by one and back. Unknown flags are EINVAL.
+ */
+struct cdrmnull_handles {
+	__u32 flags;
+	__u32 stop_at;
+	__u32 count;
+	__u32 lookups;
+	__u64 handle_sum;
+	__u64 bytes;
+	__s32 ret;
+	__u32 refs_handle;
+	__u32 refs;
+	__u32 kref_ok;
+};
+
+#define	CDRMNULL_HANDLES_LOOKUP		(1u << 0)
+#define	CDRMNULL_HANDLES_STOP		(1u << 1)
+
+/*
+ * PRINT_SELFTEST (R5b): prints messages tagged "r5b-print <token> <kind>"
+ * through the facade's logging (the kinds in tools/test/run-r5b-test.sh:
+ * info, notice, warn, err, dbg, dbg-kms, debug-driver, DRM_INFO,
+ * DRM_ERROR, printer-info, printer-dbg, printer-err, once (printed
+ * twice, logged once), long (cut at 511 bytes)), and formats with
+ * drm_printf() into a custom printer: buf out ("<token> 42 abc -7"), len
+ * out. flags must be 0.
+ */
+struct cdrmnull_print_selftest {
+	__u64 token;
+	__u32 flags;
+	__u32 len;
+	char buf[128];
+};
 
 #define	DRM_IOCTL_CDRMNULL_CREATE_MOVABLE \
 	DRM_IOWR((DRM_COMMAND_BASE + DRM_CDRMNULL_CREATE_MOVABLE), \
@@ -210,6 +328,15 @@ struct cdrmnull_fence_selftest {
 #define	DRM_IOCTL_CDRMNULL_FENCE_SELFTEST \
 	DRM_IOWR((DRM_COMMAND_BASE + DRM_CDRMNULL_FENCE_SELFTEST), \
 	    struct cdrmnull_fence_selftest)
+#define	DRM_IOCTL_CDRMNULL_FENCE_OPS_SELFTEST \
+	DRM_IOWR((DRM_COMMAND_BASE + DRM_CDRMNULL_FENCE_OPS_SELFTEST), \
+	    struct cdrmnull_fence_ops_selftest)
+#define	DRM_IOCTL_CDRMNULL_HANDLES \
+	DRM_IOWR((DRM_COMMAND_BASE + DRM_CDRMNULL_HANDLES), \
+	    struct cdrmnull_handles)
+#define	DRM_IOCTL_CDRMNULL_PRINT_SELFTEST \
+	DRM_IOWR((DRM_COMMAND_BASE + DRM_CDRMNULL_PRINT_SELFTEST), \
+	    struct cdrmnull_print_selftest)
 
 /* The names the rdrmnull tests use, with this driver's prefix. */
 #define	CDRMNULL_IOCTL_CREATE_MOVABLE	DRM_IOCTL_CDRMNULL_CREATE_MOVABLE
@@ -220,6 +347,10 @@ struct cdrmnull_fence_selftest {
 #define	CDRMNULL_IOCTL_BO_WAIT		DRM_IOCTL_CDRMNULL_BO_WAIT
 #define	CDRMNULL_IOCTL_PRIME_SELFTEST	DRM_IOCTL_CDRMNULL_PRIME_SELFTEST
 #define	CDRMNULL_IOCTL_FENCE_SELFTEST	DRM_IOCTL_CDRMNULL_FENCE_SELFTEST
+#define	CDRMNULL_IOCTL_FENCE_OPS_SELFTEST \
+	DRM_IOCTL_CDRMNULL_FENCE_OPS_SELFTEST
+#define	CDRMNULL_IOCTL_HANDLES		DRM_IOCTL_CDRMNULL_HANDLES
+#define	CDRMNULL_IOCTL_PRINT_SELFTEST	DRM_IOCTL_CDRMNULL_PRINT_SELFTEST
 
 #ifdef	__cplusplus
 }

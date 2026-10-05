@@ -277,6 +277,7 @@ impl DevCore {
             let head = ptr::addr_of_mut!((*d).filelist);
             (*head).next = head;
             (*head).prev = head;
+            drm_core::managed::init(d, base.as_ptr() as *mut c_void);
             (*d).__core[0] = core as u64;
             (*d).__core[1] = (core as u64) ^ crate::MAGIC_DEVICE;
         }
@@ -384,6 +385,13 @@ impl DevCore {
         if let Some(rel) = core.table.release {
             // SAFETY: the driver's callback, with its device.
             unsafe { rel(d) };
+        }
+        // The managed resources, newest first, after the driver's release
+        // and before the structure goes (Linux's drm_managed_release).
+        // SAFETY: the device's last reference is gone; thread context.
+        unsafe {
+            drm_core::managed::release_all(d);
+            drm_core::managed::fini(d);
         }
         // SAFETY: nothing refers to the structure or the state any more.
         unsafe {

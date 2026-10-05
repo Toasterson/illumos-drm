@@ -4,7 +4,7 @@
 
 //! `drm_facade_version.h`, and `drm_debug` of `drm_print.h`.
 
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 use core::sync::atomic::AtomicU32;
 
 use ddi::Errno;
@@ -47,6 +47,14 @@ const SIZES: [usize; f::DRM_FACADE_NSIZES as usize] = [
     size_of::<f::drm_rkms_connector_state>(),
     size_of::<f::drm_rkms_fb_info>(),
     size_of::<f::drm_rkms_rect>(),
+    size_of::<f::drm_printer>(),
+    // The private tails (DRM_FACADE_TAILS), each its structure's last field.
+    size_of::<f::drm_device>() - offset_of!(f::drm_device, __core),
+    size_of::<f::drm_file>() - offset_of!(f::drm_file, __core),
+    size_of::<f::drm_gem_object>() - offset_of!(f::drm_gem_object, __core),
+    size_of::<f::dma_fence>() - offset_of!(f::dma_fence, __core),
+    size_of::<f::dma_resv>() - offset_of!(f::dma_resv, __core),
+    size_of::<f::dma_buf>() - offset_of!(f::dma_buf, __core),
 ];
 
 const _: () = assert!(SIZES.len() <= f::DRM_FACADE_MAX_SIZES as usize);

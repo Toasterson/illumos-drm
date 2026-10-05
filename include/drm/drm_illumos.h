@@ -111,6 +111,23 @@ extern uint64_t drm_illumos_fence_context_alloc(struct drm_device *dev,
 extern struct dma_fence *drm_illumos_fence_create(struct drm_device *dev,
     uint64_t context, uint64_t seqno);
 
+/*
+ * drm_illumos_fence_put_deferred()
+ *	dma_fence_put() whose release (if this was the last reference) is
+ *	always queued for the core's task queue, for timeout(9F) handlers
+ *	and other contexts dma_fence_put() cannot tell from a thread that may
+ *	block. Any context.
+ * drm_illumos_fence_barrier()
+ *	waits until every fence release queued so far has run (the driver's
+ *	ops->release included). A driver calls it in detach(9E) or _fini(9E)
+ *	after dropping its fences, before its code and ops tables go away
+ *	(the counterpart of Linux's rcu_barrier() in a module's exit). Thread
+ *	context, and not from a fence's ops->release or a fence callback
+ *	(they run inside the core's drain, which this waits for).
+ */
+extern void drm_illumos_fence_put_deferred(struct dma_fence *fence);
+extern void drm_illumos_fence_barrier(void);
+
 #ifdef	__cplusplus
 }
 #endif

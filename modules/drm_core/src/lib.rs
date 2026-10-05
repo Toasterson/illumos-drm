@@ -57,8 +57,6 @@ mod table;
 pub(crate) const MAGIC_DEVICE: u64 = 0x6472_6d5f_6465_7630; // "drm_dev0"
 /// As [`MAGIC_DEVICE`], for `struct drm_gem_object`.
 pub(crate) const MAGIC_GEM: u64 = 0x6472_6d5f_6765_6d30; // "drm_gem0"
-/// As [`MAGIC_DEVICE`], for `struct dma_fence`.
-pub(crate) const MAGIC_FENCE: u64 = 0x646d_615f_6663_6530; // "dma_fce0"
 /// As [`MAGIC_DEVICE`], for `struct drm_file`.
 pub(crate) const MAGIC_FILE: u64 = 0x6472_6d5f_6669_6c30; // "drm_fil0"
 /// As [`MAGIC_DEVICE`], for `struct dma_buf`.

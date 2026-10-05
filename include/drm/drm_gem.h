@@ -119,14 +119,26 @@ struct drm_gem_object_funcs {
  * A GEM object. Drivers embed it in their own buffer structure and find
  * that with container_of().
  *
- * Which fields are maintained in facade version 0:
+ * Which fields are maintained:
+ *	refcount
+ *		the object's reference count, the only one (facade 1.0): it
+ *		counts every reference, the driver's (drm_gem_object_init(),
+ *		drm_gem_object_get(), drm_gem_object_lookup()) and the core's
+ *		(handles, names, user mappings, dma-bufs). A driver may read
+ *		it (kref_read()) and take a reference with
+ *		kref_get_unless_zero() from a list of its own that holds
+ *		none, as long as that list's lock keeps the memory valid
+ *		(the driver removes the object from the list, under its
+ *		lock, in funcs->free); once the count is zero it stays zero
+ *		and the object is being freed. The core frees with no RCU
+ *		grace period, so a lockless (RCU) lookup is not safe. Every
+ *		reference is dropped with drm_gem_object_put().
  *	dev, vma_node, size, import_attach (non-NULL for an object made by
  *	drm_gem_prime_import() of another device's dma-buf), resv (points
  *	to _resv), _resv, gpuva (initialised, unused), funcs.
- *	The reference count lives in the core: refcount is not maintained
- *	(use drm_gem_object_get() and drm_gem_object_put()), nor are
- *	handle_count, name and dma_buf. filp is NULL (illumos objects have
- *	no shmem file), lru_node and lru are unused.
+ *	Not maintained: handle_count, name and dma_buf (the core keeps
+ *	them). filp is NULL (illumos objects have no shmem file), lru_node
+ *	and lru are unused.
  */
 struct drm_gem_object {
 	struct kref refcount;
@@ -201,6 +213,28 @@ extern int drm_gem_handle_delete(struct drm_file *file, uint32_t handle);
 /* The object of a handle with a new reference, or NULL. */
 extern struct drm_gem_object *drm_gem_object_lookup(struct drm_file *file,
     uint32_t handle);
+
+/*
+ * Calls `fn` with every handle of `file` and its object, in handle order,
+ * until `fn` returns non-zero, which is then returned; 0 after the last
+ * handle. The replacement for walking Linux's drm_file.object_idr under
+ * table_lock (idr_for_each()): the file's handle lock is held throughout,
+ * so no handle of `file` is created or closed during the walk (a
+ * concurrent GEM_CLOSE or close(2) waits for it), and every object stays
+ * valid during its call. `fn` may look handles up (drm_gem_object_lookup())
+ * and take references, but must not create or delete handles of `file`.
+ * Returns -EINVAL (NULL), -ENODEV, -ENOMEM. Thread context.
+ */
+extern int drm_illumos_gem_for_each_handle(struct drm_file *file,
+    int (*fn)(uint32_t handle, struct drm_gem_object *obj, void *arg),
+    void *arg);
+
+/* Whether the object was imported from another device's dma-buf. */
+static inline bool
+drm_gem_is_imported(const struct drm_gem_object *obj)
+{
+	return (obj->import_attach != NULL);
+}
 
 /* Gives the object its fake mmap offset (vma_node) if it has none yet. */
 extern int drm_gem_create_mmap_offset(struct drm_gem_object *obj);

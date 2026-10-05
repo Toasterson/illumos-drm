@@ -791,6 +791,19 @@ pub trait GemObject: Send + Sync + Sized + 'static {
     fn imported_from(&self) -> Option<&GemRef<Self>> {
         None
     }
+    /// The object's reference count when it lives outside the core: the
+    /// `refcount` of a C driver's `struct drm_gem_object`, which Linux
+    /// drivers read and take with `kref_get_unless_zero`. It is then the
+    /// only count: every [`GemRef`] (handles, names, mappings, dma-bufs,
+    /// the driver's own references) counts in it, the core's allocation
+    /// holds the object with one reference of its own until it reaches
+    /// zero, and it never comes back from zero ([`crate::refcount`]). It
+    /// must be 1 when the object is created (the creator's reference) and
+    /// stay the same counter, readable while the object exists. `None`
+    /// (the default) keeps the count in the core.
+    fn ext_count(&self) -> Option<&AtomicU32> {
+        None
+    }
 }
 
 impl GemObject for SysMem {
@@ -853,6 +866,12 @@ pub struct GemInner<O: GemObject> {
     /// ([`crate::anon_fd`]).
     dmabuf: AtomicU32,
     obj: O,
+}
+
+impl<O: GemObject> crate::refcount::ExtCounted for GemInner<O> {
+    fn ext_count(&self) -> Option<&AtomicU32> {
+        self.obj.ext_count()
+    }
 }
 
 impl<O: GemObject> Deferrable for GemInner<O> {
@@ -944,9 +963,27 @@ impl<O: GemObject> GemRef<O> {
     /// Drops the reference in thread context; the object is destroyed now
     /// if it was the last one.
     pub fn put(self, _ctx: &Sleepable) {
-        if let Some(last) = KArc::release(self.into_arc()) {
+        if let Some(last) = Self::release(self.into_arc()) {
             drop(last);
         }
+    }
+
+    /// Drops one reference of `arc` ([`crate::refcount::release`]: the
+    /// core's count, or the object's own, whose last reference releases the
+    /// allocation's). Returns the object when it was the last.
+    fn release(arc: KArc<GemInner<O>>) -> Option<KArcLast<GemInner<O>>> {
+        crate::refcount::release(arc)
+    }
+
+    /// A new reference to the object at `p` unless its count is zero (it
+    /// is being destroyed).
+    ///
+    /// # Safety
+    /// `p` is an object's allocation that the caller keeps from being freed
+    /// (the offset table's lock, which its destructor takes first).
+    unsafe fn upgrade(p: NonNull<GemInner<O>>) -> Option<GemRef<O>> {
+        // SAFETY: the caller's contract.
+        unsafe { crate::refcount::upgrade(p) }.map(GemRef::from_arc)
     }
 
     /// Drops the reference in the context `ctx`: [`GemRef::put`] or
@@ -965,7 +1002,7 @@ impl<O: GemObject> GemRef<O> {
     }
 
     fn defer_put(arc: KArc<GemInner<O>>) {
-        if let Some(last) = KArc::release(arc) {
+        if let Some(last) = Self::release(arc) {
             // Keep the device state alive until the drain is scheduled; see
             // GemCore::quiesce for why this reference cannot be the last.
             let core = KArc::clone(&last.core);
@@ -1033,7 +1070,7 @@ impl<O: GemObject> GemRef<O> {
 
 impl<O: GemObject> Clone for GemRef<O> {
     fn clone(&self) -> GemRef<O> {
-        GemRef::from_arc(KArc::clone(&self.arc))
+        GemRef::from_arc(crate::refcount::clone_ref(&self.arc))
     }
 }
 
@@ -1639,6 +1676,40 @@ impl<O: GemObject> GemCore<O> {
         objects::lookup(&h, handle)
     }
 
+    /// Calls `f` with every handle of file `clone` and its object, in
+    /// handle order, until `f` returns non-zero, which is returned (Linux's
+    /// `idr_for_each` over `drm_file.object_idr`). The file's hook lock is
+    /// held throughout, so no handle of the file is created or closed
+    /// meanwhile (a concurrent `GEM_CLOSE` or `close(9E)` waits); `f` may
+    /// look handles up but must not create or close handles of the same
+    /// file. `ENOMEM` if the walk's list cannot be allocated, `ENXIO` for an
+    /// unknown file. Thread context.
+    pub fn for_each_handle(
+        &self,
+        clone: CloneId,
+        mut f: impl FnMut(u32, &GemRef<O>) -> i32,
+        ctx: &Sleepable,
+    ) -> Result<i32, Errno> {
+        self.housekeeping(ctx);
+        let fg = self.file(clone)?;
+        let l = fg.table.lock();
+        let mut snap = l.snapshot(ctx)?;
+        let mut r = 0;
+        for (h, o) in snap.iter() {
+            r = f(*h, o);
+            if r != 0 {
+                break;
+            }
+        }
+        drop(l);
+        // The handles' references keep every object; these never are the
+        // last, but drop them with no lock held all the same.
+        while let Some((_, o)) = snap.swap_remove(snap.len().wrapping_sub(1)) {
+            o.put(ctx);
+        }
+        Ok(r)
+    }
+
     /// `GEM_CLOSE` and `MODE_DESTROY_DUMB`: removes a handle (`EINVAL` if
     /// there is none). The driver's close hook runs if it was the file's
     /// last handle to the object.
@@ -1768,9 +1839,9 @@ impl<O: GemObject> GemCore<O> {
             let (p, _) = offs.lookup_exact(off, len as u64).ok_or(Errno::EINVAL)?;
             // SAFETY: an object's destructor removes its entry under this
             // lock before its memory goes away, so the pointer is live.
-            let a = unsafe { KArc::upgrade(p.0) }.ok_or(Errno::EINVAL)?;
+            let a = unsafe { GemRef::upgrade(p.0) }.ok_or(Errno::EINVAL)?;
             let maplen = offsets::page_round(len as u64).and_then(|l| usize::try_from(l).ok());
-            (GemRef::from_arc(a), maplen)
+            (a, maplen)
         };
         let Some(maplen) = maplen else {
             obj.put(ctx);
@@ -1875,7 +1946,7 @@ impl<O: GemObject> GemCore<O> {
             let (p, _) = offs.lookup_exact(off, len as u64).ok_or(Errno::EINVAL)?;
             // SAFETY: as in devmap: the destructor removes the entry under
             // this lock before the memory goes away.
-            unsafe { KArc::upgrade(p.0) }.map(GemRef::from_arc).ok_or(Errno::EINVAL)?
+            unsafe { GemRef::upgrade(p.0) }.ok_or(Errno::EINVAL)?
         };
         let held = self.file_holds(clone, &obj);
         // Dropping here may destroy the object; no lock is held.

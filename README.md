@@ -21,7 +21,36 @@ driver `cdrmnull`) is done.
 
 ## Where things stand
 
-Milestones R0, R1, R2, R3 and R4 work, and so does R5a.
+Milestones R0, R1, R2, R3 and R4 work, and so do R5a and R5b.
+
+R5b (public-layout base objects, facade 1.0; see *R5b* under *Decisions*):
+on 3 October 2026, on fresh guests of `golden-20260930` (illumos
+`7e802e88a3`, libdrm 2.4.134) with a virtio-gpu device, at commit
+`c24a58e` (the later commits change tests and comments only),
+`tools/test/run-r5b-test.sh` passed: `run-r5a-test.sh` (R0 to R4 on the
+three drivers, R5a's cross-driver test after three unload orders, G6,
+R1 for two `cdrmnull` devices, the facade mismatch probes including a
+same-size `drm_device` with a smaller private tail; 168 passing checks,
+none failed), the managed resources of `cdrmnull` released in reverse
+order at all 7 of its detaches, `drm_r5b_test` (47 checks, none failed:
+the 15 fence-ops checks of `FENCE_OPS_SELFTEST` including 200 rounds of
+add/remove/signal against the soft interrupt, the driver's timeline
+fences in a binary sync object, an array of two contexts, a chain
+signalled out of order and an error sync file, 3000 handle walks while a
+thread created and closed 1592 handles, the live GEM reference count
+through name, dma-buf and mapping), every logging path in the system log
+with `drm_debug` 0 and 0x6, timeline fences released in thread context
+only, and `run-g8-test.sh kernel`. gcc's layout of the facade (40 sizes,
+256 offsets) matched the Rust bindings, and `kernel-check` with
+`misc/drm_core` loaded verified `drm-facade-sys` against the module's CTF
+(sizes 40 of 45 and offsets 244 of 256, the rest members of anonymous
+types checked through their parents; symbols 123 of 123). At `b3fab03`
+every phase of `run-g7-test.sh` passed again (81 checks), and with the new
+stack selected `run-r5a-test.sh` (`LEGACY_GUARD=skip`) behaved as in G7:
+its first run after the packaged drivers' removal failed the unprivileged
+opens of `cdrmnull`'s stale `0600` nodes (the open issue of G7 below),
+and the run after it passed (76 checks). Logs:
+`logs/hephaistos/illumos-drm/20261003-r5b-*` in the workspace.
 
 G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
 of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
@@ -368,7 +397,11 @@ host tests) and tested on the host with real threads; the kernel layer
 of R2 is `fence_dev` (the device's synchronisation state and the `sync`
 kstat), `anon_fd` (file descriptors for dma-bufs, sync object files and
 sync files, over illumos-ddi's private tier), `syncobj_ioctl` and
-`prime`.
+`prime`. Since R5b `cfence` holds Linux's fence rules on the facade's
+`struct dma_fence` (with `spinlock`, the facade's `spinlock_t`),
+`managed` the `drmm_*` resources of a `struct drm_device`, `refcount`
+the reference count kept in a C structure, and `print` the rules of the
+facade's logging; all four are tested on the host.
 
 `examples/rdrmnull` is a DRM driver without hardware. It registers one
 device with a card and a render node, has dumb buffers in system memory,
@@ -401,7 +434,10 @@ Linux's names), `include/drm/drm_facade.mapfile` the facade's symbols for
 a driver's `-z defs` link and `modules/drm_core/drm_core.mapfile` the module's
 symbol scope. `crates/drm-facade-sys` is the facade as Rust declarations
 (bindgen), `crates/drm-facade` the safe layer the Rust drivers use, and
-`drivers/cdrmnull` the C test driver. `tools/facade` regenerates the
+`drivers/cdrmnull` the C test driver (since R5b with a GPU-like fence
+timeline, managed resources and the fence-ops, handle-walk and printing
+self-tests that `tools/test/drm_r5b_test.c` and `run-r5b-test.sh`
+drive). `tools/facade` regenerates the
 bindings, both mapfiles and the layout tables, and holds the C half of the
 layout check; `modules/drm_core/ctf` the CTF shadow of the facade structures.
 `packaging/drm-core.p5m` packages the module, `packaging/cdrmnull.p5m` the C
@@ -1177,8 +1213,9 @@ compiled with: C drivers call the inline `drm_facade_check()` in
 `ddi::Driver::load` (a hook added to illumos-ddi for this), and either
 refuses to load with a warning naming the first difference.
 `drm_dev_alloc()` checks the version recorded in the driver's
-`struct drm_driver` again. Version 0 (now 0.1) is unstable: expect a new
-major version with each facade milestone (R5b, R5c, R5i).
+`struct drm_driver` again. Version 0 (0.1) was unstable; R5b made it
+1.0 (see *R5b: facade version 1.0*), and the compatibility layer (R5c)
+and mode setting (R5i) are expected to change the major version again.
 
 **R5a: the facade structures.** The headers are MIT-licensed
 reimplementations of the interfaces of Linux v7.2's headers, written from
@@ -1225,9 +1262,10 @@ module's symbols; only its types matter.
 interface, and `cdrmnull` has no display yet (its port of `rdrmnull`'s
 virtual display is deferred to R5i). `struct mutex` is
 `struct lx_mutex`, because illumos has a `struct mutex` of its own.
-`dma_fence_wait_timeout()` counts clock ticks; fence callbacks other than
-`release` are not called yet (fences are signalled explicitly), the
-fence lock is unused and `cb_list` is not a list. `dma_resv` functions
+`dma_fence_wait_timeout()` counts clock ticks; in facade 0.1 fence
+callbacks other than `release` were not called, the fence lock was unused
+and `cb_list` was not a list (R5b changed all three; see *R5b: fences*).
+`dma_resv` functions
 take only a NULL acquire context; the lock belongs to the thread that
 took it (only it adds fences and unlocks; a relock by the holder fails
 with `-EDEADLK` where Linux would deadlock), and a `dma_resv_usage`
@@ -1281,6 +1319,158 @@ and the open hook's calls (`opens`). The host tests in
 `crates/drm-core/src/objects.rs` drive the table from eight threads with
 hooks that assert they alternate; they fail with the old behaviour and
 without the hook lock.
+
+**R5b: public-layout base objects.** Facade 1.0 makes the public
+fields of the core's base objects the objects' state, so that a C driver
+embeds them and uses them as Linux drivers do: the counted field sets of
+i915's headless code (`dma_fence` flags, seqno, error, context,
+cb_list, timestamp, refcount, ops and its lock; `drm_gem_object` dev,
+size, resv, refcount, vma_node, import_attach, funcs; `drm_device` dev,
+primary, ref, managed, open_count, ...; `drm_file` driver_priv, minor;
+the `drm_printer` declared on the stack). The layouts, with Linux v7.2
+as the origin of names and order (MIT reimplementations, D7):
+
+| structure | public fields | size | private tail | change in 1.0 |
+| --- | --- | --- | --- | --- |
+| `drm_device` | 24 (27 with `managed.*`) | 336 B | 128 B | `managed` (resources, final_kfree, lock) after `dma_dev`, `open_count` after `unique`; `ref` and `open_count` live |
+| `drm_file` | 6 | 88 B | 32 B | `object_idr`/`table_lock` replaced by `drm_illumos_gem_for_each_handle()` |
+| `drm_gem_object` | 15 (17 with `gpuva.*`) | 256 B | 64 B | `refcount` is the object's only count |
+| `dma_fence` | 8 (11 counting the union members) | 96 B | 32 B | every field is the state; flag bits renumbered to v7.2 |
+| `dma_fence_ops` | 7 | 56 B | - | all callbacks called |
+| `dma_fence_cb` | 2 | 24 B | - | `node` on the fence's `cb_list` |
+| `dma_resv` | 2 | 48 B | 16 B | unchanged (`lock` remains a placeholder) |
+| `dma_buf` | 8 | 88 B | 16 B | unchanged |
+| `drm_printer` | 7 (9 with `line.*`) | 56 B | - | new |
+| `va_format` | 2 | 16 B | - | new |
+
+The private tails are recorded in the version handshake (below), and
+`xtask facade-check` compares every size and every offset, now including
+the members of anonymous unions and structures (`dma_fence`'s lock and
+list unions, `drm_device.managed.*`, `drm_gem_object.gpuva.*`; 40 sizes
+and 256 offsets), with gcc on illumos.
+
+**R5b: fences.** `drm_core::cfence` implements Linux's `dma_fence` rules
+on the public structure, for fences a driver embeds (`dma_fence_init`,
+`dma_fence_init64`) and for the structures the core makes for its own
+fences alike: the lock (`extern_lock`, or `inline_lock`, which the core
+initialises and destroys) protects `cb_list`, a Linux list of
+`struct dma_fence_cb`; signalling sets the signalled bit, replaces the
+list by the timestamp and runs every callback with the lock held;
+`ops->enable_signaling` runs once, when somebody first needs the fence
+(a callback, a wait, `dma_fence_enable_sw_signaling`, or the core taking
+the fence); `ops->signaled` is polled by `dma_fence_is_signaled` and
+`dma_fence_get_status`; `ops->wait` replaces the default wait;
+`ops->set_deadline` and the name callbacks are reachable. A driver may
+add to `cb_list` and signal by hand, as i915's breadcrumbs and
+`i915_active` do. The rest of the core (sync objects, reservations,
+sync files, arrays, chains, waits) works on its own fence objects; each
+structure carries one in its tail. A driver's fence has a *shadow*,
+signalled by the *bridge*, a callback the core adds to the structure's
+`cb_list` when it first takes the fence (which enables signalling); the
+bridge holds a reference to the structure until it has run, as a Linux
+sync object holds the fence it waits for. A core fence handed to a
+driver gets a *proxy* structure whose ops are the core's: its
+`enable_signaling` arms a *relay* on the core fence, its `signaled`
+asks the core fence, and the relay takes a reference only while the
+count is not zero; the release removes the relay first, waiting for one
+that runs. The last `dma_fence_put` releases the structure (callbacks
+still on the list of an unsignalled fence run with `-EDEADLK`, as on
+Linux, with a warning; then the tail state, an inline lock, and
+`ops->release`) at once only in thread context by a thread that does not
+hold the fence's lock; from an interrupt handler, from a callback, from
+the bridge and from the relay it is parked through a node in the tail on
+the module domain's list and released by its task queue
+(`FenceDomain::defer_raw`). That needs no memory, never runs a driver's
+release in interrupt context, and removes R5a's open issue of a release
+in an interrupt spinning on a callback it interrupted.
+`drm_illumos_fence_put_deferred()` always parks (for `timeout(9F)`
+handlers), and `drm_illumos_fence_barrier()` waits for every parked
+release, which a driver calls before its ops tables go (`cdrmnull`'s
+`_fini` and release). The logic is tested on the host with a mock
+driver and threads (`crates/drm-core/src/cfence/tests.rs`: 14 tests).
+
+**R5b: GEM reference counts and handle walks.** A facade object's
+`refcount` is its only reference count (`GemObject::ext_count`): every
+`GemRef` counts in it (handles, names, mappings, dma-bufs, the driver's
+references), the core's allocation holds the object with one reference
+of its own until the count reaches zero, and the count never comes back
+from zero (`drm_core::refcount`). Drivers can therefore read it
+(`kref_read()`) and take a reference with `kref_get_unless_zero()` (both
+in `drm_facade_types.h`) from lists of their own that hold none (i915's
+shrinker lists), as long as the list's lock keeps the memory valid, and
+drop it with `drm_gem_object_put()`. The core frees objects with no RCU
+grace period, so i915's lockless RCU lookups must become locked lookups.
+`drm_illumos_gem_for_each_handle(file, fn, arg)` replaces walking
+`drm_file.object_idr` under `table_lock`: it calls `fn` for every handle
+and object of the file, in handle order, until `fn` returns non-zero,
+with the file's hook lock (G8) held, over a snapshot of references taken
+under the handle table's lock, so no handle comes or goes during the walk
+and lookups from `fn` work; `fn` must not create or close handles of the
+file. `drm_gem_object_lookup()` finds one handle's object with a
+reference (Linux's lockless `idr_find()` under RCU has no counterpart).
+No Rust driver walks handles yet, so `drm-facade` has no wrapper for it.
+
+**R5b: managed resources.** `drm_managed.h` provides
+`drmm_add_action()`, `drmm_add_action_or_reset()`,
+`drmm_release_action()`, `drmm_kmalloc()`, `drmm_kzalloc()`,
+`drmm_kmalloc_array()`, `drmm_kcalloc()`, `drmm_kstrdup()` and
+`drmm_kfree()` over `drm_core::managed` (`drmm_kmalloc(dev, 0, ...)`
+returns NULL, where Linux returns a non-NULL zero-size pointer): nodes on
+`drm_device.managed.resources` under `managed.lock`, released newest
+first when the device's last reference goes (`drm_dev_put()`), after
+`drm_dev_unregister()` and the driver's `release` callback and before the
+structure is freed, each action called and each allocation freed once,
+with no lock held. `gfp_t` and its bits are the facade's
+(`__GFP_DIRECT_RECLAIM` sleeps, `__GFP_ZERO` zeroes). `drmm_mutex_init()`
+and `drmm_alloc_ordered_workqueue()` wait for the compatibility layer
+(R5c), which provides Linux's mutexes and workqueues.
+
+**R5b: printing.** `drm_print.h` follows Linux v7.2: the debug
+categories are bit numbers, `struct drm_printer` and `struct va_format`
+have Linux's layout, `drm_info_printer()`, `drm_dbg_printer()` and
+`drm_err_printer()` make the core's printers, `drm_printf()`,
+`drm_vprintf()`, `drm_puts()` and `drm_printf_indent()` print to any
+printer, and the `drm_err()`/`drm_warn()`/`drm_notice()`/`drm_info()`
+(and `_once`) and `drm_dbg_*()` families, `drm_dev_printk()`,
+`DRM_DEV_*` and `DRM_*` log on the device's node. The variadic entry
+points are static functions of the header that build a
+`struct va_format`; everything ends in `drm_illumos_vprintk()`, which
+formats with `vsnprintf(9F)` into a 512-byte message (cut with "...")
+and logs it with `dev_err` or `cmn_err`: errors and warnings `CE_WARN`
+to the console and the log, notices `CE_NOTE` to both, information and
+debug `CE_NOTE` to the log only. A debug message of category C is
+printed only while bit C of `drm_core`'s `drm_debug` is set: `set
+drm_core:drm_debug = 0x6` in `/etc/system`, or `echo 'drm_debug/W 0x6' |
+mdb -kw` (the bits are Linux's `drm.debug`). `drm_WARN*()`, the line,
+coredump and seq_file printers and `drm_print_bits()` are not provided;
+the `_ratelimited` variants print every message.
+
+**R5b: facade version 1.0.** The major version changed (Linux's flag
+numbering, the new `drm_device` fields, fences and GEM counts that are
+state). `drm_facade_version` keeps its size (an older driver still reads
+the refusal) and its list gains `drm_printer` and the sizes of the
+private tails of `drm_device`, `drm_file`, `drm_gem_object`,
+`dma_fence`, `dma_resv` and `dma_buf` (`DRM_FACADE_TAILS`), which
+`drm_facade_check()` and `drm_facade::check_facade()` compare, so a change
+of the core's private state is refused even when it leaves a structure's
+size alone. `run-r5a-test.sh`'s mismatch probes cover another major
+version, a larger `drm_device` and a same-size `drm_device` with a smaller
+tail.
+
+**R5b: deviations from Linux.** `dma_fence_put()` and the other fence
+functions are out-of-line (Linux's are inline); a fence's lock must not
+be a high-level spin mutex; `ops` is kept after signalling (Linux clears
+it for fences without `release` or `wait`); `release == NULL` frees
+nothing (Linux's `dma_fence_free()` needs Linux's `kfree`, R5c). The
+core takes a driver's fence by enabling signalling and adding its bridge,
+so the fence is enabled earlier than on Linux when it enters a sync
+object, reservation or sync file. A sync object returns a proxy of the
+core fence, not the driver's structure, so pointer identity with the
+fence the driver added does not hold. `dma_fence_array_create()`, the
+`dma_fence_chain_*` walkers and `dma_resv` iterators and acquire contexts
+are not in the facade yet. A GEM object's `handle_count`, `name` and
+`dma_buf` stay in the core. Messages logged in interrupt context are cut
+by illumos at 200 bytes.
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
