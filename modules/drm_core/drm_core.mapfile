@@ -91,6 +91,9 @@ SYMBOL_SCOPE {
 		drm_gem_prime_import;
 		drm_gem_private_object_init;
 		drm_getinfo;
+		drm_illumos_event_deliver;
+		drm_illumos_event_reserve;
+		drm_illumos_event_unreserve;
 		drm_illumos_fault_default_access;
 		drm_illumos_fault_load;
 		drm_illumos_fence_barrier;

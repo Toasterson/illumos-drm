@@ -85,6 +85,9 @@ SYMBOL_SCOPE {
 		drm_gem_prime_import	{ FLAGS = EXTERN };
 		drm_gem_private_object_init	{ FLAGS = EXTERN };
 		drm_getinfo	{ FLAGS = EXTERN };
+		drm_illumos_event_deliver	{ FLAGS = EXTERN };
+		drm_illumos_event_reserve	{ FLAGS = EXTERN };
+		drm_illumos_event_unreserve	{ FLAGS = EXTERN };
 		drm_illumos_fault_default_access	{ FLAGS = EXTERN };
 		drm_illumos_fault_load	{ FLAGS = EXTERN };
 		drm_illumos_fence_barrier	{ FLAGS = EXTERN };

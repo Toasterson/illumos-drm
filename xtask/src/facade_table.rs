@@ -69,6 +69,7 @@ pub fn lines() -> Vec<String> {
         format!("offset drm_device.vma_offset_manager {}", offset_of!(f::drm_device, vma_offset_manager)),
         format!("offset drm_device.switch_power_state {}", offset_of!(f::drm_device, switch_power_state)),
         format!("offset drm_device.debugfs_root {}", offset_of!(f::drm_device, debugfs_root)),
+        format!("offset drm_device.__kms {}", offset_of!(f::drm_device, __bindgen_anon_1.__kms)),
         format!("offset drm_device.__core {}", offset_of!(f::drm_device, __core)),
         format!("size drm_driver {}", size_of::<f::drm_driver>()),
         format!("offset drm_driver.open {}", offset_of!(f::drm_driver, open)),
@@ -93,6 +94,7 @@ pub fn lines() -> Vec<String> {
         format!("offset drm_driver.illumos_before_detach {}", offset_of!(f::drm_driver, illumos_before_detach)),
         format!("offset drm_driver.illumos_before_teardown {}", offset_of!(f::drm_driver, illumos_before_teardown)),
         format!("offset drm_driver.illumos_rkms {}", offset_of!(f::drm_driver, illumos_rkms)),
+        format!("offset drm_driver.illumos_lkms {}", offset_of!(f::drm_driver, illumos_lkms)),
         format!("size drm_illumos_mode_config {}", size_of::<f::drm_illumos_mode_config>()),
         format!("offset drm_illumos_mode_config.cursor_width {}", offset_of!(f::drm_illumos_mode_config, cursor_width)),
         format!(
@@ -108,13 +110,30 @@ pub fn lines() -> Vec<String> {
             offset_of!(f::drm_illumos_mode_config, prefer_shadow)
         ),
         format!("offset drm_illumos_mode_config.fb_modifiers {}", offset_of!(f::drm_illumos_mode_config, fb_modifiers)),
+        format!(
+            "offset drm_illumos_mode_config.async_page_flip {}",
+            offset_of!(f::drm_illumos_mode_config, async_page_flip)
+        ),
         format!("size drm_file {}", size_of::<f::drm_file>()),
+        format!("offset drm_file.stereo_allowed {}", offset_of!(f::drm_file, stereo_allowed)),
+        format!("offset drm_file.universal_planes {}", offset_of!(f::drm_file, universal_planes)),
+        format!("offset drm_file.atomic {}", offset_of!(f::drm_file, atomic)),
+        format!("offset drm_file.aspect_ratio_allowed {}", offset_of!(f::drm_file, aspect_ratio_allowed)),
+        format!("offset drm_file.writeback_connectors {}", offset_of!(f::drm_file, writeback_connectors)),
+        format!("offset drm_file.plane_color_pipeline {}", offset_of!(f::drm_file, plane_color_pipeline)),
+        format!("offset drm_file.was_master {}", offset_of!(f::drm_file, was_master)),
+        format!("offset drm_file.is_master {}", offset_of!(f::drm_file, is_master)),
+        format!(
+            "offset drm_file.supports_virtualized_cursor_plane {}",
+            offset_of!(f::drm_file, supports_virtualized_cursor_plane)
+        ),
         format!("offset drm_file.pid {}", offset_of!(f::drm_file, pid)),
         format!("offset drm_file.client_id {}", offset_of!(f::drm_file, client_id)),
         format!("offset drm_file.lhead {}", offset_of!(f::drm_file, lhead)),
         format!("offset drm_file.minor {}", offset_of!(f::drm_file, minor)),
         format!("offset drm_file.filp {}", offset_of!(f::drm_file, filp)),
         format!("offset drm_file.driver_priv {}", offset_of!(f::drm_file, driver_priv)),
+        format!("offset drm_file.__kms {}", offset_of!(f::drm_file, __bindgen_anon_1.__kms)),
         format!("offset drm_file.__core {}", offset_of!(f::drm_file, __core)),
         format!("size drm_ioctl_desc {}", size_of::<f::drm_ioctl_desc>()),
         format!("offset drm_ioctl_desc.cmd {}", offset_of!(f::drm_ioctl_desc, cmd)),
@@ -322,5 +341,16 @@ pub fn lines() -> Vec<String> {
         format!("offset drm_rkms_funcs.commit_connector {}", offset_of!(f::drm_rkms_funcs, commit_connector)),
         format!("offset drm_rkms_funcs.set_gamma {}", offset_of!(f::drm_rkms_funcs, set_gamma)),
         format!("offset drm_rkms_funcs.dirty_fb {}", offset_of!(f::drm_rkms_funcs, dirty_fb)),
+        format!("size drm_illumos_lkms_funcs {}", size_of::<f::drm_illumos_lkms_funcs>()),
+        format!("offset drm_illumos_lkms_funcs.ioctl {}", offset_of!(f::drm_illumos_lkms_funcs, ioctl)),
+        format!("offset drm_illumos_lkms_funcs.file_open {}", offset_of!(f::drm_illumos_lkms_funcs, file_open)),
+        format!("offset drm_illumos_lkms_funcs.file_close {}", offset_of!(f::drm_illumos_lkms_funcs, file_close)),
+        format!("offset drm_illumos_lkms_funcs.lastclose {}", offset_of!(f::drm_illumos_lkms_funcs, lastclose)),
+        format!("offset drm_illumos_lkms_funcs.register_dev {}", offset_of!(f::drm_illumos_lkms_funcs, register_dev)),
+        format!(
+            "offset drm_illumos_lkms_funcs.unregister_dev {}",
+            offset_of!(f::drm_illumos_lkms_funcs, unregister_dev)
+        ),
+        format!("offset drm_illumos_lkms_funcs.mode_config {}", offset_of!(f::drm_illumos_lkms_funcs, mode_config)),
     ]
 }

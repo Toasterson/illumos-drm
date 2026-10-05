@@ -333,6 +333,8 @@ impl Driver for VirtioGpuModule {
                 preferred_depth: 24,
                 prefer_shadow: false,
                 fb_modifiers: false,
+                // R3 has no asynchronous page flips.
+                async_page_flip: false,
             }),
             unique: unique.as_deref(),
         };

@@ -48,6 +48,7 @@ const SIZES: [usize; f::DRM_FACADE_NSIZES as usize] = [
     size_of::<f::drm_rkms_fb_info>(),
     size_of::<f::drm_rkms_rect>(),
     size_of::<f::drm_printer>(),
+    size_of::<f::drm_illumos_lkms_funcs>(),
     // The private tails (DRM_FACADE_TAILS), each its structure's last field.
     size_of::<f::drm_device>() - offset_of!(f::drm_device, __core),
     size_of::<f::drm_file>() - offset_of!(f::drm_file, __core),
