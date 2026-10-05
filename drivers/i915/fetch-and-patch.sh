@@ -18,8 +18,9 @@
 #
 # <directory> is created (git init + fetch of the pinned commit, about
 # 260 MB) or reused if it already holds the pinned commit. An existing
-# tree must be clean or carry exactly this patch series; the script never
-# discards changes of its own accord.
+# tree must be clean or carry a series this script applied (it keeps
+# copies in <tree>/.illumos/series and reverts them before applying a
+# changed series); the script never discards other changes.
 set -euo pipefail
 # GNU grep and sed first on illumos (\b in the licence checks)
 PATH=/usr/gnu/bin:$PATH
@@ -55,6 +56,17 @@ stamp=$dest/.illumos/applied
 if [ -f "$stamp" ] && [ "$(sed -n 1p "$stamp")" = "$sum" ]; then
 	echo "fetch-and-patch: series already applied ($sum)"
 else
+	# A tree that carries an earlier series of this script: take that
+	# series off again (the copies kept at the time), newest first.
+	if [ -f "$stamp" ] && [ -d "$dest/.illumos/series" ]; then
+		# shellcheck disable=SC2086
+		git -C "$dest" checkout -- $TRACE_HEADERS
+		for p in $(ls "$dest/.illumos/series" | sort -r); do
+			echo "fetch-and-patch: reverting the earlier $p"
+			git -C "$dest" apply -R --whitespace=nowarn "$dest/.illumos/series/$p"
+		done
+		rm -rf "$dest/.illumos/series" "$stamp"
+	fi
 	if [ -n "$(git -C "$dest" status --porcelain --untracked-files=no -- . "${keep[@]}")" ]; then
 		echo "fetch-and-patch: $dest has changes that are not this series;" \
 		    "check them out (git -C $dest checkout -- .) yourself" >&2
@@ -66,7 +78,8 @@ else
 		echo "fetch-and-patch: applying $p"
 		git -C "$dest" apply --whitespace=nowarn "$HERE/$p"
 	done
-	mkdir -p "$dest/.illumos"
+	mkdir -p "$dest/.illumos/series"
+	for p in $series; do cp "$HERE/$p" "$dest/.illumos/series/"; done
 	{ echo "$sum"; echo "$series"; } > "$stamp"
 fi
 

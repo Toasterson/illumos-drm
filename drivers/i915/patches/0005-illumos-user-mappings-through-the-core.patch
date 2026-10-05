@@ -1,0 +1,70 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 05] i915: user mappings through the illumos DRM core
+
+On illumos the DRM core maps GEM objects for user space: an object has
+one fake offset (drm_gem_create_mmap_offset()), and the core maps the
+memory its illumos_umem callback names. i915's objects are made with
+drm_gem_private_object_init(), which the core refuses for objects
+without that callback; i915_illumos_gem_umem() names the shmem file's
+memory (no memory for internal, stolen and imported objects).
+DRM_IOCTL_I915_GEM_MMAP_OFFSET (and the dumb-buffer offset) go to
+i915_illumos_mmap_offset(), which hands out the object's core offset
+for write-back mappings and, on LLC platforms for objects the CPU cache
+is coherent with, for WC and UC requests; GTT mappings (through the
+aperture) and everything else are -ENODEV for now. Linux's per-type
+offsets (struct i915_mmap_offset) are not used on illumos.
+
+--- a/drivers/gpu/drm/i915/gem/i915_gem_mman.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_mman.c
+@@ -768,6 +768,12 @@
+ 	return ERR_PTR(err);
+ }
+ 
++#ifdef __illumos__
++/* drivers/i915/illumos/i915_illumos.c */
++extern int i915_illumos_mmap_offset(struct drm_i915_gem_object *obj,
++    enum i915_mmap_type mmap_type, u64 *offset);
++#endif
++
+ static int
+ __assign_mmap_offset(struct drm_i915_gem_object *obj,
+ 		     enum i915_mmap_type mmap_type,
+@@ -789,6 +795,14 @@
+ 	if (mmap_type == I915_MMAP_TYPE_FIXED)
+ 		return -ENODEV;
+ 
++#ifdef __illumos__
++	/*
++	 * User mappings are the DRM core's: one offset per object, mapping
++	 * its shmem memory (drivers/i915/illumos/i915_illumos.c).
++	 */
++	return i915_illumos_mmap_offset(obj, mmap_type, offset);
++#endif
++
+ 	if (mmap_type != I915_MMAP_TYPE_GTT &&
+ 	    !i915_gem_object_has_struct_page(obj) &&
+ 	    !i915_gem_object_has_iomem(obj))
+--- a/drivers/gpu/drm/i915/gem/i915_gem_object.c	2026-10-05 09:33:16.868861331 +0000
++++ b/drivers/gpu/drm/i915/gem/i915_gem_object.c	2026-10-05 09:33:16.869861345 +0000
+@@ -894,9 +894,21 @@
+ 	return 0;
+ }
+ 
++#ifdef __illumos__
++/* drivers/i915/illumos/i915_illumos.c */
++extern ddi_umem_cookie_t i915_illumos_gem_umem(struct drm_gem_object *obj);
++#endif
++
+ static const struct drm_gem_object_funcs i915_gem_object_funcs = {
+ 	.free = i915_gem_free_object,
+ 	.close = i915_gem_close_object,
++#ifdef __illumos__
++	/*
++	 * The memory user mappings of the object show (the DRM core maps
++	 * it); the core requires it of objects without core memory.
++	 */
++	.illumos_umem = i915_illumos_gem_umem,
++#endif
+ #ifndef __illumos__
+ 	/* On illumos the DRM core exports and maps dma-bufs itself. */
+ 	.export = i915_gem_prime_export,

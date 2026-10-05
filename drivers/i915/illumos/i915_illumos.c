@@ -14,11 +14,13 @@
  * DRM core's (DRM_CB_OPS). _fini removes the module and runs i915's
  * module_exit.
  *
- * Also here: the GEM handle lookups patch 0003 routes to the DRM core.
+ * Also here: the GEM handle lookups patch 0003 routes to the DRM core,
+ * and the user mappings of patch 0005.
  */
 
 #include <linux/pci.h>
 #include <linux/rcupdate.h>
+#include <linux/shmem_fs.h>
 #include <lkpi/version.h>
 #include <drm/drm_facade.h>
 
@@ -177,3 +179,60 @@ i915_illumos_handle_is(struct drm_file *file, u32 handle,
 		drm_gem_object_put(o);
 	return (same);
 }
+
+/* --- user mappings (patch 0005) ----------------------------------------- */
+
+/*
+ * The memory the DRM core maps for the object: the shmem file's (one
+ * ddi_umem allocation, which stays put while the file lives). Internal,
+ * stolen and imported objects have none; i915_illumos_mmap_offset() never
+ * gives them an offset, so the core never asks for them.
+ */
+ddi_umem_cookie_t
+i915_illumos_gem_umem(struct drm_gem_object *obj)
+{
+	if (obj->filp == NULL)
+		return (NULL);
+	return (lkpi_shmem_umem(obj->filp, NULL, NULL));
+}
+
+/*
+ * DRM_IOCTL_I915_GEM_MMAP_OFFSET on illumos: the object's single core
+ * offset, which the core maps write-back. A write-back request always
+ * gets it (user space flushes through set_domain as on Linux). WC and UC
+ * requests get it only where a write-back mapping behaves the same for
+ * the GPU: on a shared-LLC platform (gen7 and gen9.5 integrated GPUs)
+ * for an object the CPU cache is coherent with for reads and writes.
+ * GTT mappings (through the aperture, with fences) are not supported yet.
+ * Called with the object locked.
+ */
+int
+i915_illumos_mmap_offset(struct drm_i915_gem_object *obj,
+    enum i915_mmap_type mmap_type, u64 *offset)
+{
+	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+	const unsigned int coherent = I915_BO_CACHE_COHERENT_FOR_READ |
+	    I915_BO_CACHE_COHERENT_FOR_WRITE;
+	int err;
+
+	if (obj->base.filp == NULL)
+		return (-ENODEV);
+	switch (mmap_type) {
+	case I915_MMAP_TYPE_WB:
+		break;
+	case I915_MMAP_TYPE_WC:
+	case I915_MMAP_TYPE_UC:
+		if (!HAS_LLC(i915) ||
+		    (obj->cache_coherent & coherent) != coherent)
+			return (-ENODEV);
+		break;
+	default:
+		return (-ENODEV);
+	}
+	err = drm_gem_create_mmap_offset(&obj->base);
+	if (err != 0)
+		return (err);
+	*offset = drm_vma_node_offset_addr(&obj->base.vma_node);
+	return (0);
+}
+
