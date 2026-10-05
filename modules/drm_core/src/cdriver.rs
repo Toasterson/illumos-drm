@@ -243,11 +243,13 @@ impl Driver for CDriver {
             Some(open) => from_neg(unsafe { open(core.ddev(), fp) }),
             None => Ok(()),
         };
-        // A Linux-KMS device: the KMS code's file_open first, undone if
-        // the driver's open fails.
-        let r = match self.lkms() {
-            Some(h) => drm_core::lkms::open_file(h, file.get(), driver_open, ctx),
-            None => driver_open(),
+        // A Linux-KMS device whose mode setting runs: the KMS code's
+        // file_open first, undone if the driver's open fails.
+        let r = match (self.lkms(), dev.lkms_events().filter(|q| q.active())) {
+            (Some(h), Some(q)) => drm_core::lkms::open_file(h, file.get(), driver_open, ctx).map(|()| {
+                q.set_kms_open(file);
+            }),
+            _ => driver_open(),
         };
         if let Err(e) = r {
             forget_file(core, file);
@@ -326,9 +328,10 @@ impl Driver for CDriver {
     }
 }
 
-/// Facade 2.0: the hooks of a Linux-KMS device's KMS code (`struct
+/// Facade 2.0: the hooks of a Linux-KMS driver's KMS code (`struct
 /// drm_illumos_lkms_funcs`), which `drm_dev_alloc` checked for the
-/// required ones. Thread context, no core locks held.
+/// required ones; the core calls them once mode setting runs
+/// (`drm_dev_illumos_lkms_register()`). Thread context, no core locks held.
 impl LkmsHooks for CDriver {
     fn file_open(&self, file: u32, _ctx: &Sleepable) -> Result<(), Errno> {
         let core = self.core();

@@ -2224,6 +2224,9 @@ const _: () = {
         [::core::mem::offset_of!(drm_illumos_lkms_funcs, mode_config) - 48usize];
 };
 unsafe extern "C" {
+    pub fn drm_dev_illumos_lkms_register(dev: *mut drm_device) -> core::ffi::c_int;
+}
+unsafe extern "C" {
     pub fn drm_illumos_event_reserve(file: *mut drm_file, size: usize) -> core::ffi::c_int;
 }
 unsafe extern "C" {

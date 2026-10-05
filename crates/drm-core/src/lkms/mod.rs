@@ -5,26 +5,31 @@
 //! Facade 2.0: mode setting by Linux's KMS code carried in C
 //! (`include/drm/drm_lkms.h`, `misc/drm_kms`).
 //!
-//! A C driver whose table has `illumos_lkms` and whose device has
-//! `DRIVER_MODESET` in `drm_device.driver_features` when
-//! `drm_dev_register()` runs is a Linux-KMS device. The core keeps what it
-//! keeps for every device (the ioctl entry, argument copies, permission
-//! flags, master and authentication, client capabilities, `GET_CAP`,
-//! files, GEM, PRIME, sync objects) and hands the rest to the KMS code:
+//! A C driver whose table has `illumos_lkms` is a Linux-KMS driver. Its
+//! device registers as any other (`drm_dev_register()`) and gets the
+//! files' event queues; mode setting starts later, when the driver calls
+//! `drm_dev_illumos_lkms_register()` with `DRIVER_MODESET` in
+//! `drm_device.driver_features` (the LinuxKPI layer does where i915 calls
+//! Linux's `drm_dev_register()`, once its mode configuration exists).
+//! Until then the device answers as one without mode setting
+//! ([`caps_view`]). The core keeps what it keeps for every device (the
+//! ioctl entry, argument copies, permission flags, master and
+//! authentication, client capabilities, `GET_CAP`, files, GEM, PRIME,
+//! sync objects) and hands the rest to the KMS code:
 //!
+//! * `drm_dev_illumos_lkms_register()` takes the `GET_CAP` limits from the
+//!   KMS code's `mode_config` and calls `register_dev`; `unregister_dev`
+//!   runs once, if that succeeded, before the minor nodes go
+//!   ([`Registration`]);
 //! * every command of the core's mode-setting table
 //!   ([`crate::kms::ioctl`]) goes, after the core's permission check, to
 //!   the KMS code's `ioctl` hook with the kernel copy of its argument
-//!   ([`forward_ioctl`]);
-//! * a file opens with the KMS code's `file_open` before the driver's
-//!   `open` and closes with its `file_close` before the core releases the
-//!   file's GEM handles and the driver's `postclose` runs; `lastclose`
-//!   follows the close of the device's last open file ([`open_file`],
-//!   [`close_file`]);
-//! * `drm_dev_register()` takes the `GET_CAP` limits from the KMS code's
-//!   `mode_config`, registers, and ends with `register_dev`;
-//!   `unregister_dev` runs once, before the minor nodes go
-//!   ([`Registration`]);
+//!   ([`forward_ioctl`]), for files the KMS code opened;
+//! * a file opened once mode setting runs opens with the KMS code's
+//!   `file_open` before the driver's `open` and closes with its
+//!   `file_close` before the core releases the file's GEM handles and the
+//!   driver's `postclose` runs; `lastclose` follows the close of the
+//!   device's last open file ([`open_file`], [`close_file`]);
 //! * the KMS code delivers vblank and flip events into the core's per-file
 //!   queues, which `read(2)` and `chpoll(9E)` serve ([`events`], and
 //!   `lkms::dev` in the kernel).
@@ -35,7 +40,7 @@
 
 use ddi::{Errno, Sleepable};
 
-use crate::driver::ModeConfig;
+use crate::driver::{Features, ModeConfig};
 use crate::ioctl::SizePlan;
 
 #[cfg(not(test))]
@@ -56,7 +61,8 @@ pub trait LkmsHooks: Sync {
     fn file_close(&self, file: u32, ctx: &Sleepable);
     /// `lastclose`: after the device's last open file closed.
     fn lastclose(&self, ctx: &Sleepable);
-    /// `register_dev`: at the end of a successful `drm_dev_register()`.
+    /// `register_dev`: in `drm_dev_illumos_lkms_register()`, after
+    /// `mode_config`.
     fn register_dev(&self, ctx: &Sleepable) -> Result<(), Errno>;
     /// `unregister_dev`: in a `drm_dev_unregister()` that is going to
     /// succeed, before the minor nodes go.
@@ -145,20 +151,39 @@ pub fn open_file(
     Ok(())
 }
 
-/// `close(9E)` of a file: with the KMS code's hooks, `file_close` first
-/// (Linux's `drm_file_free()` releases framebuffers and user blobs, which
-/// hold GEM references, before the handles), then the core's release
-/// (`release`: GEM handles, sync objects, the driver's `postclose`, the
-/// file's state; it answers whether no file of the device is open any
-/// more), then `lastclose` if that was the last file. Without hooks only
-/// the release.
-pub fn close_file(h: Option<&dyn LkmsHooks>, file: u32, release: impl FnOnce() -> bool, ctx: &Sleepable) {
-    if let Some(h) = h {
+/// `close(9E)` of a file: with the hooks of a device whose mode setting
+/// runs (`h`), `file_close` first if the KMS code opened the file
+/// (`opened`; Linux's `drm_file_free()` releases framebuffers and user
+/// blobs, which hold GEM references, before the handles), then the core's
+/// release (`release`: GEM handles, sync objects, the driver's
+/// `postclose`, the file's state; it answers whether no file of the device
+/// is open any more), then `lastclose` if that was the last file. Without
+/// hooks only the release.
+pub fn close_file(h: Option<&dyn LkmsHooks>, opened: bool, file: u32, release: impl FnOnce() -> bool, ctx: &Sleepable) {
+    if let (Some(h), true) = (h, opened) {
         h.file_close(file, ctx);
     }
     let last = release();
     if let (Some(h), true) = (h, last) {
         h.lastclose(ctx);
+    }
+}
+
+/// What `GET_CAP` and `SET_CLIENT_CAP` see of a device: its features and
+/// mode configuration (`info`), or, for a Linux-KMS driver's device, the
+/// features and configuration `drm_dev_illumos_lkms_register()` started
+/// mode setting with (`started`), and until then the device's features
+/// without `MODESET` and `ATOMIC` and the default configuration, as for a
+/// device without mode setting.
+pub fn caps_view(
+    info: (Features, ModeConfig),
+    lkms: bool,
+    started: Option<(Features, ModeConfig)>,
+) -> (Features, ModeConfig) {
+    match (lkms, started) {
+        (false, _) => info,
+        (true, Some(s)) => s,
+        (true, None) => (info.0.without(Features::MODESET.union(Features::ATOMIC)), ModeConfig::DEFAULT),
     }
 }
 
@@ -180,28 +205,18 @@ impl Registration {
         self.registered
     }
 
-    /// `drm_dev_register()` of a Linux-KMS device: the KMS code's
-    /// `mode_config`, handed to `apply` (the `GET_CAP` limits, set before
-    /// the device can be opened), the core's registration (`attach`, which
-    /// creates the minor nodes and publishes the device), then
-    /// `register_dev`. If that fails, `undo` reverses the registration and
-    /// the error is the result.
-    pub fn register<T>(
-        &mut self,
-        h: &dyn LkmsHooks,
-        apply: impl FnOnce(ModeConfig),
-        attach: impl FnOnce() -> Result<T, Errno>,
-        undo: impl FnOnce(T),
-        ctx: &Sleepable,
-    ) -> Result<T, Errno> {
-        apply(h.mode_config(ctx));
-        let t = attach()?;
-        if let Err(e) = h.register_dev(ctx) {
-            undo(t);
-            return Err(e);
+    /// The hooks of `drm_dev_illumos_lkms_register()` on a registered
+    /// device: the KMS code's `mode_config` (returned: the `GET_CAP`
+    /// limits), then `register_dev`, whose error is the result (and
+    /// nothing is owed then). `EBUSY` if `register_dev` succeeded before.
+    pub fn start(&mut self, h: &dyn LkmsHooks, ctx: &Sleepable) -> Result<ModeConfig, Errno> {
+        if self.registered {
+            return Err(Errno::EBUSY);
         }
+        let m = h.mode_config(ctx);
+        h.register_dev(ctx)?;
         self.registered = true;
-        Ok(t)
+        Ok(m)
     }
 
     /// `unregister_dev`, once: in the first `drm_dev_unregister()` that
@@ -475,6 +490,7 @@ mod tests {
         for f in [1u32, 2] {
             close_file(
                 Some(&h),
+                true,
                 f,
                 || {
                     h.note(format!("release {f}"));
@@ -485,10 +501,16 @@ mod tests {
             );
         }
         assert_eq!(h.log(), ["file_close 1", "release 1", "file_close 2", "release 2", "lastclose"]);
-        // Without hooks (an R3 or render-only device), only the release.
+        // A file opened before mode setting started: no file_close, but
+        // lastclose still follows the last file.
+        close_file(Some(&h), false, 3, || true, &ctx);
+        assert_eq!(h.log(), ["lastclose"]);
+        // Without hooks (an R3 or render-only device, or before mode
+        // setting started), only the release.
         let mut ran = false;
         close_file(
             None,
+            true,
             1,
             || {
                 ran = true;
@@ -501,28 +523,17 @@ mod tests {
     }
 
     #[test]
-    fn register_and_unregister_order() {
+    fn start_and_unregister_order() {
         let ctx = ctx();
         let h = Mock::default();
         let mut reg = Registration::new();
-        let mut applied = None;
-        let r = reg.register(
-            &h,
-            |m| {
-                h.note("apply");
-                applied = Some(m)
-            },
-            || {
-                h.note("attach");
-                Ok(7)
-            },
-            |_| h.note("undo"),
-            &ctx,
-        );
-        assert_eq!(r, Ok(7));
+        let m = reg.start(&h, &ctx);
+        assert_eq!(m.map(|m| (m.cursor_width, m.async_page_flip)), Ok((256, true)));
         assert!(reg.is_registered());
-        assert_eq!(h.log(), ["mode_config", "apply", "attach", "register_dev"]);
-        assert_eq!(applied.map(|m| (m.cursor_width, m.async_page_flip)), Some((256, true)));
+        assert_eq!(h.log(), ["mode_config", "register_dev"]);
+        // A second start is refused without a hook.
+        assert_eq!(reg.start(&h, &ctx), Err(Errno::EBUSY));
+        assert!(h.log().is_empty());
         // unregister_dev runs once: the unplug, then the last put's
         // unregistration finds nothing owed.
         reg.unregister(&h, &ctx);
@@ -532,22 +543,39 @@ mod tests {
     }
 
     #[test]
-    fn register_failures() {
+    fn start_failure_owes_nothing() {
         let ctx = ctx();
-        // register_dev fails: the registration is undone, nothing is owed.
         let h = Mock { fail_register: true, ..Mock::default() };
         let mut reg = Registration::new();
-        let r = reg.register(&h, |_| (), || Ok("dev"), |d| h.note(format!("undo {d}")), &ctx);
-        assert_eq!(r, Err(Errno::ENODEV));
-        assert_eq!(h.log(), ["mode_config", "register_dev", "undo dev"]);
+        assert_eq!(reg.start(&h, &ctx), Err(Errno::ENODEV));
+        assert_eq!(h.log(), ["mode_config", "register_dev"]);
+        assert!(!reg.is_registered());
         reg.unregister(&h, &ctx);
         assert!(h.log().is_empty(), "no unregister_dev without register_dev");
-        // The core's registration fails: register_dev never runs.
-        let h = Mock::default();
-        let r: Result<(), Errno> = reg.register(&h, |_| (), || Err(Errno::EINVAL), |_| h.note("undo"), &ctx);
-        assert_eq!(r, Err(Errno::EINVAL));
-        assert_eq!(h.log(), ["mode_config"]);
-        assert!(!reg.is_registered());
+    }
+
+    #[test]
+    fn caps_before_and_after_start() {
+        use crate::caps::{EOPNOTSUPP, get_cap};
+        let dev = Features::GEM.union(Features::MODESET).union(Features::ATOMIC).union(Features::DUMB);
+        let info = (dev, ModeConfig { cursor_width: 128, ..ModeConfig::DEFAULT });
+        let started = (dev, ModeConfig { cursor_width: 256, async_page_flip: true, ..ModeConfig::DEFAULT });
+        // Not a Linux-KMS driver: the device's own view.
+        assert_eq!(caps_view(info, false, None), info);
+        // Before drm_dev_illumos_lkms_register(): as a device without mode
+        // setting (GEM and PRIME stay).
+        let (f, m) = caps_view(info, true, None);
+        assert!(!f.contains(Features::MODESET) && !f.contains(Features::ATOMIC) && f.contains(Features::GEM));
+        assert_eq!(m, ModeConfig::DEFAULT);
+        assert_eq!(get_cap(f, &m, u64::from(uapi::DRM_CAP_CURSOR_WIDTH)), Err(EOPNOTSUPP));
+        assert_eq!(get_cap(f, &m, u64::from(uapi::DRM_CAP_PRIME)), Ok(3));
+        let mut c = crate::caps::ClientCaps::default();
+        assert_eq!(c.set(f, u64::from(uapi::DRM_CLIENT_CAP_ATOMIC), 1), Err(EOPNOTSUPP));
+        // Afterwards: what it started with.
+        let (f, m) = caps_view(info, true, Some(started));
+        assert_eq!(get_cap(f, &m, u64::from(uapi::DRM_CAP_CURSOR_WIDTH)), Ok(256));
+        assert_eq!(get_cap(f, &m, u64::from(uapi::DRM_CAP_ASYNC_PAGE_FLIP)), Ok(1));
+        assert_eq!(c.set(f, u64::from(uapi::DRM_CLIENT_CAP_ATOMIC), 1), Ok(()));
     }
 
     #[test]

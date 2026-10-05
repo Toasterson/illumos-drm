@@ -142,13 +142,24 @@ pub struct FileQueue {
     /// The file is the current master, which the device-wide bound
     /// exempts (a snapshot the core keeps current).
     master: bool,
+    /// The KMS code's `file_open` accepted the file (it was opened after
+    /// mode setting started): its mode-setting ioctls go to the KMS code,
+    /// and its close calls `file_close`.
+    kms_open: bool,
 }
 
 impl FileQueue {
     /// Allocates the queue of a file that is being opened. Allocation may
     /// block: call it without the event lock.
     pub fn new(master: bool, ctx: &Sleepable) -> Box<FileQueue> {
-        Box::new(FileQueue { ring: Ring::new(ctx), reserved: 0, closing: false, reading: false, master })
+        Box::new(FileQueue {
+            ring: Ring::new(ctx),
+            reserved: 0,
+            closing: false,
+            reading: false,
+            master,
+            kms_open: false,
+        })
     }
 
     fn charged(&self) -> usize {
@@ -249,6 +260,18 @@ impl LkmsEvents {
             }
             _ => Err(q),
         }
+    }
+
+    /// Records that the KMS code's `file_open` accepted the file.
+    pub fn set_kms_open(&mut self, file: u32) {
+        if let Some(f) = self.file_mut(file) {
+            f.kms_open = true;
+        }
+    }
+
+    /// Whether the KMS code's `file_open` accepted the file.
+    pub fn kms_open(&self, file: u32) -> bool {
+        self.file(file).is_some_and(|f| f.kms_open)
     }
 
     /// Updates the master snapshot of a file.
@@ -577,8 +600,12 @@ mod tests {
         assert_eq!(e.stats().charged, 32);
         assert_eq!(e.deliver(6, &ev(1, 32, 3)), Delivery::Dropped);
         assert_eq!(e.stats().dropped, 3);
-        // The clone ID can be used again.
+        // The clone ID can be used again, by a file the KMS code has not
+        // opened yet.
+        e.set_kms_open(7);
+        assert!(e.kms_open(7));
         assert!(e.open(6, FileQueue::new(false, &ctx())).is_ok());
+        assert!(!e.kms_open(6) && !e.kms_open(9));
         assert!(e.open(6, FileQueue::new(false, &ctx())).is_err());
         assert!(e.open(MAX_FILES + 1, FileQueue::new(false, &ctx())).is_err());
     }

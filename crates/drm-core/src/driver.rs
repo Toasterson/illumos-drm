@@ -53,6 +53,10 @@ impl Features {
     pub const fn union(self, other: Features) -> Features {
         Features(self.0 | other.0)
     }
+    /// The features without those of `other`.
+    pub const fn without(self, other: Features) -> Features {
+        Features(self.0 & !other.0)
+    }
     /// Reports whether every feature in `other` is present.
     pub const fn contains(self, other: Features) -> bool {
         self.0 & other.0 == other.0
@@ -334,12 +338,13 @@ pub trait Driver: Send + Sync + Sized + 'static {
 
     /// Facade 2.0: the hooks of the driver's Linux KMS code
     /// ([`crate::lkms`]), for a device whose mode setting that code does.
-    /// The core asks once, when the device attaches, and treats the device
-    /// as a Linux-KMS device if the answer is `Some`: its mode-setting
-    /// ioctls go to [`Driver::lkms_ioctl`], its files get event queues
-    /// that `read(2)` and `chpoll(9E)` serve, and its opens and closes run
-    /// the hooks. Never together with [`Driver::kms`]. The default, `None`,
-    /// is every other device.
+    /// The core asks when the device attaches; if the answer is `Some`,
+    /// its files get event queues that `read(2)` and `chpoll(9E)` serve,
+    /// and once [`crate::Device::lkms_start`] has started mode setting,
+    /// the mode-setting ioctls of files opened afterwards go to
+    /// [`Driver::lkms_ioctl`] and their opens and closes run the hooks.
+    /// Never together with [`Driver::kms`]. The default, `None`, is every
+    /// other device.
     #[cfg(not(test))]
     fn lkms(&self) -> Option<&dyn crate::lkms::LkmsHooks> {
         None

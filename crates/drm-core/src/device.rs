@@ -204,15 +204,12 @@ impl<D: Driver> Device<D> {
                 return Err(DdiError);
             }
         };
-        // Facade 2.0: a Linux-KMS device has the core's files and event
-        // queues, and no mode-setting state of the core's.
+        // Facade 2.0: a Linux-KMS driver's device has the core's files and
+        // event queues, and no mode-setting state of the core's; its mode
+        // setting starts later (Device::lkms_start).
         let lkms = match driver.lkms() {
             Some(_) if driver.kms().is_some() => {
                 dev.warn(format_args!("a driver has the core's mode setting or Linux's, not both"));
-                return Err(DdiError);
-            }
-            Some(_) if !info.features.contains(Features::MODESET) => {
-                dev.warn(format_args!("Linux mode setting needs MODESET"));
                 return Err(DdiError);
             }
             Some(_) => match LkmsQueues::new(driver.fence_priority(), ctx) {
@@ -374,17 +371,42 @@ impl<D: Driver> Device<D> {
         }
     }
 
-    /// Undoes [`Device::attach`] of a device that never served a file,
-    /// without the driver's detach hooks: facade 2.0's
-    /// `drm_dev_register()` whose `register_dev` failed. The minor nodes
-    /// and the device number go with the device.
-    pub fn abandon(self, ctx: &Sleepable) {
-        if let Some(k) = &self.kms {
-            k.teardown(ctx);
+    /// Facade 2.0: starts the mode setting of a Linux-KMS driver's device
+    /// (`drm_dev_illumos_lkms_register()`): `EBUSY` while a file is open
+    /// (files opened before would have no KMS state), then the KMS code's
+    /// `mode_config` and `register_dev` through `reg`, whose error is the
+    /// result (mode setting stays off); from then on files opened get the
+    /// KMS code's hooks and `GET_CAP` answers with `features` and the KMS
+    /// code's configuration. `EINVAL` for another device.
+    pub fn lkms_start(
+        &self,
+        features: Features,
+        h: &dyn lkms::LkmsHooks,
+        reg: &mut lkms::Registration,
+        ctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        let q = self.lkms.as_ref().ok_or(Errno::EINVAL)?;
+        if q.active() || reg.is_registered() {
+            return Err(Errno::EBUSY);
         }
-        if self.gem.is_some() {
-            registry::remove(self.index);
+        if self.state.lock().open_files() != 0 {
+            return Err(Errno::EBUSY);
         }
+        let m = reg.start(h, ctx)?;
+        q.start(features, m);
+        Ok(())
+    }
+
+    /// The number of open files (a snapshot).
+    pub fn open_files(&self) -> u32 {
+        self.state.lock().open_files()
+    }
+
+    /// What `GET_CAP` and `SET_CLIENT_CAP` see ([`lkms::caps_view`]).
+    fn caps(&self) -> (Features, crate::driver::ModeConfig) {
+        let info = self.driver.info();
+        let started = self.lkms.as_ref().and_then(|q| q.started());
+        lkms::caps_view((info.features, info.mode_config), self.lkms.is_some(), started)
     }
 
     /// The core's own `MODE_CREATE_DUMB`: [`Driver::dumb_layout`], the
@@ -658,8 +680,9 @@ impl<D: Driver> CharDevice for Device<D> {
                 return Err(e);
             }
         }
-        // For a Linux-KMS device the driver's file_open runs the KMS
-        // code's open before the driver's own (lkms::open_file).
+        // For a Linux-KMS device whose mode setting runs the driver's
+        // file_open runs the KMS code's open before the driver's own
+        // (lkms::open_file) and marks the file (LkmsQueues::set_kms_open).
         if let Err(e) = self.driver.file_open(self, clone, ctx) {
             if let Some(q) = &self.lkms {
                 q.close(clone);
@@ -695,12 +718,16 @@ impl<D: Driver> CharDevice for Device<D> {
             // KMS code's file_close runs before the release (it removes
             // the file's framebuffers and blobs), lastclose after the last
             // file (lkms::close_file).
-            let hooks = if self.lkms.is_some() { self.driver.lkms() } else { None };
+            let (hooks, opened) = match &self.lkms {
+                Some(q) if q.active() => (self.driver.lkms(), q.kms_open(c)),
+                _ => (None, false),
+            };
             if let Some(q) = &self.lkms {
                 q.begin_close(c);
             }
             lkms::close_file(
                 hooks,
+                opened,
                 c.get(),
                 || {
                     if let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) {
@@ -831,7 +858,10 @@ impl<D: Driver> Device<D> {
         arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
-        if self.lkms.is_some() {
+        // A file the KMS code opened, of a device whose mode setting runs;
+        // any other file of a Linux-KMS driver's device gets EOPNOTSUPP
+        // below, as a device without display.
+        if self.lkms.as_ref().is_some_and(|q| q.active() && q.kms_open(c)) {
             let nr = u32::from(drm_uapi::ioc::ioc_nr(entry.cmd));
             return lkms::forward_ioctl(
                 nr,
@@ -947,18 +977,19 @@ impl<D: Driver> Device<D> {
             Op::GetCap => {
                 let mut g = UserArg::<uapi::drm_get_cap>::read(arg)?;
                 self.state.lock().permit(c, perm, privileged)?;
-                let value =
-                    caps::get_cap(self.driver.info().features, &self.driver.info().mode_config, g.get().capability)?;
+                let (features, mode) = self.caps();
+                let value = caps::get_cap(features, &mode, g.get().capability)?;
                 // SAFETY: a field assignment.
                 unsafe { g.get_mut() }.value = value;
                 g.write(arg)?;
             }
             Op::SetClientCap => {
                 let a = UserArg::<uapi::drm_set_client_cap>::read(arg)?;
+                let features = self.caps().0;
                 let mut s = self.state.lock();
                 s.permit(c, perm, privileged)?;
                 let f = s.file_mut(c).ok_or(Errno::ENXIO)?;
-                f.caps.set(self.driver.info().features, a.get().capability, a.get().value)?;
+                f.caps.set(features, a.get().capability, a.get().value)?;
                 self.mirror(&s, c);
             }
             Op::SetMaster => {

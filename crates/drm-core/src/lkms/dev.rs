@@ -2,8 +2,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The event queues of a Linux-KMS device in the kernel: the lock around
-//! [`LkmsEvents`], `read(2)`, `chpoll(9E)` and the wakeups.
+//! The event queues of a Linux-KMS driver's device in the kernel: the lock
+//! around [`LkmsEvents`], `read(2)`, `chpoll(9E)` and the wakeups, and
+//! whether the device's mode setting runs.
 //!
 //! # Contexts and locks
 //!
@@ -33,13 +34,19 @@ use ddi::prelude::*;
 use ddi::sys;
 
 use super::events::{Delivery, FileQueue, LkmsEventStats, LkmsEvents, ReadStep};
+use crate::driver::{Features, ModeConfig};
 use crate::minor::{CloneId, MAX_FILES};
 
-/// The event state of a Linux-KMS device.
+/// The event state of a Linux-KMS driver's device, and whether its mode
+/// setting runs.
 pub struct LkmsQueues {
     lock: Mutex<LkmsEvents>,
     cv: CondVar,
     polls: PollHeads,
+    /// The features and mode configuration mode setting started with
+    /// (`drm_dev_illumos_lkms_register()`); `None` until then. Thread
+    /// context only.
+    started: Mutex<Option<(Features, ModeConfig)>>,
 }
 
 impl LkmsQueues {
@@ -51,7 +58,39 @@ impl LkmsQueues {
             Some(p) => Mutex::with_priority(events, p),
             None => Mutex::new(events),
         };
-        Ok(LkmsQueues { lock, cv: CondVar::new(), polls: PollHeads::new(MAX_FILES as usize + 1, ctx)? })
+        Ok(LkmsQueues {
+            lock,
+            cv: CondVar::new(),
+            polls: PollHeads::new(MAX_FILES as usize + 1, ctx)?,
+            started: Mutex::new(None),
+        })
+    }
+
+    /// Records that mode setting runs, with the device's features and the
+    /// KMS code's mode configuration at the start.
+    pub fn start(&self, features: Features, mode: ModeConfig) {
+        *self.started.lock() = Some((features, mode));
+    }
+
+    /// The features and mode configuration mode setting started with, if
+    /// it did.
+    pub fn started(&self) -> Option<(Features, ModeConfig)> {
+        *self.started.lock()
+    }
+
+    /// Whether mode setting runs.
+    pub fn active(&self) -> bool {
+        self.started.lock().is_some()
+    }
+
+    /// Records that the KMS code's `file_open` accepted file `c`.
+    pub fn set_kms_open(&self, c: CloneId) {
+        self.lock.lock().set_kms_open(c.get());
+    }
+
+    /// Whether the KMS code's `file_open` accepted file `c`.
+    pub fn kms_open(&self, c: CloneId) -> bool {
+        self.lock.lock().kms_open(c.get())
     }
 
     /// The statistics.

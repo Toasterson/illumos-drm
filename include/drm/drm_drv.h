@@ -65,9 +65,12 @@ enum drm_driver_feature {
  * driver_features
  *		DRIVER_* flags; DRIVER_SYNCOBJ_TIMELINE needs DRIVER_SYNCOBJ.
  *		DRIVER_MODESET with illumos_rkms (and DRIVER_GEM) has a
- *		display; without illumos_rkms the device reports the
- *		mode-setting capabilities but has no display objects, and the
- *		mode-setting ioctls fail with EOPNOTSUPP.
+ *		display; with illumos_lkms it has one once
+ *		drm_dev_illumos_lkms_register() succeeded (drm_lkms.h); with
+ *		neither the device reports the mode-setting capabilities but
+ *		has no display objects, and the mode-setting ioctls fail with
+ *		EOPNOTSUPP. drm_dev_register() takes the device's
+ *		driver_features (drm_device), not the table's.
  * ioctls, num_ioctls
  *		the driver's private ioctls (drm_ioctl.h).
  *
@@ -90,8 +93,11 @@ enum drm_driver_feature {
  *		sources. Optional.
  * illumos_rkms	mode setting with the core's R3 implementation (drm_rkms.h).
  * illumos_lkms	facade 2.0: mode setting with Linux's KMS code carried in C
- *		(drm_lkms.h, misc/drm_kms). At most one of illumos_rkms and
- *		illumos_lkms; drm_dev_alloc() refuses a table with both.
+ *		(drm_lkms.h, misc/drm_kms), started by the driver with
+ *		drm_dev_illumos_lkms_register() after drm_dev_register(). At
+ *		most one of illumos_rkms and illumos_lkms; drm_dev_alloc()
+ *		refuses a table with both, or an illumos_lkms without one of
+ *		its required hooks.
  */
 struct drm_driver {
 	int (*open)(struct drm_device *dev, struct drm_file *file);

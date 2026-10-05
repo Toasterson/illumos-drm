@@ -19,7 +19,6 @@ use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_void};
 use core::ops::Deref;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use ddi::sys;
 use ddi::{DevInfo, DmaAttr, Errno, IntrPriority, Sleepable};
@@ -50,6 +49,9 @@ pub(crate) struct Setup {
     pub(crate) unique_len: usize,
     /// Facade 2.0: whether the KMS code's `unregister_dev` is owed.
     pub(crate) lkms_reg: Registration,
+    /// Facade 2.0: `drm_dev_illumos_lkms_register()` was called (a second
+    /// call is refused).
+    pub(crate) lkms_called: bool,
 }
 
 /// The state behind one `struct drm_device`.
@@ -78,12 +80,9 @@ pub(crate) struct DevCore {
     pub(crate) minors: UnsafeCell<[f::drm_minor; 2]>,
     /// The mode setting of a driver with `illumos_rkms`.
     pub(crate) kms: Option<CKms>,
-    /// Facade 2.0: the hooks of a driver with `illumos_lkms`.
+    /// Facade 2.0: the hooks of a driver with `illumos_lkms`, whose
+    /// mode setting `drm_dev_illumos_lkms_register()` starts.
     pub(crate) lkms: Option<&'static f::drm_illumos_lkms_funcs>,
-    /// Facade 2.0: the device is a Linux-KMS device (`illumos_lkms` and
-    /// `DRIVER_MODESET` in `drm_device.driver_features` at registration).
-    /// Written only before the device is published.
-    lkms_on: AtomicBool,
 }
 
 // SAFETY: the raw pointers are the device structure (whose fields the core
@@ -273,6 +272,7 @@ impl DevCore {
                 unique: [0; BUS_ID_MAX + 1],
                 unique_len: 0,
                 lkms_reg: Registration::new(),
+                lkms_called: false,
             }),
             device: Published::new(),
             files: KMutex::new(KVec::new()),
@@ -280,7 +280,6 @@ impl DevCore {
             minors: UnsafeCell::new(unsafe { core::mem::zeroed() }),
             kms,
             lkms,
-            lkms_on: AtomicBool::new(false),
         });
         let core = Box::into_raw(core);
         // SAFETY: ddev points into the zeroed allocation.
@@ -369,16 +368,9 @@ impl DevCore {
         unsafe { (*self.info.get()).features = features };
     }
 
-    /// Facade 2.0: the KMS code's hooks, if the device is a Linux-KMS
-    /// device.
+    /// Facade 2.0: the KMS code's hooks of a Linux-KMS driver's device.
     pub(crate) fn lkms_funcs(&self) -> Option<&'static f::drm_illumos_lkms_funcs> {
-        if self.lkms_on.load(Ordering::Acquire) { self.lkms } else { None }
-    }
-
-    /// Makes the device a Linux-KMS device or not; before it is
-    /// published only.
-    pub(crate) fn set_lkms_on(&self, on: bool) {
-        self.lkms_on.store(on && self.lkms.is_some(), Ordering::Release);
+        self.lkms
     }
 
     pub(crate) fn ddev(&self) -> *mut f::drm_device {

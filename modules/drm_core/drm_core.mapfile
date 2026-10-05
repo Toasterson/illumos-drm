@@ -67,6 +67,7 @@ SYMBOL_SCOPE {
 		drm_debug;
 		drm_dev_alloc;
 		drm_dev_get;
+		drm_dev_illumos_lkms_register;
 		drm_dev_illumos_put;
 		drm_dev_illumos_set_dma_attr;
 		drm_dev_illumos_set_fence_priority;

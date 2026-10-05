@@ -104,18 +104,19 @@ self-test; `run-r5e-test.sh` with `misc/drm_helpers` on the layer passed
 first step on the owner's ThinkPad X230 and MacBook Pro.
 
 Facade 2.0 (Linux KMS hooks, the core's part of the i915n display work;
-see *Facade 2.0 (Linux KMS hooks)* under *Decisions*): on 5 October 2026,
-at `15005e0`, the core forwards the mode-setting ioctls, file events and
-registration of a Linux-KMS C driver to its KMS code. Verified so far:
-the host tests (`drm-core`: 177, among them 16 for facade 2.0 with a mock
+see *Facade 2.0 (Linux KMS hooks)* under *Decisions*): on 5 October 2026
+the core forwards the mode-setting ioctls, file events and registration
+of a Linux-KMS C driver to its KMS code, from the driver's
+`drm_dev_illumos_lkms_register()` on. Verified so far:
+the host tests (`drm-core`: 178, among them 17 for facade 2.0 with a mock
 KMS implementation), `cargo clippy -D warnings`, `cargo fmt`, the
 generated files regenerated with bindgen and current; on oibuild (gcc
 15.3.0) gcc's layout of the facade (41 sizes, 277 offsets) matched the
-Rust bindings, `misc/drm_core` linked with exactly the 144 symbols of its
+Rust bindings, `misc/drm_core` linked with exactly the 145 symbols of its
 mapfile and the facade's CTF, `rdrmnull` and `virtio_gpu` linked without
 a symbol of the stateful core, and `cdrmnull` and `misc/linuxkpi` built
 against the 2.0 headers (log
-`logs/oibuild/illumos-drm/20261005-kms-core-15005e0-build.log` in the
+`logs/oibuild/illumos-drm/20261005-kms-core-*-build.log` in the
 workspace). Nothing has been loaded or run in a kernel yet, and no C
 implementation of the hooks (`misc/drm_kms`) exists yet.
 
@@ -1828,28 +1829,43 @@ copies, permissions, master and authentication, client capabilities,
 `GET_CAP`, files, GEM, PRIME and sync objects. A driver table names the
 KMS code's hooks in `illumos_lkms` (`drm_lkms.h`); `drm_dev_alloc()`
 refuses a table with both `illumos_rkms` and `illumos_lkms`, or without a
-required hook (`-EINVAL`). A device whose `drm_device.driver_features`
-(the device's, not the table's: i915 clears `DRIVER_MODESET` on hardware
-without a display; the core now takes every device's features from there
-at registration) has `DRIVER_MODESET` when `drm_dev_register()` runs is a
-Linux-KMS device (`crates/drm-core/src/lkms/`). Every command of the
-core's mode-setting table goes, after the core's permission check, to the
-`ioctl` hook with the kernel copy of its argument (Linux's size rule, a
-256-byte zeroed buffer of which the table's size is copied in and back;
-nothing is copied back after an error, whose negative errno, `-ENOTTY`
-included, is the ioctl's), inside an ioctl frame so that the KMS code's
-copies of the arrays an argument points to work. `drm_dev_register()`
-calls `mode_config` first (`GET_CAP`'s limits, `async_page_flip` for
+required hook (`-EINVAL`). The core takes every device's features from
+`drm_device.driver_features` at registration (the device's, not the
+table's). A Linux-KMS driver's device registers as any other and gets its
+files' event queues; `drm_dev_register()` never starts its mode setting,
+because the LinuxKPI layer registers i915's device already in
+`devm_drm_dev_alloc()` (i915 makes GEM objects long before its own
+`drm_dev_register()`), before i915's mode configuration exists and before
+it clears `DRIVER_MODESET` on hardware without a display. The driver
+starts it with `drm_dev_illumos_lkms_register()`, which the layer calls
+where i915 calls Linux's `drm_dev_register()`: with `DRIVER_MODESET` in
+the device's `driver_features` (read then) and `illumos_lkms` it calls
+`mode_config` (`GET_CAP`'s limits, `async_page_flip` for
 `DRM_CAP_ASYNC_PAGE_FLIP`; `drm_dev_illumos_set_mode_config()` keeps
-asynchronous flips off for R3 drivers), then registers, then calls
-`register_dev`, whose failure undoes the registration. Opens run
+asynchronous flips off for R3 drivers) and `register_dev`; it returns 0
+(also, doing nothing, without `DRIVER_MODESET` or `illumos_lkms`),
+`-EINVAL` for a device that is not registered or unplugged, `-EBUSY` for
+a second call or while a file is open (files opened before the start
+would have no KMS state; that refusal does not count as the call), or
+`register_dev`'s error (mode setting stays off, the device registered).
+Until mode setting runs, the mode-setting ioctls fail with `EOPNOTSUPP`
+and `GET_CAP` and `SET_CLIENT_CAP` answer as for a device without
+`DRIVER_MODESET` (and `DRIVER_ATOMIC`): mode-setting capabilities
+`EOPNOTSUPP`, not default limits (`crates/drm-core/src/lkms/`). Afterwards
+every command of the core's mode-setting table from a file the KMS code
+opened goes, after the core's permission check, to the `ioctl` hook with
+the kernel copy of its argument (Linux's size rule, a 256-byte zeroed
+buffer of which the table's size is copied in and back; nothing is copied
+back after an error, whose negative errno, `-ENOTTY` included, is the
+ioctl's), inside an ioctl frame so that the KMS code's copies of the
+arrays an argument points to work. Opens (once mode setting runs) run
 `file_open` between the core's set-up and the driver's `open`
-(`file_close` undoes it if the driver's open fails); closes run
-`file_close` before the core releases the file's GEM handles and sync
+(`file_close` undoes it if the driver's open fails); closes of those
+files run `file_close` before the core releases the file's GEM handles and sync
 objects and the driver's `postclose` runs, and `lastclose` after the last
 open file is gone, without a global lock (Linux's order for drivers
 without `lastclose` of their own; a concurrent open may overlap it).
-`unregister_dev` runs once: in a `drm_dev_unregister()` whose checks
+`unregister_dev` runs once, if `register_dev` succeeded: in a `drm_dev_unregister()` whose checks
 passed, after the device left the device table and before the minor nodes
 go, or in `drm_dev_illumos_unplug()` once user space has let go (as
 Linux's `drm_dev_unplug()` unregisters at once): the LinuxKPI layer's
@@ -1888,8 +1904,8 @@ a mode-setting area of 1024 words and `drm_file` one of 32 words (opaque,
 zeroed, never touched by the core; a KMS module overlays Linux's fields
 there) and Linux's nine client-capability booleans at its start;
 `drm_driver.illumos_lkms`, `drm_illumos_mode_config.async_page_flip`,
-`struct drm_illumos_lkms_funcs` (in the version's size list) and the three
-event functions are new. `drm_facade.h` includes `drm_lkms.h`. Drivers
+`struct drm_illumos_lkms_funcs` (in the version's size list),
+`drm_dev_illumos_lkms_register()` and the three event functions are new. `drm_facade.h` includes `drm_lkms.h`. Drivers
 built for 1.x refuse to load; the Rust drivers fill in the new fields
 (no Linux KMS hooks, no asynchronous flips).
 
