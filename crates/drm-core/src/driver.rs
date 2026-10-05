@@ -208,8 +208,11 @@ pub trait Driver: Send + Sync + Sized + 'static {
     /// The driver's private ioctls, numbered from `DRM_COMMAND_BASE`
     /// (0x40) to below `DRM_COMMAND_END` (0xa0). A command matches the
     /// entry with its whole value first, otherwise the first entry with
-    /// its number and direction ([`crate::ioctl::lookup_driver`]);
-    /// [`Driver::ioctl`] handles them.
+    /// its number and direction, otherwise, as in Linux, the first entry
+    /// with its number in any direction ([`crate::ioctl::lookup_driver`]);
+    /// the argument is copied in and out only in the directions both
+    /// commands have ([`crate::ioctl::SizePlan`]). [`Driver::ioctl`]
+    /// handles them.
     fn ioctls(&self) -> &[DriverIoctl] {
         &[]
     }

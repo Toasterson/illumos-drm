@@ -21,9 +21,12 @@ pub const MAX_IOCTLS: usize = 32;
 /// One private ioctl of a driver: its complete command value, its
 /// permission flags (`DRM_AUTH`, `DRM_RENDER_ALLOW`, ... of
 /// `drm_facade_sys`) and its handler. Several entries may share a number
-/// with different structure sizes (the layouts of older userland): a
-/// command matches the entry with its whole value first, else the first
-/// entry with its number and direction, with Linux's size rule.
+/// with different structure sizes (the layouts of older userland) or
+/// directions: a command matches the entry with its whole value first,
+/// else the first entry with its number and direction, else, as in Linux,
+/// the first entry with its number in any direction. The argument follows
+/// Linux's size rule and is copied in and out only in the directions both
+/// commands have ([`IoctlData`]; `drm_core::ioctl` describes the rule).
 pub struct Ioctl<D: Driver> {
     /// The command value.
     pub cmd: u32,
@@ -48,8 +51,9 @@ unsafe impl Plain for u32 {}
 unsafe impl Plain for u64 {}
 
 /// The argument of an ioctl, as the core copied it in: the table entry's
-/// size, zero-extended. What the handler leaves in it is copied out when
-/// it returns `Ok` (for commands that copy out).
+/// size, zero-extended (all zeros when the caller's command or the entry
+/// does not copy in). What the handler leaves in it is copied out when it
+/// returns `Ok`, if both the caller's command and the entry copy out.
 pub struct IoctlData<'a> {
     buf: &'a mut [u8],
 }
