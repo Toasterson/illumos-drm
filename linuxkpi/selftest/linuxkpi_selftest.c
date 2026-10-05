@@ -459,6 +459,7 @@ st_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	st_sched_tests();
 	st_mem_tests(pdev);
 	st_resv_tests();
+	st_i2c_tests(pdev);
 	pr_info("linuxkpi_selftest: done %d passed %d failed\n", st_passed,
 	    st_failed);
 	(void) ddi_prop_update_int(DDI_DEV_T_NONE, lkpi_dev_dip(&pdev->dev),
