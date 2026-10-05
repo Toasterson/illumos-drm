@@ -681,6 +681,29 @@ lkpi_vmap_remove(const void *addr)
 	return (true);
 }
 
+/*
+ * Whether addr is inside a live vmap()/vmap_pfn() mapping: one that starts
+ * there, or the nearest one below it that covers it (is_vmalloc_addr()).
+ */
+bool
+lkpi_is_vmap_addr(const void *addr)
+{
+	struct lkpi_vmap key, *vm;
+	avl_index_t where;
+	bool r;
+
+	if (!lkpi_vmap_ready || addr == NULL)
+		return (false);
+	key.vm_va = (caddr_t)addr;
+	key.vm_seq = UINT64_MAX;
+	mutex_enter(&lkpi_vmap_lock);
+	(void) avl_find(&lkpi_vmap_index, &key, &where);
+	vm = avl_nearest(&lkpi_vmap_index, where, AVL_BEFORE);
+	r = vm != NULL && (caddr_t)addr < vm->vm_va + vm->vm_size;
+	mutex_exit(&lkpi_vmap_lock);
+	return (r);
+}
+
 void
 vunmap(const void *addr)
 {
