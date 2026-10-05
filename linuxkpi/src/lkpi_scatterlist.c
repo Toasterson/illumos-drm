@@ -76,7 +76,12 @@ sg_alloc_table_from_pages_segment(struct sg_table *sgt, struct lx_page **pages,
 		WARN_ON(max_segment == 0);
 		return (-EINVAL);
 	}
-	max_pages = max_segment >> PAGE_SHIFT;
+	/*
+	 * Virtually adjacent pages need not be physically adjacent, and
+	 * dma_map_sg() cannot map an entry that spans two DMA cookies: an
+	 * entry holds one page here (dma_max_mapping_size() is PAGE_SIZE).
+	 */
+	max_pages = 1;
 
 	nchunks = 0;
 	for (i = 0; i < n_pages; i += run) {

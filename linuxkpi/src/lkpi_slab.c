@@ -64,6 +64,16 @@ lkpi_km_hdr(const void *p, const char *who)
 {
 	struct lkpi_kmhdr *h = (struct lkpi_kmhdr *)p - 1;
 
+	/*
+	 * A page-aligned pointer may be the first byte of a page whose
+	 * predecessor is unmapped (alloc_pages(), coherent DMA memory):
+	 * look before reading the header there.
+	 */
+	if (IS_P2ALIGNED(p, PAGE_SIZE) &&
+	    hat_getpfnum(kas.a_hat, (caddr_t)h) == PFN_INVALID) {
+		WARN(1, "%s: %p is not kmalloc() memory", who, p);
+		return (NULL);
+	}
 	if (!IS_P2ALIGNED(p, 16) || h->kh_magic != LKPI_KM_MAGIC ||
 	    (h->kh_shift != 0 && h->kh_shift != LKPI_KM_SLACK)) {
 		WARN(1, "%s: %p is not kmalloc() memory", who, p);
@@ -71,6 +81,9 @@ lkpi_km_hdr(const void *p, const char *who)
 	}
 	return (h);
 }
+
+/* Linux's KMALLOC_MAX_SIZE on x86-64 (order-10 pages). */
+#define	LKPI_KMALLOC_WAIT_MAX	(4UL * 1024 * 1024)
 
 void *
 lkpi_kmalloc(size_t size, gfp_t gfp)
@@ -83,13 +96,19 @@ lkpi_kmalloc(size_t size, gfp_t gfp)
 	if (size == 0)
 		return (ZERO_SIZE_PTR);
 	/*
-	 * Linux refuses sizes above INT_MAX; more than physical memory would
-	 * block a KM_SLEEP allocation forever.
+	 * Linux refuses sizes above INT_MAX; a quarter of physical memory or
+	 * more would block a KM_SLEEP allocation for a long time or forever.
+	 * Above LKPI_KMALLOC_WAIT_MAX (Linux's kmalloc limit; larger ones are
+	 * kvmalloc()/vmalloc() sizes, which may fail on Linux) an allocation
+	 * does not wait for memory: user-sized arrays (execbuffer) fail with
+	 * -ENOMEM instead of waiting forever.
 	 */
-	if (size > INT_MAX || LKPI_BTOP(size) >= (size_t)physmem) {
+	if (size > INT_MAX || LKPI_BTOP(size) >= (size_t)physmem / 4) {
 		WARN_ONCE(!(gfp & __GFP_NOWARN), "kmalloc: %zu bytes", size);
 		return (NULL);
 	}
+	if (size > LKPI_KMALLOC_WAIT_MAX)
+		kmflag = KM_NOSLEEP | KM_NORMALPRI;
 	total = lkpi_km_total(size);
 	base = (gfp & __GFP_ZERO) ? kmem_zalloc(total, kmflag) :
 	    kmem_alloc(total, kmflag);

@@ -512,6 +512,13 @@ vmap(struct lx_page **pages, unsigned int count, unsigned long flags,
 			contig = false;
 	}
 	base = pages[0]->lkpi_kva;
+	/*
+	 * Contiguous pages are already mapped write-back at their kernel
+	 * address; a WC or UC request needs a mapping of its own (an alias
+	 * with that caching, as Linux's vmap() always makes one).
+	 */
+	if ((pgprot_val(prot) & LKPI_PROT_CACHE_MASK) != LKPI_PROT_WB)
+		contig = false;
 
 	vm = kmem_zalloc(sizeof (*vm), KM_SLEEP);
 	vm->vm_size = size;

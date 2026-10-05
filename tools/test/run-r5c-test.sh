@@ -83,8 +83,12 @@ for m in linuxkpi linuxkpi_selftest drm_helpers i915n; do
 	step elfdump -d "$m" | grep NEEDED
 done
 etc_state > /tmp/r5c-etc.before
-logmark="r5c-test-$$-$(date +%s)"
-logger -p kern.notice "$logmark start"
+# The system log from here on (kernel messages; line count, since a
+# logger(1) mark would be a user.* message).
+log0=$(wc -l < /var/adm/messages)
+newlog() {
+	tail +$((log0 + 1)) /var/adm/messages
+}
 
 echo
 echo "=== A: misc/drm_core and misc/linuxkpi"
@@ -117,11 +121,11 @@ else
 	# probe() runs the checks at attach; wait for the summary line.
 	i=0
 	while [ $i -lt 60 ]; do
-		grep -q 'linuxkpi_selftest: done' /var/adm/messages && break
+		newlog | grep -q 'linuxkpi_selftest: done' && break
 		sleep 1
 		i=$((i + 1))
 	done
-	sed -n "/$logmark start/,\$p" /var/adm/messages | grep 'linuxkpi_selftest' > /tmp/r5c-selftest.log
+	newlog | grep 'linuxkpi_selftest' > /tmp/r5c-selftest.log
 	cat /tmp/r5c-selftest.log
 	done_line=$(grep 'linuxkpi_selftest: done' /tmp/r5c-selftest.log | tail -1)
 	ok=$(echo "$done_line" | sed -n 's/.*done \([0-9]*\) passed \([0-9]*\) failed.*/\1/p')
@@ -166,12 +170,16 @@ echo
 echo "=== D: i915n loads without a device"
 step cp i915n $DRV/i915n
 # The package's driver action: no aliases (drmadm select new adds them).
-if step add_drv -n i915n; then
-	pass "add_drv -n i915n (no aliases)"
+# add_drv binds the major number in the running kernel and loads the
+# module (no device to attach: it may say so).
+step add_drv i915n
+if grep -q '^i915n ' /etc/name_to_major; then
+	pass "add_drv i915n (no aliases)"
 else
-	bad "add_drv -n i915n"
+	bad "add_drv i915n"
 fi
-if step modload -p drv/i915n; then
+step modload -p drv/i915n
+if [ -n "$(modid i915n)" ]; then
 	pass "i915n loads: imports resolved, i915 module_init registered its PCI driver"
 	step modinfo -c -i "$(modid i915n)"
 	# misc/linuxkpi must refuse to unload while i915n depends on it.
@@ -202,7 +210,7 @@ if [ -n "$warn0" ] && [ "$warn0" = "$warn1" ]; then
 	pass "no WARN fired in the layer during the run"
 else
 	bad "WARNs fired in the layer during the run (${warn0:-?} -> ${warn1:-?})"
-	sed -n "/$logmark start/,\$p" /var/adm/messages | grep 'WARNING at' | head -20
+	newlog | grep "WARNING at" | head -20
 fi
 for m in drm_helpers linuxkpi; do
 	id=$(modid $m)
@@ -222,7 +230,6 @@ else
 	bad "the /etc driver files changed"
 	diff /tmp/r5c-etc.before /tmp/r5c-etc.after
 fi
-logger -p kern.notice "$logmark end"
 
 echo
 if [ "$fail" -eq 0 ]; then

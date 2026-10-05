@@ -239,8 +239,11 @@ lkpi_dma_map_sg(struct device *dev, struct scatterlist *sgl, int nents,
 	flags = lkpi_dma_dirflags(dir) | DDI_DMA_STREAMING;
 
 	for_each_sg(sgl, sg, nents, i) {
-		if (sg->length == 0)
+		if (sg->length == 0) {
+			/* An empty entry ends a run, as in the binding pass. */
+			prev_end = NULL;
 			continue;
+		}
 		if ((kva = lkpi_sg_kva(sg)) == NULL) {
 			WARN(1, "dma_map_sg: entry %d has no memory", i);
 			return (NULL);
@@ -598,7 +601,7 @@ dma_alloc_attrs(struct device *dev, size_t size, dma_addr_t *dma_handle,
 	if (dev->coherent_dma_mask != 0)
 		a.dma_attr_addr_hi = MIN(a.dma_attr_addr_hi,
 		    dev->coherent_dma_mask);
-	wait = gfpflags_allow_blocking(gfp) ? DDI_DMA_SLEEP : DDI_DMA_DONTWAIT;
+	wait = lkpi_gfp_may_wait(gfp) ? DDI_DMA_SLEEP : DDI_DMA_DONTWAIT;
 	xfer = DDI_DMA_CONSISTENT;
 	if (attrs & DMA_ATTR_WRITE_COMBINE)
 		xfer |= IOMEM_DATA_UC_WR_COMBINE;
