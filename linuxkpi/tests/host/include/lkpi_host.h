@@ -45,6 +45,8 @@
 
 /* --- base types ----------------------------------------------------------- */
 
+/* An illumos host's <sys/types.h> has these already. */
+#if !defined(__sun)
 typedef unsigned char	uchar_t;
 typedef unsigned short	ushort_t;
 typedef unsigned int	uint_t;
@@ -57,13 +59,16 @@ typedef int		zoneid_t;
 typedef unsigned int	major_t;
 typedef unsigned int	minor_t;
 typedef enum { B_FALSE = 0, B_TRUE = 1 } boolean_t;
+#endif
 typedef struct dev_info	dev_info_t;
 typedef struct lkpi_host_cred	cred_t;
 typedef void		*ddi_acc_handle_t;
 typedef void		*ddi_dma_handle_t;
 typedef struct { int dummy; } ddi_dma_attr_t;
 typedef struct { int dummy; } ddi_device_acc_attr_t;
+#if !defined(__sun)
 typedef va_list		__va_list;
+#endif
 
 #define	ASSERT(x)	do { if (!(x)) lkpi_host_assfail(#x, __FILE__, \
 	__LINE__); } while (0)
