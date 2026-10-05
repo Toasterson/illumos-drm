@@ -59,6 +59,36 @@ static const ddi_dma_attr_t lkpi_default_dma_attr = {
 	.dma_attr_flags = 0
 };
 
+/*
+ * The kobject of a layer device. Linux's device_initialize() and
+ * dev_set_name() leave it initialised and named dev_name(); drivers hang
+ * their own kobjects under it and read its name (i915:
+ * kobject_create_and_add("gt", &kdev->kobj) and is_object_gt(), whose
+ * strncmp() of a NULL name was a panic at the first attach on a ThinkPad
+ * X230). The device's lifetime is lkpi_refs (get_device()/put_device()),
+ * not the kobject's reference count: the device's memory is freed at the
+ * last put_device() whatever kobjects still hold the device's kobject as
+ * their parent. Linux i915 leaves one: the "engine" kobject of
+ * intel_engines_add_sysfs() is never put (i915_teardown_sysfs() puts only
+ * "gt"). So lkpi_device_fini() first orphans the children left under the
+ * kobject (their parent pointer becomes NULL and the reference each held
+ * is dropped; the children themselves stay the driver's), then drops the
+ * reference kobject_init() took, which is then the last one:
+ * kobject_release() frees the name and this release does nothing.
+ * Another reference left at that point (a kobject_get() of the device's
+ * kobject never put) is a driver bug and warned about.
+ */
+static void
+lkpi_device_kobj_release(struct kobject *kobj)
+{
+	(void) kobj;
+}
+
+static const struct kobj_type lkpi_device_ktype = {
+	.release = lkpi_device_kobj_release,
+	.sysfs_ops = &kobj_sysfs_ops
+};
+
 void
 lkpi_device_init(struct device *dev, dev_info_t *dip, const char *name)
 {
@@ -71,6 +101,8 @@ lkpi_device_init(struct device *dev, dev_info_t *dip, const char *name)
 	(mutex_init)(&dev->lkpi_devres_lock, NULL, MUTEX_DRIVER, NULL);
 	INIT_LIST_HEAD(&dev->lkpi_devres);
 	dev->lkpi_refs = 1;
+	kobject_init(&dev->kobj, &lkpi_device_ktype);
+	dev->kobj.name = kstrdup(dev->lkpi_name, GFP_KERNEL);
 }
 
 struct device *
@@ -117,6 +149,15 @@ lkpi_device_fini(struct device *dev)
 	lkpi_devres_release_all(dev);
 	(mutex_destroy)(&dev->lkpi_devres_lock);
 	dev->lkpi_devres.next = dev->lkpi_devres.prev = NULL;
+	(void) lkpi_kobject_orphan_children(&dev->kobj);
+	if (WARN(!dev->kobj.state_initialized, "linuxkpi: the kobject of "
+	    "device %s was released before the device (a kobject_put() too "
+	    "many)", dev_name(dev)))
+		return;
+	WARN(kref_read(&dev->kobj.kref) != 1, "linuxkpi: the kobject of "
+	    "device %s has %u references left at the device's release",
+	    dev_name(dev), kref_read(&dev->kobj.kref) - 1);
+	kobject_put(&dev->kobj);
 }
 
 dev_info_t *
