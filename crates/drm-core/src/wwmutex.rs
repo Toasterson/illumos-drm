@@ -68,6 +68,12 @@ impl WwClass {
     pub const fn new() -> WwClass {
         WwClass { next: AtomicU64::new(1) }
     }
+
+    /// A new transaction stamp of the class, for a transaction a C caller
+    /// keeps itself ([`WwMutex::lock_raw_ctx`]); smaller is older.
+    pub fn next_stamp(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 impl Default for WwClass {
@@ -91,12 +97,7 @@ pub struct WwAcquireCtx {
 impl WwAcquireCtx {
     /// Starts a transaction with a new stamp of `class`.
     pub fn new(class: &'static WwClass) -> WwAcquireCtx {
-        WwAcquireCtx {
-            class,
-            stamp: class.next.fetch_add(1, Ordering::Relaxed),
-            acquired: Cell::new(0),
-            _thread: PhantomData,
-        }
+        WwAcquireCtx { class, stamp: class.next_stamp(), acquired: Cell::new(0), _thread: PhantomData }
     }
     /// Returns the stamp; smaller is older.
     pub fn stamp(&self) -> u64 {
@@ -118,6 +119,10 @@ enum Owner {
     Raw(u64),
     /// Held by the transaction with this stamp.
     Ctx(u64),
+    /// Held without a guard by a C transaction (the facade's
+    /// `drm_illumos_resv_lock_ctx`) with this stamp, on the thread with
+    /// this id.
+    RawCtx(u64, u64),
 }
 
 /// A wound/wait mutex of one [`WwClass`] guarding a `T`.
@@ -165,10 +170,12 @@ impl<T> WwMutex<T> {
                     c.acquired.set(c.acquired.get() + 1);
                     return Ok(());
                 }
-                (Owner::Ctx(s), Some(c)) if s == c.stamp => return Err(EALREADY),
+                (Owner::Ctx(s) | Owner::RawCtx(s, _), Some(c)) if s == c.stamp => return Err(EALREADY),
                 // Wait-die: a younger transaction that holds locks backs off
                 // from an older holder. lock_slow is called holding nothing.
-                (Owner::Ctx(s), Some(c)) if !slow && c.acquired.get() > 0 && s < c.stamp => return Err(EDEADLK),
+                (Owner::Ctx(s) | Owner::RawCtx(s, _), Some(c)) if !slow && c.acquired.get() > 0 && s < c.stamp => {
+                    return Err(EDEADLK);
+                }
                 _ => {}
             }
             let (ng, w) = self.cv.wait(g, None, intr, sctx);
@@ -221,7 +228,7 @@ impl<T> WwMutex<T> {
     /// `EDEADLK` instead of waiting for itself when it locks it again.
     pub fn lock_raw(&self, intr: bool, ctx: &Sleepable) -> Result<(), Errno> {
         let me = crate::ksync::thread_id();
-        if *self.owner.lock() == Owner::Raw(me) {
+        if matches!(*self.owner.lock(), Owner::Raw(t) | Owner::RawCtx(_, t) if t == me) {
             return Err(EDEADLK);
         }
         self.acquire(None, false, intr, ctx)?;
@@ -244,10 +251,79 @@ impl<T> WwMutex<T> {
         Ok(())
     }
 
+    /// Takes the mutex without waiting, without a transaction and without
+    /// a guard, as [`WwMutex::lock_raw`] (Linux's `dma_resv_trylock`):
+    /// false if anyone holds it.
+    pub fn try_lock_raw(&self) -> bool {
+        let mut g = self.owner.lock();
+        if *g != Owner::Free {
+            return false;
+        }
+        *g = Owner::Raw(crate::ksync::thread_id());
+        true
+    }
+
+    /// Locks the mutex for a transaction that a C caller keeps (a
+    /// compatibility layer's `ww_acquire_ctx`): the wait-die rule of
+    /// [`WwMutex::lock`] with the transaction's `stamp` (from
+    /// [`WwClass::next_stamp`] of this mutex's class) and the number of
+    /// mutexes it holds, `acquired`, which the caller counts. `slow` is
+    /// [`WwMutex::lock_slow`] (`EINVAL` unless `acquired` is 0). `EDEADLK`
+    /// to back off, `EALREADY` if the transaction holds it, `EINTR`.
+    /// The mutex is then held by the calling thread for that transaction:
+    /// it releases it with [`WwMutex::unlock_raw_ctx`], and
+    /// [`WwMutex::held_raw_by_current`] is true meanwhile.
+    pub fn lock_raw_ctx(
+        &self,
+        stamp: u64,
+        acquired: u32,
+        slow: bool,
+        intr: bool,
+        sctx: &Sleepable,
+    ) -> Result<(), Errno> {
+        if slow && acquired != 0 {
+            return Err(Errno::EINVAL);
+        }
+        let me = crate::ksync::thread_id();
+        let mut g = self.owner.lock();
+        loop {
+            match *g {
+                Owner::Free => {
+                    *g = Owner::RawCtx(stamp, me);
+                    return Ok(());
+                }
+                Owner::Ctx(s) | Owner::RawCtx(s, _) if s == stamp => return Err(EALREADY),
+                Owner::Ctx(s) | Owner::RawCtx(s, _) if !slow && acquired > 0 && s < stamp => return Err(EDEADLK),
+                Owner::Raw(t) if t == me => return Err(EDEADLK),
+                _ => {}
+            }
+            let (ng, w) = self.cv.wait(g, None, intr, sctx);
+            g = ng;
+            if w == Wake::Interrupted {
+                return Err(Errno::EINTR);
+            }
+        }
+    }
+
+    /// Releases a mutex the calling thread took with
+    /// [`WwMutex::lock_raw_ctx`] for the transaction `stamp`; `EPERM` (and
+    /// nothing changes) otherwise.
+    pub fn unlock_raw_ctx(&self, stamp: u64) -> Result<(), Errno> {
+        let mut g = self.owner.lock();
+        if *g != Owner::RawCtx(stamp, crate::ksync::thread_id()) {
+            return Err(Errno::EPERM);
+        }
+        *g = Owner::Free;
+        drop(g);
+        self.cv.notify_all();
+        Ok(())
+    }
+
     /// Reports whether the calling thread holds the mutex through
-    /// [`WwMutex::lock_raw`].
+    /// [`WwMutex::lock_raw`] or [`WwMutex::lock_raw_ctx`].
     pub fn held_raw_by_current(&self) -> bool {
-        *self.owner.lock() == Owner::Raw(crate::ksync::thread_id())
+        let me = crate::ksync::thread_id();
+        matches!(*self.owner.lock(), Owner::Raw(t) | Owner::RawCtx(_, t) if t == me)
     }
 
     /// Reports whether the mutex is held by anyone.
@@ -376,6 +452,95 @@ mod tests {
         m.unlock_raw().unwrap();
         t.join().unwrap();
         assert!(!m.is_locked());
+    }
+
+    #[test]
+    fn try_lock_raw_takes_only_a_free_mutex() {
+        let ctx = sleep();
+        let m = Arc::new(WwMutex::new(0u32, &CLASS));
+        assert!(m.try_lock_raw());
+        assert!(m.held_raw_by_current());
+        assert!(!m.try_lock_raw(), "held: no second take, not even by the holder");
+        let m2 = m.clone();
+        thread::spawn(move || assert!(!m2.try_lock_raw())).join().unwrap();
+        m.unlock_raw().unwrap();
+        let g = m.lock_plain(&ctx);
+        assert!(!m.try_lock_raw(), "a guard holder blocks it too");
+        drop(g);
+        assert!(m.try_lock_raw());
+        m.unlock_raw().unwrap();
+        assert!(!m.is_locked());
+    }
+
+    #[test]
+    fn raw_ctx_follows_wait_die_with_rust_transactions() {
+        let ctx = sleep();
+        let a = Arc::new(WwMutex::new(0u32, &CLASS));
+        let b = Arc::new(WwMutex::new(0u32, &CLASS));
+        // A C transaction: its own stamp and count.
+        let older = CLASS.next_stamp();
+        let younger = WwAcquireCtx::new(&CLASS);
+        assert!(younger.stamp() > older);
+        a.lock_raw_ctx(older, 0, false, false, &ctx).unwrap();
+        assert!(a.held_raw_by_current(), "the C transaction's holder is its thread");
+        assert_eq!(a.lock_raw_ctx(older, 1, false, false, &ctx).err(), Some(EALREADY));
+        assert_eq!(a.lock_raw(false, &ctx).err(), Some(EDEADLK), "the holder may not wait for itself");
+        // A younger Rust transaction holding something dies on the C holder.
+        let gb = b.lock(&younger, &ctx).unwrap();
+        assert_eq!(a.lock(&younger, &ctx).err(), Some(EDEADLK));
+        drop(gb);
+        // A younger C transaction holding something dies too; holding
+        // nothing it would wait (tested below with the slow path).
+        let c_young = CLASS.next_stamp();
+        b.lock_raw_ctx(c_young, 0, false, false, &ctx).unwrap();
+        assert_eq!(a.lock_raw_ctx(c_young, 1, false, false, &ctx).err(), Some(EDEADLK));
+        assert_eq!(a.lock_raw_ctx(c_young, 1, true, false, &ctx).err(), Some(Errno::EINVAL), "slow holding one");
+        b.unlock_raw_ctx(c_young).unwrap();
+        // Only the transaction's thread releases it, with its stamp.
+        assert_eq!(a.unlock_raw_ctx(c_young).err(), Some(Errno::EPERM));
+        let a2 = a.clone();
+        thread::spawn(move || assert_eq!(a2.unlock_raw_ctx(older).err(), Some(Errno::EPERM))).join().unwrap();
+        // The slow path waits for the holder, then takes it.
+        let a3 = a.clone();
+        let t = thread::spawn(move || {
+            let c = sleep();
+            a3.lock_raw_ctx(c_young, 0, true, false, &c).unwrap();
+            a3.unlock_raw_ctx(c_young).unwrap();
+        });
+        thread::sleep(std::time::Duration::from_millis(20));
+        a.unlock_raw_ctx(older).unwrap();
+        t.join().unwrap();
+        assert!(!a.is_locked() && !b.is_locked());
+    }
+
+    #[test]
+    fn older_transaction_waits_for_younger_c_holder() {
+        let ctx = sleep();
+        let m = Arc::new(WwMutex::new(0u32, &CLASS));
+        let older = WwAcquireCtx::new(&CLASS);
+        let young = CLASS.next_stamp();
+        m.lock_raw_ctx(young, 0, false, false, &ctx).unwrap();
+        let m2 = m.clone();
+        let released = Arc::new(AtomicBool::new(false));
+        let r2 = released.clone();
+        let t = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(20));
+            r2.store(true, Ordering::SeqCst);
+            m2.unlock_raw_ctx(young).unwrap_err();
+        });
+        t.join().unwrap();
+        // The other thread could not release it; the holder does.
+        assert!(released.load(Ordering::SeqCst));
+        let m3 = m.clone();
+        let w = thread::spawn(move || {
+            let c = sleep();
+            let tx = WwAcquireCtx::new(&CLASS);
+            drop(m3.lock(&tx, &c).unwrap());
+        });
+        thread::sleep(std::time::Duration::from_millis(20));
+        m.unlock_raw_ctx(young).unwrap();
+        w.join().unwrap();
+        drop(older);
     }
 
     #[test]

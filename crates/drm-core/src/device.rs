@@ -352,6 +352,12 @@ impl<D: Driver> Device<D> {
         off
     }
 
+    /// Reports whether open file `c` is the device's current master (a
+    /// compatibility layer's `drm_is_current_master`).
+    pub fn is_current_master(&self, c: CloneId) -> bool {
+        self.state.lock().is_current_master(c)
+    }
+
     /// Returns the synchronisation state: the fence domain drivers create
     /// their fences in, and the sync object and anonymous-file tables.
     pub fn sync(&self) -> &KArc<SyncCore<D::Object>> {

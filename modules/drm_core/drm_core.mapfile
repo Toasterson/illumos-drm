@@ -51,10 +51,13 @@ SYMBOL_SCOPE {
 		dma_fence_timeline_name;
 		dma_fence_wait_timeout;
 		dma_resv_add_fence;
+		dma_resv_fini;
+		dma_resv_init;
 		dma_resv_lock;
 		dma_resv_lock_interruptible;
 		dma_resv_reserve_fences;
 		dma_resv_test_signaled;
+		dma_resv_trylock;
 		dma_resv_unlock;
 		dma_resv_wait_timeout;
 		drm_chpoll;
@@ -108,9 +111,15 @@ SYMBOL_SCOPE {
 		drm_illumos_mapping_object_offset;
 		drm_illumos_mapping_unload;
 		drm_illumos_mapping_user_offset;
+		drm_illumos_resv_fences;
+		drm_illumos_resv_lock_ctx;
+		drm_illumos_resv_unlock_ctx;
 		drm_illumos_sync_file_get_fence;
+		drm_illumos_syncobj_dup;
 		drm_illumos_vprintk;
+		drm_illumos_ww_stamp;
 		drm_ioctl;
+		drm_is_current_master;
 		drm_minor_instance;
 		drm_mode_size_dumb;
 		drm_open;
@@ -129,6 +138,8 @@ SYMBOL_SCOPE {
 		drm_segmap;
 		drm_sync_file_install;
 		drm_syncobj_add_point;
+		drm_syncobj_create;
+		drm_syncobj_fence_get;
 		drm_syncobj_find;
 		drm_syncobj_find_fence;
 		drm_syncobj_put;

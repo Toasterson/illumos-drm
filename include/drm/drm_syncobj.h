@@ -69,6 +69,21 @@ extern int drm_sync_file_install(struct dma_fence *fence, bool cloexec,
 extern struct dma_fence *sync_file_get_fence(int fd);
 
 /*
+ * Facade 1.1. drm_syncobj_create(): a new sync object without a handle
+ * (Linux's), signalled with DRM_SYNCOBJ_CREATE_SIGNALED, holding `fence`
+ * if not NULL; release with drm_syncobj_put(). drm_illumos_syncobj_dup():
+ * another reference, as a new handle structure (put each).
+ * drm_syncobj_fence_get(): the current fence with a new reference (the
+ * core's view of it), or NULL. drm_is_current_master(): whether the open
+ * file is its device's current master. Thread context.
+ */
+extern int drm_syncobj_create(struct drm_syncobj **out, uint32_t flags,
+    struct dma_fence *fence);
+extern struct drm_syncobj *drm_illumos_syncobj_dup(struct drm_syncobj *obj);
+extern struct dma_fence *drm_syncobj_fence_get(struct drm_syncobj *obj);
+extern bool drm_is_current_master(struct drm_file *file);
+
+/*
  * sync_file_get_fence() with the reason of a failure (an illumos
  * addition): 0 and the fence in *fence, or -EBADF (no such descriptor),
  * -EINVAL (not a sync file), -ENOTSUP (a sync file of a device whose

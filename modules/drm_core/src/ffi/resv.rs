@@ -6,9 +6,12 @@
 //! tail points at the core's `Resv` inside the object, which lives as long
 //! as the object; callers hold a reference to the object.
 
+use alloc::boxed::Box;
+
 use ddi::Errno;
 use drm_core::defer::Ctx;
 use drm_core::resv::{Resv, Usage};
+use drm_core::wwmutex::RESERVATION_CLASS;
 use drm_facade_sys as f;
 
 use crate::devcore::neg;
@@ -155,4 +158,184 @@ pub unsafe extern "C" fn dma_resv_test_signaled(obj: *mut f::dma_resv, u: f::dma
         (Some(_), None) => false,
         (None, _) => true,
     }
+}
+
+// --- facade 1.1: reservations outside GEM objects, transactions, snapshots ---
+
+/// Gives a driver's own `struct dma_resv` (one that is not a GEM object's
+/// `_resv`) a core reservation, which `dma_resv_fini` releases. Thread
+/// context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dma_resv_init(obj: *mut f::dma_resv) {
+    if obj.is_null() {
+        return;
+    }
+    // SAFETY: the caller's structure, not in use yet.
+    unsafe {
+        (*obj).__core[0] = 0;
+        (*obj).__core[1] = 0;
+    }
+    // The kernel's allocator waits for memory (KM_SLEEP), as for every
+    // other Box of the core.
+    let p = Box::into_raw(Box::new(Resv::new())) as u64;
+    // SAFETY: as above.
+    unsafe {
+        (*obj).__core[0] = p;
+        (*obj).__core[1] = p ^ crate::MAGIC_RESV;
+    }
+}
+
+/// Releases what `dma_resv_init` set up: the fences and the reservation.
+/// A GEM object's reservation is the core's and stays (nothing happens);
+/// a reservation still locked is not released (a warning).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dma_resv_fini(obj: *mut f::dma_resv) {
+    if obj.is_null() {
+        return;
+    }
+    // SAFETY: the caller's structure.
+    let (p, check) = unsafe { ((*obj).__core[0], (*obj).__core[1]) };
+    if p == 0 || p ^ crate::MAGIC_RESV != check {
+        return;
+    }
+    // SAFETY: allocated by dma_resv_init.
+    let r = unsafe { &*(p as *const Resv) };
+    if r.lock().is_locked() {
+        // SAFETY: a constant format without arguments.
+        unsafe {
+            ddi::sys::cmn_err(ddi::sys::CE_WARN, c"drm_core: dma_resv_fini of a locked reservation; kept".as_ptr())
+        };
+        return;
+    }
+    // SAFETY: documented for thread context.
+    let ctx = unsafe { super::sleepable() };
+    r.clear(&ctx);
+    // SAFETY: as above; the mark goes first.
+    unsafe {
+        (*obj).__core[0] = 0;
+        (*obj).__core[1] = 0;
+        drop(Box::from_raw(p as *mut Resv));
+    }
+}
+
+/// Linux's `dma_resv_trylock`: takes the lock without waiting, as
+/// `dma_resv_lock(obj, NULL)` would; false if anyone holds it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dma_resv_trylock(obj: *mut f::dma_resv) -> bool {
+    // SAFETY: the caller holds the object.
+    match unsafe { resv(obj) } {
+        Some(r) => r.lock().try_lock_raw(),
+        None => false,
+    }
+}
+
+/// A new transaction stamp of the reservation class, for a compatibility
+/// layer's `ww_acquire_init` (smaller is older; shared with the core's
+/// own transactions).
+#[unsafe(no_mangle)]
+pub extern "C" fn drm_illumos_ww_stamp() -> u64 {
+    RESERVATION_CLASS.next_stamp()
+}
+
+/// Locks `obj` for the transaction `stamp` that holds `acquired`
+/// reservations (Linux's `dma_resv_lock(obj, ctx)` and
+/// `dma_resv_lock_slow(obj, ctx)` with `slow`): the core's wait-die rule
+/// against every holder, its own transactions included. 0, `-EDEADLK`
+/// (release everything, then lock the contended one with `slow`),
+/// `-EALREADY` (the transaction holds it), `-EINTR` (`intr`), `-EINVAL`.
+/// The caller counts `acquired` itself and releases with
+/// `drm_illumos_resv_unlock_ctx`. Thread context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_resv_lock_ctx(
+    obj: *mut f::dma_resv,
+    stamp: u64,
+    acquired: u32,
+    slow: bool,
+    intr: bool,
+) -> i32 {
+    // SAFETY: documented for thread context.
+    let sctx = unsafe { super::sleepable() };
+    // SAFETY: the caller holds the object.
+    let Some(r) = (unsafe { resv(obj) }) else { return neg(Errno::EINVAL) };
+    match r.lock().lock_raw_ctx(stamp, acquired, slow, intr, &sctx) {
+        Ok(()) => 0,
+        Err(e) => neg(e),
+    }
+}
+
+/// Releases a lock taken with `drm_illumos_resv_lock_ctx` for `stamp`;
+/// a warning if the calling thread does not hold it that way.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_resv_unlock_ctx(obj: *mut f::dma_resv, stamp: u64) {
+    // SAFETY: the caller holds the object.
+    let Some(r) = (unsafe { resv(obj) }) else { return };
+    if r.lock().unlock_raw_ctx(stamp).is_err() {
+        // SAFETY: a constant format without arguments.
+        unsafe {
+            ddi::sys::cmn_err(
+                ddi::sys::CE_WARN,
+                c"drm_core: drm_illumos_resv_unlock_ctx by a thread or transaction that does not hold the lock; ignored"
+                    .as_ptr(),
+            )
+        };
+    }
+}
+
+/// A snapshot of the unsignalled fences of `obj` with a usage at least as
+/// important as `u` (Linux's `dma_resv_get_fences`, into a caller's
+/// array): stores up to `max` fences, each with a new reference, in
+/// `fences`, and the number the reservation had in `*count`, which may
+/// exceed `max` (then retry with a larger array; the stored ones are
+/// still the caller's to put). 0, `-EINVAL` or `-ENOMEM`. Thread context.
+/// The structures are the core's views of the fences (new structures,
+/// not a driver's own).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_resv_fences(
+    obj: *mut f::dma_resv,
+    u: f::dma_resv_usage,
+    fences: *mut *mut f::dma_fence,
+    max: u32,
+    count: *mut u32,
+) -> i32 {
+    // SAFETY: documented for thread context.
+    let ctx = unsafe { super::sleepable() };
+    // SAFETY: the caller holds the object.
+    let (Some(r), Some(u)) = (unsafe { resv(obj) }, usage(u)) else { return neg(Errno::EINVAL) };
+    if count.is_null() || (max > 0 && fences.is_null()) {
+        return neg(Errno::EINVAL);
+    }
+    let list = match r.fences(u, &ctx) {
+        Ok(l) => l,
+        Err(e) => return neg(e),
+    };
+    let mut stored = 0u32;
+    let mut err = 0;
+    for f in list.iter() {
+        if stored >= max {
+            break;
+        }
+        let p = super::fence::proxy(f.clone());
+        if p.is_null() {
+            err = neg(Errno::ENOMEM);
+            break;
+        }
+        // SAFETY: the caller's array of max entries.
+        unsafe { *fences.add(stored as usize) = p };
+        stored += 1;
+    }
+    let n = list.len() as u32;
+    let mut list = list;
+    while let Some(f) = list.len().checked_sub(1).and_then(|i| list.swap_remove(i)) {
+        f.put(Ctx::Sleep(&ctx));
+    }
+    if err != 0 {
+        for i in 0..stored {
+            // SAFETY: stored above with a reference.
+            unsafe { super::fence::dma_fence_put(*fences.add(i as usize)) };
+        }
+        return err;
+    }
+    // SAFETY: checked above.
+    unsafe { *count = n };
+    0
 }

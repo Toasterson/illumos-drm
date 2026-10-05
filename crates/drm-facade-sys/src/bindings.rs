@@ -803,6 +803,39 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn dma_resv_test_signaled(obj: *mut dma_resv, usage: dma_resv_usage) -> bool;
 }
+unsafe extern "C" {
+    pub fn dma_resv_init(obj: *mut dma_resv);
+}
+unsafe extern "C" {
+    pub fn dma_resv_fini(obj: *mut dma_resv);
+}
+unsafe extern "C" {
+    pub fn dma_resv_trylock(obj: *mut dma_resv) -> bool;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_ww_stamp() -> u64;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_resv_lock_ctx(
+        obj: *mut dma_resv,
+        stamp: u64,
+        acquired: u32,
+        slow: bool,
+        intr: bool,
+    ) -> core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_resv_unlock_ctx(obj: *mut dma_resv, stamp: u64);
+}
+unsafe extern "C" {
+    pub fn drm_illumos_resv_fences(
+        obj: *mut dma_resv,
+        usage: dma_resv_usage,
+        fences: *mut *mut dma_fence,
+        max: u32,
+        count: *mut u32,
+    ) -> core::ffi::c_int;
+}
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
 pub struct drm_vma_range {
@@ -1364,6 +1397,18 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn sync_file_get_fence(fd: core::ffi::c_int) -> *mut dma_fence;
+}
+unsafe extern "C" {
+    pub fn drm_syncobj_create(out: *mut *mut drm_syncobj, flags: u32, fence: *mut dma_fence) -> core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_syncobj_dup(obj: *mut drm_syncobj) -> *mut drm_syncobj;
+}
+unsafe extern "C" {
+    pub fn drm_syncobj_fence_get(obj: *mut drm_syncobj) -> *mut dma_fence;
+}
+unsafe extern "C" {
+    pub fn drm_is_current_master(file: *mut drm_file) -> bool;
 }
 unsafe extern "C" {
     pub fn drm_illumos_sync_file_get_fence(fd: core::ffi::c_int, fence: *mut *mut dma_fence) -> core::ffi::c_int;
