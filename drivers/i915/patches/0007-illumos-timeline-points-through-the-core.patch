@@ -9,22 +9,28 @@ point other than 0 is looked up with drm_syncobj_find_fence() instead
 
 --- a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
 +++ b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
-@@ -2861,8 +2861,23 @@
+@@ -2861,8 +2861,29 @@
  			return -EINVAL;
  		}
  
 +#ifdef __illumos__
 +		/*
 +		 * Timeline points are the DRM core's: no fence a driver sees
-+		 * is a chain, so the point is looked up through the core.
++		 * is a chain, so the point is looked up through the core. A
++		 * point not found leaves the sync object's current fence, as
++		 * Linux's lookup does (a signal-only entry still waits for it).
 +		 */
 +		if (fence && point != 0) {
-+			dma_fence_put(fence);
-+			fence = NULL;
++			struct dma_fence *at = NULL;
++
 +			err = drm_syncobj_find_fence(eb->file, user_fence.handle,
-+			    point, 0, &fence);
-+			if (err == -ENOENT)
++			    point, 0, &at);
++			if (err == 0) {
++				dma_fence_put(fence);
++				fence = at;
++			} else if (err == -ENOENT) {
 +				err = -EINVAL;
++			}
 +		}
 +#else
  		if (fence)

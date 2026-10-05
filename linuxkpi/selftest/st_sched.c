@@ -1177,10 +1177,10 @@ st_test_irq(struct pci_dev *pdev)
 	synchronize_irq(irq);
 	name = free_irq(irq, &st_irq_cookie);
 	ok &= name != NULL && strcmp(name, "st") == 0;
+	/* Threaded handlers are refused (lkpi_irq.c). */
 	ok &= request_threaded_irq(irq, st_irq_handler, st_irq_thread,
-	    IRQF_SHARED, "st_thr", &st_irq_cookie) == 0;
+	    IRQF_SHARED, "st_thr", &st_irq_cookie) == -EOPNOTSUPP;
 	synchronize_irq(irq);
-	ok &= free_irq(irq, &st_irq_cookie) != NULL;
 	pci_free_irq_vectors(pdev);
 	CHECK("request/free/synchronize/disable/enable of a vector", ok);
 }

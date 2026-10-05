@@ -21,16 +21,20 @@
 struct lx_page;
 
 /*
- * The kmem flag of a Linux allocation. KM_SLEEP never fails, so only a
- * request that may block and must not fail gets it. __GFP_NORETRY and
- * __GFP_RETRY_MAYFAIL ask for an allocation that may fail (i915 retries
- * after shrinking, and reports -ENOMEM to user space last): KM_NOSLEEP,
- * at normal priority so it does not dip into the kernel's reserve.
+ * The kmem flag of a Linux allocation. KM_SLEEP never fails (it waits,
+ * and makes the system reclaim: pageout, the ZFS cache), so it is for
+ * requests that may block. __GFP_NORETRY asks for an attempt without
+ * reclaim (i915's first try before it shrinks itself): KM_NOSLEEP, at
+ * normal priority so it does not dip into the kernel's reserve.
+ * __GFP_RETRY_MAYFAIL (i915's last try) reclaims hard on Linux before it
+ * fails: KM_SLEEP; the allocators keep that bounded by size (kmalloc()
+ * does not wait above 4 MiB, a shmem backing above physmem / 8), so a
+ * request that cannot be met fails instead of waiting for ever.
  */
 static inline int
 lkpi_kmflag(gfp_t gfp)
 {
-	if (gfp & (__GFP_NORETRY | __GFP_RETRY_MAYFAIL))
+	if (gfp & __GFP_NORETRY)
 		return (KM_NOSLEEP | KM_NORMALPRI);
 	return ((gfp & __GFP_DIRECT_RECLAIM) ? KM_SLEEP : KM_NOSLEEP);
 }

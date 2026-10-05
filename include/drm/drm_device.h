@@ -176,6 +176,17 @@ extern int drm_dev_unregister(struct drm_device *dev);
  */
 extern int drm_dev_illumos_unplug(struct drm_device *dev);
 
+/*
+ * Facade 1.1. drm_dev_put() that reports the outcome: 0, or -EBUSY when
+ * this was the last reference of an unplugged device (drm_dev_illumos_unplug())
+ * and the core could not unregister it after the driver's release (the
+ * driver frees its own GEM objects there, as Linux's i915 does): the
+ * core waits a few seconds for leftover fences, then keeps the device,
+ * leaked and unreachable, and the driver's detach(9E) must fail. On 0 the
+ * structure may be gone. detach(9E) context.
+ */
+extern int drm_dev_illumos_put(struct drm_device *dev);
+
 extern void drm_dev_get(struct drm_device *dev);
 extern void drm_dev_put(struct drm_device *dev);
 

@@ -95,17 +95,20 @@ _init(void)
 	ret = lkpi_module_init();
 	if (ret != 0) {
 		cmn_err(CE_WARN, "i915n: i915 module init failed (%d)", ret);
+		lkpi_module_quiesce(&i915n_modlinkage);
 		return (EINVAL);
 	}
 	i915n_pci_driver = lkpi_pci_driver_lookup("i915");
 	if (i915n_pci_driver == NULL) {
 		cmn_err(CE_WARN, "i915n: i915 registered no PCI driver");
 		lkpi_module_exit();
+		lkpi_module_quiesce(&i915n_modlinkage);
 		return (EINVAL);
 	}
 	if ((ret = mod_install(&i915n_modlinkage)) != 0) {
 		i915n_pci_driver = NULL;
 		lkpi_module_exit();
+		lkpi_module_quiesce(&i915n_modlinkage);
 	}
 	return (ret);
 }
@@ -149,10 +152,12 @@ i915n_put_after_gp(struct rcu_head *rcu)
 
 /*
  * i915 looks a handle up under rcu_read_lock() and uses the object until
- * rcu_read_unlock() without a reference. The DRM core's lookup returns a
- * reference; dropping it after a grace period keeps the object alive for
- * the caller's read section. Without memory for the deferral the lookup
- * finds nothing (the caller reports -ENOENT, as for a closed handle).
+ * rcu_read_unlock() without a reference (busy, get_tiling, get_caching;
+ * the other lookups take a reference directly, patch 0010). The DRM
+ * core's lookup returns a reference; dropping it after a grace period
+ * keeps the object alive for the caller's read section. Inside the read
+ * section nothing may wait for memory: without it the lookup finds
+ * nothing (the caller reports -ENOENT, as for a closed handle).
  */
 struct drm_i915_gem_object *
 i915_gem_object_lookup_rcu(struct drm_file *file, u32 handle)
@@ -160,7 +165,7 @@ i915_gem_object_lookup_rcu(struct drm_file *file, u32 handle)
 	struct i915n_deferred_put *d;
 	struct drm_gem_object *obj;
 
-	d = kmalloc(sizeof (*d), GFP_KERNEL);
+	d = kmalloc(sizeof (*d), GFP_NOWAIT | __GFP_NOWARN);
 	if (d == NULL)
 		return (NULL);
 	obj = drm_gem_object_lookup(file, handle);
@@ -182,6 +187,16 @@ i915_illumos_object_lookup(struct drm_file *file, u32 handle)
 	return (obj != NULL ? to_intel_bo(obj) : NULL);
 }
 
+/*
+ * Whether `handle` still names `obj` (execbuffer's __eb_add_lut(), with
+ * obj->lut_lock held, patch 0003). The core's lookup takes the file's
+ * handle-table lock under lut_lock, and the put here may be the last
+ * one. Both are safe: lut_lock is an adaptive mutex in this layer, the
+ * core never takes lut_lock (i915's close callback takes it under the
+ * file's hook lock, which lookups never take), so the order lut_lock ->
+ * table lock has no cycle; and the caller holds its own reference to obj,
+ * so this put is never the last of obj.
+ */
 bool
 i915_illumos_handle_is(struct drm_file *file, u32 handle,
     struct drm_i915_gem_object *obj)

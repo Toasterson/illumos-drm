@@ -131,21 +131,33 @@ void
 lkpi_module_quiesce_range(const void *text, size_t size)
 {
 	uintptr_t lo = (uintptr_t)text, hi = lo + size;
-	int n;
+	int n, i;
 
 	if (servicing_interrupt() || text == NULL || hi < lo) {
 		WARN_ONCE(1, "linuxkpi: lkpi_module_quiesce_range(%p, %lu) "
 		    "refused", text, (unsigned long)size);
 		return;
 	}
-	rcu_barrier();
-	n = lkpi_kthread_quiesce(lo, hi);
-	n += lkpi_timer_quiesce(lo, hi);
-	lkpi_work_flush_system();
-	n += lkpi_work_quiesce(lo, hi);
-	/* Work that ran meanwhile may have armed timers or queued RCU. */
-	n += lkpi_timer_quiesce(lo, hi);
-	rcu_barrier();
+	/*
+	 * Until a round finds nothing: work that ran may arm timers or queue
+	 * RCU callbacks, and an RCU callback may queue work (queue_rcu_work()).
+	 */
+	n = 0;
+	for (i = 0; i < 10; i++) {
+		int r;
+
+		rcu_barrier();
+		r = lkpi_kthread_quiesce(lo, hi);
+		r += lkpi_timer_quiesce(lo, hi);
+		lkpi_work_flush_system();
+		r += lkpi_work_quiesce(lo, hi);
+		r += lkpi_timer_quiesce(lo, hi);
+		rcu_barrier();
+		r += lkpi_work_quiesce(lo, hi);
+		n += r;
+		if (r == 0)
+			break;
+	}
 	if (n != 0)
 		cmn_err(CE_WARN, "linuxkpi: %d timers, work items or kthreads "
 		    "of the unloading driver were still active", n);

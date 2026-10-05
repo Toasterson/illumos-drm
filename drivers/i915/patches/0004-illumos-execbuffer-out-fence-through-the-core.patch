@@ -6,7 +6,10 @@ descriptor first (get_unused_fd_flags()) and installs the sync file at the
 end (fd_install()). On illumos descriptors are the DRM core's:
 drm_sync_file_install() makes and installs the descriptor for a fence in
 one step, after the submission succeeded. The layer's sync_file_create()
-only holds the fence for this.
+only holds the fence for this. One difference remains: if the descriptor
+cannot be made (EMFILE, ENOMEM), the ioctl fails for a batch that was
+submitted, where Linux would have failed before submitting; a core
+interface that reserves the descriptor first would close it.
 
 diff --git a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
 index 1f303d4ea..85526e5e1 100644

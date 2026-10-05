@@ -208,10 +208,21 @@ fn unique_ptr(core: &DevCore) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn drm_dev_unregister(dev: *mut f::drm_device) -> i32 {
-    // SAFETY: documented for detach(9E), thread context.
-    let ctx = unsafe { super::sleepable() };
     // SAFETY: the caller holds a reference to its device.
     let Some(core) = (unsafe { DevCore::of(dev) }) else { return neg(Errno::EINVAL) };
+    // SAFETY: documented for detach(9E), thread context.
+    unsafe { unregister(dev, core) }
+}
+
+/// The unregistration of `drm_dev_unregister`, also run by the last put of
+/// an unplugged device ([`DevCore::put`]): 0, `-EBUSY` (the device stays
+/// registered and working) or `-EINVAL` (not registered).
+///
+/// # Safety
+/// `dev` is `core`'s device, alive; thread context.
+pub(crate) unsafe fn unregister(dev: *mut f::drm_device, core: &DevCore) -> i32 {
+    // SAFETY: the caller's contract.
+    let ctx = unsafe { super::sleepable() };
     // The checks run on the published device, which stays where it is and
     // keeps working if they refuse: nothing moves before the detach is
     // certain.
@@ -246,6 +257,23 @@ pub unsafe extern "C" fn drm_dev_unregister(dev: *mut f::drm_device) -> i32 {
     0
 }
 
+/// Facade 1.1: `drm_dev_put` that reports what became of the device: 0
+/// (released, or still referenced elsewhere) or `-EBUSY` (the last
+/// reference of an unplugged device whose state the core could not tear
+/// down after the driver's release: the device stays, leaked).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_dev_illumos_put(dev: *mut f::drm_device) -> i32 {
+    // SAFETY: the caller holds a reference, which it gives up.
+    match unsafe { DevCore::of(dev) } {
+        // SAFETY: as above.
+        Some(core) => match unsafe { DevCore::put(core) } {
+            Ok(()) => 0,
+            Err(e) => neg(e),
+        },
+        None => neg(Errno::EINVAL),
+    }
+}
+
 /// Linux's `drm_dev_unplug` before a driver tears itself down: refuses
 /// with `-EBUSY` while user space holds the device (open files, user
 /// mappings), else takes the device out of the device table, so that no
@@ -264,6 +292,7 @@ pub unsafe extern "C" fn drm_dev_illumos_unplug(dev: *mut f::drm_device) -> i32 
         crate::table::publish(&d);
         return neg(Errno::EBUSY);
     }
+    core.setup.lock().unplugged = true;
     0
 }
 
@@ -280,6 +309,6 @@ pub unsafe extern "C" fn drm_dev_put(dev: *mut f::drm_device) {
     // SAFETY: the caller holds a reference, which it gives up.
     if let Some(core) = unsafe { DevCore::of(dev) } {
         // SAFETY: as above.
-        unsafe { DevCore::put(core) };
+        let _ = unsafe { DevCore::put(core) };
     }
 }

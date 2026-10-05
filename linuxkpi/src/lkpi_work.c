@@ -608,8 +608,12 @@ flush_work(struct work_struct *w)
 	}
 	for (;;) {
 		wk = lkpi_wq_runner_locked(w);
-		if ((long)(wd_gen(w) - target) > 0 ||
-		    (wd_gen(w) == target && wk == NULL))
+		/*
+		 * Done once the target instance has started and nothing of
+		 * the item runs: a cancel can advance the generation past the
+		 * target while that instance still runs.
+		 */
+		if ((long)(wd_gen(w) - target) >= 0 && wk == NULL)
 			break;
 		if (wk != NULL && wk->thread == curthread) {
 			WARN_ONCE(1, "linuxkpi: work item flushes itself");

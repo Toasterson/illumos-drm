@@ -468,6 +468,9 @@ unsafe extern "C" {
     pub fn drm_dev_illumos_unplug(dev: *mut drm_device) -> core::ffi::c_int;
 }
 unsafe extern "C" {
+    pub fn drm_dev_illumos_put(dev: *mut drm_device) -> core::ffi::c_int;
+}
+unsafe extern "C" {
     pub fn drm_dev_get(dev: *mut drm_device);
 }
 unsafe extern "C" {

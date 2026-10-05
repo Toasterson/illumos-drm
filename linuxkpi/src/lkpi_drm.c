@@ -93,9 +93,11 @@ lkpi_drm_release(struct drm_device *dev)
 	if (ld->orig_release != NULL)
 		ld->orig_release(dev);
 	put_device(ld->parent);
-	mutex_enter(&lkpi_drm_lock);
-	ld->released = true;
-	mutex_exit(&lkpi_drm_lock);
+	/*
+	 * The copy is marked released by the put that ends here
+	 * (lkpi_drm_dev_put_action()), once the core no longer refers to
+	 * dev->driver.
+	 */
 }
 
 /* Frees the copies of released devices; lkpi_drm_lock held. */
@@ -167,11 +169,13 @@ driver_of_parent(struct device *parent)
 }
 
 /*
- * The devres action of devm_drm_dev_alloc(), after the driver's remove():
- * the driver has dropped its GEM objects, so the core can unregister the
- * device now; then the driver's reference goes. If the core refuses
- * (fences or objects remain), the device stays registered and referenced,
- * unreachable for new opens (drm_dev_unplug()), and detach fails
+ * The devres action of devm_drm_dev_alloc(), after the driver's remove()
+ * (or a failed probe): the driver's reference goes. The device was
+ * unplugged (detach checked that user space no longer holds it; a failed
+ * probe ran before anyone could open it), so the core runs the driver's
+ * release, which frees the driver's own GEM objects, and then unregisters
+ * and frees the device. If the core still finds state (fences that never
+ * signal), it keeps the device, leaked and unreachable, and detach fails
  * (lkpi_drm_detach_end()), so that the driver's text stays loaded.
  */
 static void
@@ -180,17 +184,24 @@ lkpi_drm_dev_put_action(void *data)
 	struct drm_device *drm = data;
 	struct lkpi_drm_driver *ld =
 	    container_of(drm->driver, struct lkpi_drm_driver, drv);
-	int ret;
+	dev_info_t *dip = lkpi_dev_dip(ld->parent);
 
-	if (drm->registered && (ret = (drm_dev_unregister)(drm)) != 0) {
-		dev_err(drm->dev, "the DRM core keeps the device (%d): fences "
-		    "or objects remain; the device stays attached\n", ret);
+	if (drm->registered && (drm_dev_illumos_unplug)(drm) != 0)
+		dev_err(drm->dev, "user space still holds the DRM device\n");
+	if ((drm_dev_illumos_put)(drm) != 0) {
+		/* drm is not freed: the core keeps it. */
+		if (dip != NULL)
+			(dev_err)(dip, CE_WARN, "the DRM core keeps the device: "
+			    "fences or objects remain; the device stays "
+			    "attached");
 		mutex_enter(&lkpi_drm_lock);
 		ld->stuck = true;
 		mutex_exit(&lkpi_drm_lock);
 		return;
 	}
-	drm_dev_put(drm);
+	mutex_enter(&lkpi_drm_lock);
+	ld->released = true;
+	mutex_exit(&lkpi_drm_lock);
 }
 
 /*
@@ -224,6 +235,8 @@ lkpi_drm_detach_end(struct device *dev)
 	return (ret);
 }
 
+static void lkpi_drm_set_kdev(struct drm_device *dev);
+
 void *
 lkpi_devm_drm_dev_alloc(struct device *parent,
     const struct drm_driver *driver, size_t size, size_t offset)
@@ -232,6 +245,7 @@ lkpi_devm_drm_dev_alloc(struct device *parent,
 	struct drm_device *drm;
 	struct inode *inode;
 	void *p;
+	int ret;
 
 	if (parent == NULL || lkpi_dev_dip(parent) == NULL)
 		return (ERR_PTR(-EINVAL));
@@ -263,21 +277,39 @@ lkpi_devm_drm_dev_alloc(struct device *parent,
 	}
 	if (devm_add_action_or_reset(parent, lkpi_drm_dev_put_action, drm) != 0)
 		return (ERR_PTR(-ENOMEM));
+	/*
+	 * The core's GEM, fence and reservation state exists from
+	 * registration on, and Linux drivers make GEM objects long before
+	 * their drm_dev_register() (i915's GGTT scratch page, its kernel
+	 * contexts). So the device is registered here, in attach(9E): its
+	 * nodes exist from now on, but opens wait until attach returns, and
+	 * the driver's drm_dev_register() then only completes the minors.
+	 */
+	if ((ret = (drm_dev_register)(drm, 0)) != 0)
+		return (ERR_PTR(ret));
+	lkpi_drm_set_kdev(drm);
 	return (p);
+}
+
+/* The core leaves the minors' kdev to the driver (facade 1.1). */
+static void
+lkpi_drm_set_kdev(struct drm_device *dev)
+{
+	if (dev->primary != NULL)
+		dev->primary->kdev = dev->dev;
+	if (dev->render != NULL)
+		dev->render->kdev = dev->dev;
 }
 
 int
 lkpi_drm_dev_register(struct drm_device *dev, unsigned long flags)
 {
-	int ret = (drm_dev_register)(dev, flags);
+	int ret;
 
-	if (ret != 0)
+	/* A devm_drm_dev_alloc() device is registered already (above). */
+	if (!dev->registered && (ret = (drm_dev_register)(dev, flags)) != 0)
 		return (ret);
-	/* The core leaves the minors' kdev to the driver (facade 1.1). */
-	if (dev->primary != NULL)
-		dev->primary->kdev = dev->dev;
-	if (dev->render != NULL)
-		dev->render->kdev = dev->dev;
+	lkpi_drm_set_kdev(dev);
 	return (0);
 }
 
@@ -503,15 +535,16 @@ void
 __drm_printfn_line(struct drm_printer *p, struct va_format *vaf)
 {
 	struct drm_printer *dp = p->arg;
-	char buf[256];
+	const char *prefix = p->prefix != NULL ? p->prefix : "";
+	const char *pad = p->prefix != NULL ? " " : "";
 
-	(void) vsnprintf(buf, sizeof (buf), vaf->fmt, *vaf->va);
+	/* %pV: the message is formatted by the printer it goes to. */
 	if (p->line.series != 0)
-		drm_printf(dp, "%s %u.%u: %s", p->prefix != NULL ? p->prefix :
-		    "", p->line.series, ++p->line.counter, buf);
+		drm_printf(dp, "%s%s%u.%u: %pV", prefix, pad, p->line.series,
+		    ++p->line.counter, vaf);
 	else
-		drm_printf(dp, "%s %u: %s", p->prefix != NULL ? p->prefix :
-		    "", ++p->line.counter, buf);
+		drm_printf(dp, "%s%s%u: %pV", prefix, pad, ++p->line.counter,
+		    vaf);
 }
 
 void

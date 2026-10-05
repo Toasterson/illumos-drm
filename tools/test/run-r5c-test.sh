@@ -162,10 +162,33 @@ else
 	00000000|0) pass "device property linuxkpi-selftest-failed=0" ;;
 	*) bad "device property linuxkpi-selftest-failed=${prop:-absent}" ;;
 	esac
+	# The DRM device the self-test registered: detach is refused while a
+	# node is open, and succeeds once it is closed, running the driver's
+	# release (which frees a GEM object made before drm_dev_register())
+	# before the core unregisters.
+	node=$(ls -d /devices/pci@*/pci1b36,5@*:card* 2>/dev/null | head -1)
+	echo "DRM node: ${node:-none}"
+	if [ -n "$node" ] && exec 3<"$node"; then
+		id=$(modid linuxkpi_selftest)
+		if [ -n "$id" ] && modunload -i "$id" 2>/dev/null; then
+			bad "detach succeeded with a DRM node open"
+		else
+			pass "detach refused while a DRM node is open"
+		fi
+		exec 3<&-
+	else
+		bad "no openable DRM node of the self-test"
+	fi
+	mark=$(wc -l < /var/adm/messages)
 	if step rem_drv linuxkpi_selftest; then
 		pass "rem_drv linuxkpi_selftest (detach through the layer)"
 	else
 		bad "rem_drv linuxkpi_selftest"
+	fi
+	if tail +$((mark + 1)) /var/adm/messages | grep -q 'DRM release ran, GEM object freed'; then
+		pass "the DRM device's release ran before the core unregistered it"
+	else
+		bad "no DRM release at detach"
 	fi
 	id=$(modid linuxkpi_selftest)
 	[ -n "$id" ] && step modunload -i "$id"

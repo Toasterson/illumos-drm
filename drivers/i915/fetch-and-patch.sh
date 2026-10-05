@@ -10,12 +10,11 @@
 #
 # Licences: every TU of tus.txt and header of mit-headers.txt must be MIT
 # or HPND (check-licences.py), else the script refuses the tree. GPL-2.0
-# headers i915 includes are replaced in the tree: the tracepoint headers by
-# generated MIT no-op headers, intel_ips.h by illumos/intel_ips.h (MIT);
-# build.sh checks every Linux file the compiler read. i915's two tracepoint headers are GPL-2.0;
-# they are replaced in the tree by MIT no-op headers that
-# illumos/gen-trace-stubs.py writes from the original's event names
-# (TRACE_HEADERS below), so no GPL text reaches the build.
+# headers i915 includes are replaced in the tree: the two tracepoint
+# headers by MIT no-op headers that illumos/gen-trace-stubs.py writes from
+# the originals' event names (TRACE_HEADERS below), intel_ips.h by
+# illumos/intel_ips.h (MIT); build.sh checks every Linux file the compiler
+# read, so no GPL text reaches the build.
 #
 #   drivers/i915/fetch-and-patch.sh <directory>
 #

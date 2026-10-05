@@ -1314,9 +1314,11 @@ lkpi_pci_attach(dev_info_t *dip, ddi_attach_cmd_t cmd, struct pci_driver *drv)
  * Detach: the DRM glue may veto it before the driver is told
  * (lkpi_drm_detach_begin()); then remove() and the managed resources;
  * then the DRM glue must have let go of the device
- * (lkpi_drm_detach_end()), otherwise the node stays attached with the
- * driver torn down, keeping the attach reference (a later detach retries
- * only that step).
+ * (lkpi_drm_detach_end()). If the DRM core kept it (its state did not go
+ * within the core's wait after the driver's release), the node stays
+ * attached with the driver torn down, keeping the attach reference, and
+ * every later detach fails the same way (lkpi_drm_detach_end() reports the
+ * kept device), so the driver's text stays loaded until the reboot.
  */
 int
 lkpi_pci_detach(dev_info_t *dip, ddi_detach_cmd_t cmd, struct pci_driver *drv)

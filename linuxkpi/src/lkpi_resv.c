@@ -292,6 +292,7 @@ resv_snapshot(struct dma_resv *obj, enum dma_resv_usage usage, bool locked,
 struct lkpi_resv_snap {
 	struct list_head	rs_link;
 	struct dma_resv		*rs_obj;
+	kthread_t		*rs_owner;	/* the walking (locking) thread */
 	struct dma_fence	**rs_fences;
 	u8			*rs_usages;
 	unsigned int		rs_count;
@@ -299,6 +300,8 @@ struct lkpi_resv_snap {
 
 static DEFINE_MUTEX(lkpi_resv_snaps_lock);
 static LIST_HEAD(lkpi_resv_snaps);
+/* Registered snapshots: an unlock with none looks at nothing. */
+static atomic_t lkpi_resv_nsnaps = ATOMIC_INIT(0);
 
 static void
 snap_free(struct lkpi_resv_snap *rs)
@@ -318,10 +321,19 @@ lkpi_resv_snaps_release(struct dma_resv *obj)
 	struct lkpi_resv_snap *rs, *n;
 	LIST_HEAD(done);
 
+	if (atomic_read(&lkpi_resv_nsnaps) == 0)
+		return;
 	mutex_lock(&lkpi_resv_snaps_lock);
+	/*
+	 * Only the unlocking thread's walks: the lock is that thread's, and
+	 * an unlock by another thread (which the core refuses) must not free
+	 * the holder's walk.
+	 */
 	list_for_each_entry_safe(rs, n, &lkpi_resv_snaps, rs_link) {
-		if (rs->rs_obj == obj)
+		if (rs->rs_obj == obj && rs->rs_owner == curthread) {
 			list_move(&rs->rs_link, &done);
+			atomic_dec(&lkpi_resv_nsnaps);
+		}
 	}
 	mutex_unlock(&lkpi_resv_snaps_lock);
 	list_for_each_entry_safe(rs, n, &done, rs_link) {
@@ -340,6 +352,7 @@ lkpi_resv_fini(void)
 	list_for_each_entry_safe(rs, n, &lkpi_resv_snaps, rs_link) {
 		WARN_ONCE(1, "dma_resv: a locked walk outlived its lock");
 		list_del(&rs->rs_link);
+		atomic_dec(&lkpi_resv_nsnaps);
 		snap_free(rs);
 	}
 	mutex_unlock(&lkpi_resv_snaps_lock);
@@ -351,9 +364,12 @@ iter_release(struct dma_resv_iter *cursor)
 	struct lkpi_resv_snap *rs = cursor->lkpi_snap;
 
 	if (rs != NULL) {
-		mutex_lock(&lkpi_resv_snaps_lock);
-		list_del(&rs->rs_link);
-		mutex_unlock(&lkpi_resv_snaps_lock);
+		if (cursor->locked) {
+			mutex_lock(&lkpi_resv_snaps_lock);
+			list_del(&rs->rs_link);
+			atomic_dec(&lkpi_resv_nsnaps);
+			mutex_unlock(&lkpi_resv_snaps_lock);
+		}
 		snap_free(rs);
 	}
 	cursor->lkpi_snap = NULL;
@@ -411,8 +427,10 @@ iter_first(struct dma_resv_iter *cursor, bool locked)
 	cursor->lkpi_usages = rs->rs_usages;
 	cursor->num_fences = rs->rs_count;
 	if (locked) {
+		rs->rs_owner = curthread;
 		mutex_lock(&lkpi_resv_snaps_lock);
 		list_add(&rs->rs_link, &lkpi_resv_snaps);
+		atomic_inc(&lkpi_resv_nsnaps);
 		mutex_unlock(&lkpi_resv_snaps_lock);
 	} else {
 		INIT_LIST_HEAD(&rs->rs_link);

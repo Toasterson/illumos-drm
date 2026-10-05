@@ -411,6 +411,7 @@ pub(crate) unsafe fn init_public(obj: *mut f::drm_gem_object, core: &DevCore, r:
         (*obj).size = r.object().size();
         (*obj).resv = ptr::addr_of_mut!((*obj)._resv);
         (*obj)._resv.__core[0] = r.resv() as *const _ as u64;
+        (*obj)._resv.__core[1] = (*obj)._resv.__core[0] ^ crate::MAGIC_RESV_GEM;
         let l = ptr::addr_of_mut!((*obj).gpuva.list);
         (*l).next = l;
         (*l).prev = l;

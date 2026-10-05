@@ -324,12 +324,19 @@ shmem_read_folio_gfp(struct address_space *mapping, pgoff_t index, gfp_t gfp)
 	struct lkpi_shmem *ls;
 	struct lkpi_shmem_mem *m;
 	struct lx_page *page;
-	/* i915 asks with __GFP_NORETRY/__GFP_RETRY_MAYFAIL first: may fail. */
 	bool sleep = lkpi_gfp_may_wait(gfp);
 	int err;
 
 	if (mapping == NULL || (ls = mapping->lkpi_shmem) == NULL)
 		return (ERR_PTR(-EINVAL));
+	/*
+	 * The backing is one allocation of the whole object: a may-fail
+	 * request (__GFP_RETRY_MAYFAIL) waits for memory only for a backing
+	 * up to physmem / 8, larger ones fail instead (<linux/gfp.h>).
+	 */
+	if ((gfp & __GFP_RETRY_MAYFAIL) != 0 &&
+	    ls->ls_npages > (size_t)physmem / 8)
+		sleep = false;
 
 	mutex_enter(&ls->ls_lock);
 	if (index >= ls->ls_npages) {

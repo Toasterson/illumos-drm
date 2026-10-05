@@ -10,7 +10,7 @@
 #
 #   drivers/i915/build.sh all      # $OUT/i915n
 #   cp $OUT/i915n <proto>/kernel/drv/amd64/i915n
-#   drivers/i915/gen-license.sh $LINUX <proto>/LICENSE.i915n
+#   drivers/i915/gen-license.sh $LINUX <proto>/LICENSE.i915n $OUT/linux-inputs.txt
 #   pkgsend publish -s <repo> -d <proto> packaging/i915n.p5m
 #
 # The driver action has no PCI aliases: the Intel GPU aliases belong to
@@ -23,13 +23,13 @@
 #
 # The module is linked with -N misc/drm_core -N misc/linuxkpi
 # -N misc/drm_helpers, so the package requires their packages. No
-# firmware is delivered: execlist submission on gen7 to gen9.5 needs none;
-# GuC/HuC firmware is optional there and absent firmware is not an error
-# (i915 logs it and continues).
+# firmware is delivered: gen6/gen7 submit through rings and gen8 to gen9.5
+# through execlists, neither needs firmware; GuC/HuC firmware is optional
+# there and absent firmware is not an error (i915 logs it and continues).
 #
 set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/i915n@0.0.1,5.11-2026.0.0.0
 set name=pkg.summary value="Intel GPU driver from Linux i915, headless (i915n)"
-set name=pkg.description value="i915n, the i915 driver of Linux v7.2 without display support, built for the illumos-drm DRM core and its Linux compatibility layer: GEM, execbuffer, contexts and render nodes for Intel integrated GPUs (gen7 to gen9.5 targeted). Ships no PCI aliases; select it with drmadm select new."
+set name=pkg.description value="i915n, the i915 driver of Linux v7.2 without display support, built for the illumos-drm DRM core and its Linux compatibility layer: GEM, execbuffer, contexts and render nodes for Intel integrated GPUs of gen6 to gen9.5 with a PCH (gen7 and gen9.5 targeted). Ships no PCI aliases; select it with drmadm select new."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
 set name=info.source-url value=https://code.aopc.cloud/illumos/illumos-drm
 set name=variant.arch value=i386

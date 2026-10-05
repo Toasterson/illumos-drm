@@ -33,8 +33,7 @@ unsafe fn resv<'a>(obj: *const f::dma_resv) -> Option<&'a Resv> {
     Some(unsafe { &*(p as *const Resv) })
 }
 
-/// The core's usage of a `dma_resv_usage`; `None` (after a warning) for a
-/// value Linux does not define, which the functions refuse.
+/// The `dma_resv_usage` of a core usage.
 fn usage_c(u: Usage) -> f::dma_resv_usage {
     match u {
         Usage::Kernel => f::DMA_RESV_USAGE_KERNEL,
@@ -44,6 +43,8 @@ fn usage_c(u: Usage) -> f::dma_resv_usage {
     }
 }
 
+/// The core's usage of a `dma_resv_usage`; `None` (after a warning) for a
+/// value Linux does not define, which the functions refuse.
 fn usage(u: f::dma_resv_usage) -> Option<Usage> {
     match u {
         f::DMA_RESV_USAGE_KERNEL => Some(Usage::Kernel),
@@ -183,7 +184,7 @@ pub unsafe extern "C" fn dma_resv_init(obj: *mut f::dma_resv) {
     // second init) keeps it: overwriting would orphan the core's.
     // SAFETY: the caller's structure; a fresh one holds no matching pair.
     let (c0, c1) = unsafe { ((*obj).__core[0], (*obj).__core[1]) };
-    if c0 != 0 && c1 == c0 ^ crate::MAGIC_RESV {
+    if c0 != 0 && (c1 == c0 ^ crate::MAGIC_RESV || c1 == c0 ^ crate::MAGIC_RESV_GEM) {
         // SAFETY: a constant format without arguments.
         unsafe {
             ddi::sys::cmn_err(

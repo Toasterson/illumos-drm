@@ -24,6 +24,7 @@
 # DDI_MAPFILE (the gate's ddi.mapfile), OUT [./out-linuxkpi], JOBS [2],
 # CROSS [0] (see kflags.sh), SRCS (only these src/ files, for development).
 set -u
+export LC_ALL=C
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=${REPO:-$(cd "$HERE/.." && pwd)}
 CC=${CC:-gcc}

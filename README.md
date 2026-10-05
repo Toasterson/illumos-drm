@@ -479,7 +479,7 @@ as a userland program. `packaging/drm-helpers.p5m` packages the module.
 `linuxkpi/` is the illumos Linux compatibility layer of R5c, the kernel
 module `misc/linuxkpi` (see *R5c* under *Decisions*): one MIT header per
 Linux header the i915 build and the carried helpers include
-(`linuxkpi/include/{linux,asm,drm,lkpi,trace,uapi,xen}`, with the
+(`linuxkpi/include/{linux,asm,acpi,drm,lkpi,trace,uapi,xen}`, with the
 force-included prologue `lkpi/prologue.h`), the implementation
 (`linuxkpi/src/`), the symbols it uses beyond the DDI with the reason for
 each (`linuxkpi/private.d/`), the kernel flags of everything built on it
@@ -1679,7 +1679,7 @@ krwlocks, ww_mutexes the core's wait-die reservation locks. Time: HZ is
 tree, workqueues and tasklets on `ddi_taskq` threads, RCU and SRCU with
 per-epoch reader counts and a callback thread. PCI, MMIO and interrupts
 over the DDI (`pci_config_*`, `ddi_regs_map_setup`, `ddi_intr_*` with
-MSI-X, MSI and INTx in that order). Printing through the layer's
+MSI-X, MSI and INTx in that order; threaded handlers are refused). Printing through the layer's
 `vsnprintf` with Linux's `%p` extensions (plain `%p` prints a keyed hash).
 Firmware over `firmload(9F)`. SSE4.1 is not reported to drivers, so no
 kernel FPU section runs (i915 and `drm_cache` copy from WC memory without
@@ -1696,11 +1696,16 @@ each fence's usage (`drm_illumos_resv_fences`; a driver's own fence comes
 back as its own structure, so i915 recognises its requests), sync objects
 without a handle (`drm_syncobj_create`, `drm_syncobj_fence_get`),
 `drm_is_current_master`, `illumos_close_every_handle` (Linux's `close`
-for every removed handle, which i915's lookup tables need) and
-`drm_dev_illumos_unplug` (a Linux driver tears down its own GEM objects
-before the core can unregister: detach first refuses while user space
-holds the device, then the core unregisters after the driver's
-`remove()`). The minor version is 1; drivers built for 1.0 keep working.
+for every removed handle, which i915's lookup tables need),
+`drm_dev_illumos_unplug` and `drm_dev_illumos_put` (Linux's DRM device
+lifecycle: the layer registers the device already in `devm_drm_dev_alloc()`,
+because i915 makes GEM objects long before its `drm_dev_register()`;
+detach first refuses while user space holds the device and takes it out of
+the device table; the driver's `remove()` runs; the last put runs the
+driver's release, which frees the driver's own GEM objects, and then the
+core unregisters, waiting a few seconds for leftover fences, or keeps the
+device and makes detach fail). The minor version is 1; drivers built for
+1.0 keep working.
 
 **R5c: i915n.** Linux v7.2's i915 (`drivers/i915/PIN`), headless: 154 of
 the 163 headless translation units of the R5c configuration (all MIT)
@@ -1737,10 +1742,15 @@ where available). `linuxkpi_selftest` is a Linux PCI driver on the layer
 that binds QEMU's PCI test device and checks, from its probe(), locks,
 workqueues, timers, waits, RCU, idr/xarray, slab caches, pages and DMA,
 and the concurrency of the scheduling, memory and reservation parts
-(`st_sched.c`, `st_mem.c`, `st_resv.c`). `tools/test/run-r5c-test.sh`
-loads the layer, runs the self-test, loads `misc/drm_helpers` and `i915n`
-(without a device), checks the attach-failure path and that nothing in
-the layer warned outside the self-test.
+(`st_sched.c`, `st_mem.c`, `st_resv.c`). The self-test also registers a DRM device the way i915 does (a GEM
+object made before `drm_dev_register()` and freed in the driver's release).
+`tools/test/run-r5c-test.sh` checks that no module defines a kernel
+symbol, loads the layer, runs the self-test, holds a node of its DRM device
+open across a refused detach and checks the release at the detach that
+follows, loads `misc/drm_helpers` and `i915n` (without a device, twice),
+checks that `i915n` refuses a device outside its ID table, and that
+nothing in the layer warned outside the self-test. (No probe of i915
+itself has run: there is no Intel GPU in the guest.)
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through

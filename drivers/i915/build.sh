@@ -109,6 +109,9 @@ if [ "$mode" = compile ] || [ "$mode" = all ]; then
 	    tr ' \\' '\n\n' | grep "^$LINUX/" | grep -v ':$' |
 	    sed "s|^$LINUX/||" | sort -u > "$OUT/linux-inputs.txt"
 	echo "linux inputs: $(wc -l < "$OUT/linux-inputs.txt") files"
+	# A path mismatch would leave the list empty and check nothing.
+	[ -s "$OUT/linux-inputs.txt" ] ||
+	    { echo "build.sh: no Linux inputs found in the dependency files"; exit 1; }
 	python3 "$HERE/check-licences.py" "$LINUX" "$OUT/linux-inputs.txt" || exit 1
 fi
 

@@ -339,7 +339,20 @@ request_threaded_irq(unsigned int irq, irq_handler_t handler,
 	int ret;
 
 	(void) flags;
-	if (handler == NULL && thread_fn == NULL)
+	/*
+	 * Threaded handlers are refused: their hand-off takes lv_lock in the
+	 * interrupt path, and free_irq()/disable_irq() hold it across
+	 * ddi_intr_disable(9F), which waits for an interrupt in progress on
+	 * the vector (a blocked interrupt thread would never let it finish).
+	 * i915 uses none; a driver that needs one gets -EOPNOTSUPP rather than
+	 * a hang.
+	 */
+	if (thread_fn != NULL) {
+		WARN_ONCE(1, "request_threaded_irq: threaded handlers are not "
+		    "supported (irq %u)", irq);
+		return (-EOPNOTSUPP);
+	}
+	if (handler == NULL)
 		return (-EINVAL);
 	if (servicing_interrupt())
 		return (-EINVAL);
@@ -515,7 +528,13 @@ disable_irq_nosync(unsigned int irq)
 	if (v->lv_depth++ == 0) {
 		v->lv_masked = true;
 		if (v->lv_requested && v->lv_type == DDI_INTR_TYPE_FIXED) {
-			if (servicing_interrupt())
+			/*
+			 * From an interrupt, or from a replayed handler that
+			 * holds lv_run (lkpi_irq_work()): the hardware change
+			 * waits for interrupts in progress, which may be
+			 * waiting for lv_run, so it is deferred.
+			 */
+			if (servicing_interrupt() || mutex_owned(&v->lv_run))
 				(void) queue_work(system_highpri_wq,
 				    &v->lv_work);
 			else

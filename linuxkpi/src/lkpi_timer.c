@@ -522,20 +522,32 @@ lkpi_timer_quiesce(uintptr_t lo, uintptr_t hi)
 
 	if (!lkpi_tm_may_wait())
 		return (0);
+	boolean_t again;
+
 	mutex_enter(&lkpi_tm_lock);
-	for (t = avl_first(&lkpi_tm_tree); t != NULL; t = next) {
-		next = AVL_NEXT(&lkpi_tm_tree, t);
-		if (!lkpi_tm_in(lkpi_tm_callback(t), lo, hi))
-			continue;
-		cmn_err(CE_WARN, "linuxkpi: timer %p (function %p) still "
-		    "armed at driver unload, disarmed", (void *)t,
-		    (void *)lkpi_tm_callback(t));
-		lkpi_tm_remove_locked(t);
-		n++;
-	}
-	while (lkpi_tm_running != NULL &&
-	    lkpi_tm_in(lkpi_tm_running_cb, lo, hi))
-		cv_wait(&lkpi_tm_done_cv, &lkpi_tm_lock);
+	/*
+	 * Until a pass finds nothing armed and nothing running: a function
+	 * that runs during a pass may arm its timer again (HRTIMER_RESTART,
+	 * mod_timer() from the callback).
+	 */
+	do {
+		again = B_FALSE;
+		for (t = avl_first(&lkpi_tm_tree); t != NULL; t = next) {
+			next = AVL_NEXT(&lkpi_tm_tree, t);
+			if (!lkpi_tm_in(lkpi_tm_callback(t), lo, hi))
+				continue;
+			cmn_err(CE_WARN, "linuxkpi: timer %p (function %p) "
+			    "still armed at driver unload, disarmed",
+			    (void *)t, (void *)lkpi_tm_callback(t));
+			lkpi_tm_remove_locked(t);
+			n++;
+		}
+		while (lkpi_tm_running != NULL &&
+		    lkpi_tm_in(lkpi_tm_running_cb, lo, hi)) {
+			cv_wait(&lkpi_tm_done_cv, &lkpi_tm_lock);
+			again = B_TRUE;
+		}
+	} while (again);
 	mutex_exit(&lkpi_tm_lock);
 	return (n);
 }
