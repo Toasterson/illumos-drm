@@ -5,9 +5,10 @@
  * linuxkpi_selftest: an in-kernel test of the LinuxKPI layer, written as a
  * Linux PCI driver so that it goes through the layer's PCI glue like i915.
  * It binds QEMU's PCI test device (pci-testdev, pci1b36,5) and runs the
- * checks from probe(): locks, workqueues (plain, ordered, delayed,
- * cancel), timers, completions, wait queues, RCU, idr/xarray, slab
- * caches, pages, and DMA scatterlists and coherent memory on the device.
+ * checks from probe(): the device's kobject, locks, workqueues (plain,
+ * ordered, delayed, cancel), timers, completions, wait queues, RCU,
+ * idr/xarray, slab caches, pages, and DMA scatterlists and coherent
+ * memory on the device.
  * The concurrency tests of the scheduling, memory and reservation parts
  * are in st_sched.c, st_mem.c and st_resv.c (st.h).
  * Every check logs "linuxkpi_selftest: ok <name>" or "FAIL <name>"; the
@@ -21,6 +22,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/idr.h>
 #include <linux/jiffies.h>
+#include <linux/kobject.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -355,6 +357,55 @@ free_pages:
 		__free_page(pages[i]);
 }
 
+/* --- the device's kobject ------------------------------------------------ */
+
+/*
+ * A layer device's kobject is initialised and named dev_name(), and a
+ * kobject added under it holds a reference on it (i915 adds "gt" and
+ * reads the parent's name). One child is left under it, as i915 leaves
+ * "engine": the device's release orphans it (its parent becomes NULL).
+ * The next probe checks that and puts it; _fini logs it.
+ */
+static struct kobject *st_leftover;
+
+static bool
+st_leftover_put(void)
+{
+	bool orphaned;
+
+	if (st_leftover == NULL)
+		return (true);
+	orphaned = READ_ONCE(st_leftover->parent) == NULL;
+	kobject_put(st_leftover);
+	st_leftover = NULL;
+	return (orphaned);
+}
+
+static void
+test_device_kobject(struct pci_dev *pdev)
+{
+	struct kobject *kobj = &pdev->dev.kobj;
+	struct kobject *gt;
+	unsigned int refs;
+
+	if (st_leftover != NULL)
+		CHECK("kobject left under the previous device orphaned",
+		    st_leftover_put());
+	CHECK("device kobject named dev_name()", kobj->state_initialized &&
+	    kobject_name(kobj) != NULL &&
+	    strcmp(kobject_name(kobj), dev_name(&pdev->dev)) == 0);
+	refs = kref_read(&kobj->kref);
+	gt = kobject_create_and_add("gt", kobj);
+	CHECK("kobject under the device", gt != NULL && gt->parent == kobj &&
+	    kref_read(&kobj->kref) == refs + 1);
+	kobject_put(gt);
+	CHECK("its put drops the device kobject reference",
+	    kref_read(&kobj->kref) == refs);
+	st_leftover = kobject_create_and_add("engine", kobj);
+	CHECK("kobject left under the device", st_leftover != NULL &&
+	    kref_read(&kobj->kref) == refs + 1);
+}
+
 /* --- a DRM device on the layer (the i915n lifecycle) ---------------------- */
 
 /*
@@ -447,6 +498,7 @@ st_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	CHECK("pci_read_config_word", pci_read_config_word(pdev, PCI_VENDOR_ID,
 	    &vendor) == 0 && vendor == 0x1b36);
 	CHECK("dev_name", strlen(dev_name(&pdev->dev)) >= 7);
+	test_device_kobject(pdev);
 	test_locks();
 	test_work();
 	test_timers_and_waits();
@@ -551,6 +603,14 @@ _fini(void)
 
 	if ((ret = mod_remove(&st_modlinkage)) != 0)
 		return (ret);
+	if (st_leftover != NULL) {
+		if (st_leftover_put())
+			pr_info("linuxkpi_selftest: ok kobject left under the "
+			    "device orphaned at its release\n");
+		else
+			pr_err("linuxkpi_selftest: FAIL kobject left under the "
+			    "device orphaned at its release\n");
+	}
 	pci_unregister_driver(&st_pci_driver);
 	lkpi_module_quiesce(&st_modlinkage);
 	return (0);

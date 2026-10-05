@@ -682,7 +682,10 @@ impl<D: Driver> CharDevice for Device<D> {
         // Core and mode-setting commands match whatever their size bits,
         // and their argument is copied with Linux's size rule (a shorter
         // structure is zero-extended, a longer one keeps its extra bytes;
-        // crate::ioctl). Driver commands match on their complete value.
+        // crate::ioctl). Driver commands match on their complete value,
+        // else on number and direction, else on number in any direction
+        // (crate::ioctl::lookup_driver); the driver copies their argument
+        // with the same size rule, in the directions both commands have.
         if let Some(entry) = ioctl::lookup(cmd) {
             let a = CoreArg::new(&arg, SizePlan::new(entry.cmd, cmd))?;
             self.core_ioctl(entry, c, privileged, &a, ctx)?;

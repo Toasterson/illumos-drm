@@ -4,11 +4,35 @@
  *
  * Linux's kobjects and the sysfs text helpers (<linux/kobject.h>,
  * <linux/sysfs.h>). illumos has no sysfs, so a kobject is a name, a
- * parent and a reference count: kobject_add() names it and takes a
- * reference on the parent, the last kobject_put() unlinks it, frees the
- * name and calls the type's release(). sysfs_emit() formats into the
- * page-sized buffer of a show() function, which the drivers' attribute
- * code still calls (e.g. from the layer's debugging aids).
+ * parent and a reference count: kobject_add() names it, takes a
+ * reference on the parent and puts it on the parent's list of children;
+ * kobject_del() (and the last kobject_put()) takes it off and drops that
+ * reference; the last kobject_put() frees the name and calls the type's
+ * release(). sysfs_emit() formats into the page-sized buffer of a show()
+ * function, which the drivers' attribute code still calls (e.g. from the
+ * layer's debugging aids).
+ *
+ * The children list exists for kobjects whose memory is not freed by
+ * their release(): a layer device's kobject lives in the device, which
+ * is freed at the last put_device() (src/lkpi_device.c). A driver may
+ * leave kobjects under it (Linux i915 never puts the "engine" kobject
+ * it adds under the DRM minor's device); before the device is freed,
+ * lkpi_kobject_orphan_children() detaches them, so that no child keeps
+ * a pointer to the freed kobject.
+ *
+ * Locking: lkpi_kobject_lock protects every kobject's parent pointer,
+ * lkpi_children and lkpi_sibling. It is a leaf: no other lock is taken,
+ * nothing is allocated and no release() runs while it is held, so it
+ * orders after any driver mutex. It is an adaptive mutex: as in Linux,
+ * kobject_add(), kobject_del() and the put of an added kobject run in
+ * thread context, not under a spinlock (a kobject without a parent takes
+ * no lock). A child's reference on its parent is dropped under the lock
+ * unless it is the parent's last one (then the put, and the parent's
+ * release(), follow after the lock is dropped). So when
+ * lkpi_kobject_orphan_children() returns, every child's reference on the
+ * kobject is gone, by kobject_del() or by the orphaning, and no
+ * kobject_del() still to come can touch the kobject: its owner, holding
+ * the last reference, may then put and free it.
  */
 
 #include <linux/kernel.h>
@@ -18,8 +42,13 @@
 #include <linux/sprintf.h>
 #include <linux/bug.h>
 #include <linux/errno.h>
+#include <linux/compiler.h>
+#include <linux/refcount.h>
 
 const char power_group_name[] = "power";
+
+/* Parents and children lists of all kobjects; zero-filled: a valid mutex. */
+static kmutex_t lkpi_kobject_lock;
 
 static ssize_t
 kobj_attr_show(struct kobject *kobj, struct attribute *attr, char *buf)
@@ -60,6 +89,8 @@ kobject_init(struct kobject *kobj, const struct kobj_type *ktype)
 	kobj->parent = NULL;
 	kobj->ktype = ktype;
 	kref_init(&kobj->kref);
+	INIT_LIST_HEAD(&kobj->lkpi_children);
+	INIT_LIST_HEAD(&kobj->lkpi_sibling);
 	kobj->state_initialized = 1;
 }
 
@@ -80,11 +111,23 @@ kobject_vadd(struct kobject *kobj, struct kobject *parent, const char *fmt,
 		kfree(kobj->name);
 		kobj->name = name;
 	}
+	if (parent != NULL && !parent->state_initialized) {
+		WARN(1, "kobject_add: %s: parent %p not initialised", kobj->name,
+		    parent);
+		return (-EINVAL);
+	}
+	mutex_enter(&lkpi_kobject_lock);
 	if (kobj->parent != NULL) {
+		mutex_exit(&lkpi_kobject_lock);
 		WARN(1, "kobject_add: %s already added", kobj->name);
 		return (-EINVAL);
 	}
-	kobj->parent = kobject_get(parent);
+	if (parent != NULL) {
+		kref_get(&parent->kref);
+		list_add_tail(&kobj->lkpi_sibling, &parent->lkpi_children);
+	}
+	WRITE_ONCE(kobj->parent, parent);
+	mutex_exit(&lkpi_kobject_lock);
 	return (0);
 }
 
@@ -151,17 +194,54 @@ kobject_get(struct kobject *kobj)
 	return (kobj);
 }
 
-/* Unlinks the kobject from its parent (dropping the parent reference). */
+/*
+ * Unlinks the kobject from its parent and drops the parent reference. A
+ * kobject without a parent (never added, deleted or orphaned) takes no
+ * lock: the parent pointer only becomes non-NULL in kobject_add().
+ */
 void
 kobject_del(struct kobject *kobj)
 {
 	struct kobject *parent;
 
-	if (kobj == NULL)
+	if (kobj == NULL || READ_ONCE(kobj->parent) == NULL)
 		return;
+	mutex_enter(&lkpi_kobject_lock);
 	parent = kobj->parent;
-	kobj->parent = NULL;
+	if (parent != NULL) {
+		list_del_init(&kobj->lkpi_sibling);
+		WRITE_ONCE(kobj->parent, NULL);
+		/* Not the parent's last reference: dropped under the lock. */
+		if (refcount_dec_not_one(&parent->kref.refcount))
+			parent = NULL;
+	}
+	mutex_exit(&lkpi_kobject_lock);
 	kobject_put(parent);
+}
+
+int
+lkpi_kobject_orphan_children(struct kobject *kobj)
+{
+	struct kobject *child, *next;
+	int n = 0, last = 0;
+
+	if (kobj == NULL || kobj->lkpi_children.next == NULL)
+		return (0);
+	mutex_enter(&lkpi_kobject_lock);
+	list_for_each_entry_safe(child, next, &kobj->lkpi_children,
+	    lkpi_sibling) {
+		list_del_init(&child->lkpi_sibling);
+		WRITE_ONCE(child->parent, NULL);
+		n++;
+		/* The caller's own reference keeps the count above one. */
+		if (!refcount_dec_not_one(&kobj->kref.refcount))
+			last++;
+	}
+	mutex_exit(&lkpi_kobject_lock);
+	WARN(last != 0, "lkpi_kobject_orphan_children: %s (%p): %d child "
+	    "references were the last", kobj->name != NULL ? kobj->name :
+	    "(unnamed)", kobj, last);
+	return (n);
 }
 
 static void

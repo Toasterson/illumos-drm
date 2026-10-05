@@ -258,8 +258,7 @@ pub const fn same_number(table_cmd: u32, cmd: u32) -> bool {
 /// driver's ioctls, whatever its size and direction bits (for 32-bit
 /// callers, as [`is_core_nr`]).
 pub fn is_driver_nr(table: &[DriverIoctl], cmd: u32) -> bool {
-    ioc::ioc_group(cmd) == ioc::DRM_IOCTL_BASE
-        && table.iter().any(|e| e.in_driver_range() && ioc::ioc_nr(e.cmd) == ioc::ioc_nr(cmd))
+    table.iter().any(|e| e.in_driver_range() && same_number(e.cmd, cmd))
 }
 
 /// Reports whether `cmd` is the command `table_cmd` with any argument

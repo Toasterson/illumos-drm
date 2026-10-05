@@ -66,8 +66,17 @@ static const ddi_dma_attr_t lkpi_default_dma_attr = {
  * kobject_create_and_add("gt", &kdev->kobj) and is_object_gt(), whose
  * strncmp() of a NULL name was a panic at the first attach on a ThinkPad
  * X230). The device's lifetime is lkpi_refs (get_device()/put_device()),
- * so the kobject itself releases nothing: lkpi_device_fini() drops the
- * reference kobject_init() took, and kobject_release() frees the name.
+ * not the kobject's reference count: the device's memory is freed at the
+ * last put_device() whatever kobjects still hold the device's kobject as
+ * their parent. Linux i915 leaves one: the "engine" kobject of
+ * intel_engines_add_sysfs() is never put (i915_teardown_sysfs() puts only
+ * "gt"). So lkpi_device_fini() first orphans the children left under the
+ * kobject (their parent pointer becomes NULL and the reference each held
+ * is dropped; the children themselves stay the driver's), then drops the
+ * reference kobject_init() took, which is then the last one:
+ * kobject_release() frees the name and this release does nothing.
+ * Another reference left at that point (a kobject_get() of the device's
+ * kobject never put) is a driver bug and warned about.
  */
 static void
 lkpi_device_kobj_release(struct kobject *kobj)
@@ -140,9 +149,15 @@ lkpi_device_fini(struct device *dev)
 	lkpi_devres_release_all(dev);
 	(mutex_destroy)(&dev->lkpi_devres_lock);
 	dev->lkpi_devres.next = dev->lkpi_devres.prev = NULL;
-	/* A kobject still holding the device's as its parent keeps the name. */
-	if (dev->kobj.state_initialized)
-		kobject_put(&dev->kobj);
+	(void) lkpi_kobject_orphan_children(&dev->kobj);
+	if (WARN(!dev->kobj.state_initialized, "linuxkpi: the kobject of "
+	    "device %s was released before the device (a kobject_put() too "
+	    "many)", dev_name(dev)))
+		return;
+	WARN(kref_read(&dev->kobj.kref) != 1, "linuxkpi: the kobject of "
+	    "device %s has %u references left at the device's release",
+	    dev_name(dev), kref_read(&dev->kobj.kref) - 1);
+	kobject_put(&dev->kobj);
 }
 
 dev_info_t *
