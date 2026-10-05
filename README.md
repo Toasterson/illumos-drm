@@ -117,8 +117,22 @@ mapfile and the facade's CTF, `rdrmnull` and `virtio_gpu` linked without
 a symbol of the stateful core, and `cdrmnull` and `misc/linuxkpi` built
 against the 2.0 headers (log
 `logs/oibuild/illumos-drm/20261005-kms-core-*-build.log` in the
-workspace). Nothing has been loaded or run in a kernel yet, and no C
-implementation of the hooks (`misc/drm_kms`) exists yet.
+workspace). Nothing has been loaded or run in a kernel yet; the C side of
+the hooks is `misc/drm_kms` (below), and i915n's display uses it (*i915n
+with display*).
+
+i915n with display (see *i915n with display* under *What is in the
+repository*): on 5 October 2026, at `f3a60ab`, on oibuild (gcc 15.3.0,
+job limit 2) every new-stack module was built from that one revision:
+`misc/linuxkpi` (ABI 3), `misc/drm_helpers`, `misc/drm_kms` and i915n
+with display (290 TUs; the 791 Linux files the compiler read all MIT or
+HPND), each linked with `-z defs` without an unresolved symbol, and the
+seven packages (`drmadm`, `drm-core`, `virtio-gpu`, `linuxkpi`,
+`drm-helpers`, `drm-kms`, `i915n`) published as one p5p (branch version
+`2026.0.0.6`). A krtld-style resolution of the six modules against an
+illumos `cda5b9a49f` kernel (unix, genunix and the modules' dependencies)
+left nothing unresolved. Nothing of the display has been loaded or run
+in a kernel yet: the first attach is on the ThinkPad X230.
 
 G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
 of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
@@ -556,9 +570,10 @@ each (`linuxkpi/private.d/`), the kernel flags of everything built on it
 (`linuxkpi/kflags.sh`), `linuxkpi/build.sh`, the kernel self-test driver
 `linuxkpi_selftest` (`linuxkpi/selftest/`, run by
 `tools/test/run-r5c-test.sh`) and host tests (`linuxkpi/tests/host/`).
-`drivers/i915/` builds `i915n`, Linux v7.2's i915 without display, on
+`drivers/i915/` builds `i915n`, Linux v7.2's i915 (with display on Ivy
+Bridge since facade 2.0, see *i915n with display* below), on
 it: the pin (`PIN`), the configuration (`config/`), the translation units
-(`tus.txt`), the MIT Linux headers used unchanged (`mit-headers.txt`), the
+(`tus.txt`, and `display-tus.txt` for the display), the MIT Linux headers used unchanged (`mit-headers.txt`), the
 illumos patch series (`patches/`), `fetch-and-patch.sh` (no Linux source
 is in this repository), `build.sh`, the licence checks
 (`check-licences.py`, `gen-license.sh`) and the illumos glue
@@ -615,6 +630,86 @@ reached through the facade 2.0 hooks (`include/drm/drm_lkms.h`).
   list and fails if it differs from the committed file or from the
   module's global symbols. `packaging/drm-kms.p5m` packages it
   (`driver/graphics/drm-kms`).
+
+### i915n with display
+
+The display build of `i915n` (`drivers/i915/build.sh`, `I915_DISPLAY=1`,
+the default) carries i915's display code for Ivy Bridge (display version
+7; the ThinkPad X230's HD 4000) and uses Linux's mode-setting code in
+`misc/drm_kms` through the facade 2.0 hooks. Design: section 3 of
+`notes/i915n-kms-design.md` in the workspace.
+
+- **What is built:** the 158 entries of `tus.txt` (154 Linux TUs and the
+  illumos glue) plus `display-tus.txt`: 132 display TUs (Linux's display
+  objects in the R5c configuration minus the families below and the GPL
+  tracepoint TU) and two illumos sources; its `-` lines take the headless
+  stubs out (`illumos/i915_nodisplay.c`, and `illumos/i915_nokms.c`, the
+  four KMS helpers that `misc/drm_kms` provides and a local definition
+  would shadow). 290 TUs, compiled with `-DI915N_DISPLAY`, linked with
+  `-N misc/drm_core -N misc/linuxkpi -N misc/drm_helpers -N misc/drm_kms
+  -z defs` against the DDI, facade, LinuxKPI, drm_helpers and drm_kms
+  mapfiles and `private.mapfile`. `I915_DISPLAY=0` builds R5c's headless
+  i915n (158 TUs, no `misc/drm_kms`). Both lists are licence-checked
+  (`fetch-and-patch.sh` for the TUs, the build for every file the compiler
+  read).
+- **The platform gate** (patch 0011): `intel_display_device_probe()` takes
+  Linux's `no_display` path on every platform but Ivy Bridge and logs
+  `display on <platform> is not supported on illumos; running headless`;
+  i915's `intel_display_device_info_runtime_init()` then clears
+  `DRIVER_MODESET` and `DRIVER_ATOMIC`, so the core starts no mode setting
+  (`drm_dev_illumos_lkms_register()` does nothing) and the device behaves
+  as the headless build. Patch 0012 points `i915_drm_driver.illumos_lkms`
+  at `drm_kms_illumos_funcs`. Patch 0006's display-engine interrupt
+  helpers (`illumos/i915_illumos.c`) act only on a device without display
+  (the gen5-7 master enable lives in DEIER); with a display, Linux's
+  display code owns those registers.
+- **The stubs:** DSI (MIPI DSI bus), HDCP (MEI/GSC, the GPL
+  `drm_hdcp_helper`) and LPE audio (platform devices) are not built.
+  `illumos/gen-nodisplay.py --excluded` writes `illumos/i915_excluded.c`:
+  every function of those families the display objects call, with the
+  answer the real function gives on Ivy Bridge and the reason, read from
+  the callers, in a comment above it (no default answer: a new import
+  fails the link until it is added to the generator's table). Among
+  them: `is_hdcp_supported()` false (Ivy Bridge has no `has_hdcp`, so no
+  connector gets the Content Protection property or an HDCP shim, and
+  the HDCP hooks of the commit path return at once as Linux's do without
+  a shim); `intel_hdcp_disable()` -ENOENT as Linux without a shim;
+  `intel_dsi_dcs_init_backlight_funcs()` -ENODEV, so a caller would fall
+  back to the PWM backlight; `vlv_dsi_min_cdclk()` 0;
+  `intel_lpe_audio_init()` -ENODEV (the audio component is used instead);
+  `i915_display_hdcp_interface` empty (its only callers are in the HDCP
+  TUs). The panic screen (`i915_panic.c`) is left out too: drm_panic is
+  not carried and patch 0002 leaves its helpers out of
+  `i915_gem_pages.c`. Its interface is in `i915_excluded.c`, with an
+  `alloc` that must and does succeed (an empty placeholder):
+  `intel_framebuffer_init()` fails every framebuffer with -ENOMEM
+  without one. `setup` refuses (-EOPNOTSUPP) and `finish` does nothing;
+  only drm_panic calls them.
+- **The VBT** (patch 0013): without `CONFIG_ACPI` there is no
+  `intel_opregion.c`; `illumos/i915_illumos_vbt.c` reads the VBT out of
+  the ACPI OpRegion (PCI config `ASLS`; RVDA/RVDS of OpRegion 2.0+, else
+  mailbox 4; validated with `intel_bios_is_valid_vbt()`) as a copy, and
+  never writes to the OpRegion (no driver-ready flag, no ASLE requests).
+  It maps the OpRegion with the layer's `memremap(MEMREMAP_WB)`
+  (write-back only; frames beyond the CPU's physical address width are
+  refused). Without a VBT i915 runs on its "VBT missing" defaults.
+- **Layer fixes for the display paths** (`misc/linuxkpi`, ABI 3):
+  `outb()`/`outw()`/`outl()` take Linux's argument order (the
+  prologue's `<sys/sunddi.h>` has illumos' port-first functions, which
+  `intel_vga.c`'s VGA sequencer writes would otherwise have called with
+  the arguments swapped); `component_add_typed()` succeeds and leaves the
+  audio component unbound, as on Linux without the HDA driver;
+  `vga_switcheroo_register_client()` succeeds as on Linux without
+  switcheroo. As they were and correct for the X230: `pci_map_rom()` NULL
+  (no PCI ROM VBT on a UEFI boot), the host bridge's config space by bus
+  and devfn (`GGC`), `pdev->bus->self` NULL on the root bus, the VGA
+  arbiter calls (succeed, no arbiter), CPU latency QoS (no effect),
+  hrtimers, DMI quirk matching, kthread workers, `ktime_get_*()`. Not
+  provided: the backlight class device (brightness control) and ACPI
+  (lid, ASLE).
+- **Package:** `driver/graphics/i915n` requires and incorporates
+  `driver/graphics/drm-kms`; its licence file lists every Linux file the
+  compiler read, the display's included.
 
 ## Decisions
 

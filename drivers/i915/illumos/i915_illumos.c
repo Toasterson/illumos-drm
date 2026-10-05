@@ -429,4 +429,3 @@ i915_illumos_gen8_de_irq_reset(struct drm_i915_private *i915)
 		gen2_irq_reset(uncore, illumos_irq_regs(ILLUMOS_SDEIMR,
 		    ILLUMOS_SDEIER, ILLUMOS_SDEIIR));
 }
-
