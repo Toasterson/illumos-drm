@@ -18,16 +18,15 @@
  * - the GSC (Graphics System Controller, discrete GPUs and Meteor Lake):
  *   no GSC, its interrupt does nothing.
  * - the gen2-gen5 GTT through intel-gtt: probing fails with -ENODEV.
- * - the KMS helpers i915 calls on its display paths (no display).
+ *
+ * The KMS helpers the headless build calls are in i915_nokms.c (headless
+ * build only: with the display, misc/drm_kms provides them).
  */
 
 #include "i915_drv.h"
 
-#include <drm/drm_atomic_helper.h>
 #include <drm/drm_buddy.h>
-#include <drm/drm_mode_config.h>
 #include <drm/drm_print.h>
-#include <drm/drm_probe_helper.h>
 #include <drm/ttm/ttm_resource.h>
 #include <linux/gpu_buddy.h>
 #include "intel_memory_region.h"
@@ -245,30 +244,4 @@ intel_ggtt_gmch_enable_hw(struct drm_i915_private *i915)
 void
 intel_ggtt_gmch_flush(void)
 {
-}
-
-/* --- KMS helpers on the display paths ------------------------------------- */
-
-void
-drm_atomic_helper_shutdown(struct drm_device *dev)
-{
-	(void) dev;
-}
-
-void
-drm_kms_helper_poll_disable(struct drm_device *dev)
-{
-	(void) dev;
-}
-
-void
-drm_kms_helper_poll_enable(struct drm_device *dev)
-{
-	(void) dev;
-}
-
-void
-drm_mode_config_reset(struct drm_device *dev)
-{
-	(void) dev;
 }

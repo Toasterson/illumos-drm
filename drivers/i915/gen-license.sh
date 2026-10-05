@@ -4,11 +4,12 @@
 # Copyright 2026 The illumos-drm authors
 #
 # Writes the licence file of the i915n package: the copyright lines of
-# every Linux file compiled into i915n, then the MIT permission notice they
-# carry (SPDX "MIT" or the notice in full) and the HPND notice of the files
+# every Linux file compiled into i915n (display included), then the MIT
+# permission notice they carry (SPDX "MIT" or the notice in full) and the HPND notice of the files
 # under it. The files are those of `inputs` (build.sh's linux-inputs.txt:
 # every Linux file the compiler read, which check-licences.py accepted);
-# without it, the TUs of tus.txt, i915's own headers and mit-headers.txt.
+# without it, the TUs of tus.txt and display-tus.txt, i915's own headers
+# and mit-headers.txt.
 #
 #   drivers/i915/gen-license.sh <patched Linux tree> <output file> [inputs]
 #
@@ -33,6 +34,8 @@ if [ -n "$inputs" ]; then
 else
 	{
 		grep -v '^#' "$HERE/tus.txt" | grep . | grep -v '^illumos/' | sed "s|^|$I915/|"
+		grep -v '^#' "$HERE/display-tus.txt" | grep . | grep -v '^-' |
+		    grep -v '^illumos/' | sed "s|^|$I915/|"
 		# i915's own headers, minus self-tests (not compiled)
 		(cd "$LINUX" && find "$I915" -name '*.h' \
 		    ! -path '*/selftests/*' ! -name 'selftest_*' ! -path '*/gvt/*' \

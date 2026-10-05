@@ -19,10 +19,12 @@ SYMBOL_SCOPE {
 		#
 		_pageshift		{ FLAGS = EXTERN };
 		#
-		# The kernel's C string functions (common/util/string.c),
-		# which i915 calls directly; the DDI lists bcmp and strcmp
-		# but not these two.
+		# The kernel's C memory and string functions
+		# (common/util/memstr.c, common/util/string.c), which i915
+		# calls directly; the DDI lists bcmp, memcpy and strcmp but
+		# not these (memmove: the display code).
 		#
 		memcmp			{ FLAGS = EXTERN };
+		memmove			{ FLAGS = EXTERN };
 		strrchr			{ FLAGS = EXTERN };
 };

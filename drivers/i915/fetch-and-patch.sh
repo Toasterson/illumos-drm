@@ -10,14 +10,15 @@
 # patches and this script are in it. One tree serves i915n
 # (drivers/i915/build.sh) and misc/drm_kms (carried/drm_kms/build.sh).
 #
-# Licences: every TU of tus.txt and of carried/drm_kms/tus.txt and every
-# header of mit-headers.txt must be MIT or HPND (check-licences.py), else
-# the script refuses the tree. GPL-2.0 headers the builds include are
-# replaced in the tree: the tracepoint headers by MIT no-op headers that
-# illumos/gen-trace-stubs.py writes from the originals' event names
-# (TRACE_HEADERS below), intel_ips.h and drm_dp_mst_topology_internal.h by
-# MIT files of illumos-drm (REPLACED); the build scripts check every Linux
-# file the compiler read, so no GPL text reaches a build.
+# Licences: every TU of tus.txt, display-tus.txt and
+# carried/drm_kms/tus.txt and every header of mit-headers.txt must be MIT
+# or HPND (check-licences.py), else the script refuses the tree. GPL-2.0
+# headers the builds include are replaced in the tree: the tracepoint
+# headers by MIT no-op headers that illumos/gen-trace-stubs.py writes from
+# the originals' event names (TRACE_HEADERS below), intel_ips.h and
+# drm_dp_mst_topology_internal.h by MIT files of illumos-drm (REPLACED);
+# the build scripts check every Linux file the compiler read, so no GPL
+# text reaches a build.
 #
 #   drivers/i915/fetch-and-patch.sh <directory>
 #
@@ -128,6 +129,8 @@ done
 # checks every Linux file the compiler read, too (build.sh).
 {
 	grep -v '^#' "$HERE/tus.txt" | grep . | grep -v '^illumos/' | sed "s|^|$I915/|"
+	grep -v '^#' "$HERE/display-tus.txt" | grep . | grep -v '^-' |
+	    grep -v '^illumos/' | sed "s|^|$I915/|"
 	grep -v '^#' "$KMS/tus.txt" | grep .
 	grep -v '^#' "$HERE/mit-headers.txt" | grep .
 } > "$dest/.illumos/licence-check.txt"

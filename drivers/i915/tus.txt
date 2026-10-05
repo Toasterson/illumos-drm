@@ -155,3 +155,4 @@ i915_vgpu.c
 illumos/i915_illumos.c
 illumos/i915_nodisplay.c
 illumos/i915_illumos_stubs.c
+illumos/i915_nokms.c
