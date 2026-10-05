@@ -7,6 +7,8 @@
 # layer, its kernel self-test, misc/drm_helpers on top of it, and the
 # loading of i915n (Linux i915, headless).
 #
+#   0  none of the modules defines a global symbol the running kernel
+#      has (krtld would bind the module's callers to the kernel's).
 #   A  misc/drm_core (drm-test-lib.sh) and misc/linuxkpi load: krtld
 #      resolves every symbol the layer imports, and the layer's _init (CPU
 #      facts, tasks, RCU, timers, workqueues, DRM glue, PCI) succeeds.
@@ -89,6 +91,22 @@ log0=$(wc -l < /var/adm/messages)
 newlog() {
 	tail +$((log0 + 1)) /var/adm/messages
 }
+
+echo
+echo "=== 0: no global symbol of these modules is the kernel's too"
+# krtld reports such a symbol multiply defined and binds the module's own
+# callers to the kernel's.
+nm -p /dev/ksyms | awk 'NF >= 3 { print $NF }' | sort -u > /tmp/r5c-ksyms
+for m in linuxkpi drm_helpers i915n linuxkpi_selftest; do
+	nm "$m" | awk -F'|' '$5 ~ /GLOB/ && $7 !~ /UNDEF/ { gsub(/ /, "", $8); print $8 }' |
+	    grep -v -x -e _init -e _fini -e _info | sort -u > /tmp/r5c-defs
+	both=$(comm -12 /tmp/r5c-defs /tmp/r5c-ksyms | tr '\n' ' ')
+	if [ -z "$both" ]; then
+		pass "$m defines no kernel symbol"
+	else
+		bad "$m defines kernel symbols: $both"
+	fi
+done
 
 echo
 echo "=== A: misc/drm_core and misc/linuxkpi"

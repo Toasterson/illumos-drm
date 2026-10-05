@@ -105,12 +105,16 @@ lkpi_dma_resv_unlock(struct dma_resv *obj)
 	lkpi_resv_snaps_release(obj);
 	if (ctx != NULL) {
 		/*
-		 * The core refuses an unlock by a thread that does not hold
-		 * the lock; the C state changes only when it accepted.
+		 * The record goes before the lock: once the core releases it,
+		 * the next holder writes its own. The core refuses an unlock
+		 * by a thread that does not hold the lock; then the record
+		 * and the count are put back as they were.
 		 */
-		if (drm_illumos_resv_unlock_ctx(obj, ctx->stamp) != 0)
-			return;
 		obj->lock.ctx = NULL;
+		if (drm_illumos_resv_unlock_ctx(obj, ctx->stamp) != 0) {
+			obj->lock.ctx = ctx;
+			return;
+		}
 		WARN_ON(ctx->acquired == 0);
 		ctx->acquired--;
 	} else {

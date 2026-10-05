@@ -47,6 +47,13 @@
 #define	kstat	lx_kstat
 #define	kmem_cache	lkpi_kmem_cache
 #define	resume	lx_resume
+/* As the real prologue: the layer's names for functions genunix has. */
+#define	timer_delete	lkpi_timer_delete
+#define	free_pages	lkpi_free_pages
+#define	get_device	lkpi_get_device
+#define	sort		lkpi_sort
+#define	sscanf		lkpi_sscanf
+#define	vsscanf		lkpi_vsscanf
 
 #include <lkpi/config.h>
 

@@ -100,6 +100,17 @@
 #define	kmem_cache	lkpi_kmem_cache
 /* sys/disp.h declares resume(); i915 has a static function of that name. */
 #define	resume	lx_resume
+/*
+ * Linux functions the layer defines whose names genunix uses too (krtld
+ * would report them multiply defined and bind every caller to genunix's):
+ * the layer's are linked under these names.
+ */
+#define	timer_delete	lkpi_timer_delete
+#define	free_pages	lkpi_free_pages
+#define	get_device	lkpi_get_device
+#define	sort		lkpi_sort
+#define	sscanf		lkpi_sscanf
+#define	vsscanf		lkpi_vsscanf
 
 #include <lkpi/config.h>
 
