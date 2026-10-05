@@ -65,21 +65,28 @@ panic(const char *fmt, ...)
 	abort();
 }
 
-/* kmem: malloc() with a live count; KM_NOSLEEP may be made to fail. */
+/*
+ * kmem: malloc() with a live count; KM_NOSLEEP may be made to fail. Each
+ * allocation keeps its size in a 16-byte header, and kmem_free() aborts
+ * when given another size, which illumos' kmem_free(9F) would not survive.
+ */
+#define	HOST_KMEM_HDR	16
+
 void *
 kmem_alloc(size_t size, int flag)
 {
-	void *p;
+	char *p;
 
 	if ((flag & KM_NOSLEEP) && lkpi_host_kmem_fail_nosleep)
 		return (NULL);
 	if (size == 0)
 		return (NULL);
-	p = malloc(size);
+	p = malloc(size + HOST_KMEM_HDR);
 	if (p == NULL)
 		abort();
+	memcpy(p, &size, sizeof (size));
 	lkpi_host_kmem_live++;
-	return (p);
+	return (p + HOST_KMEM_HDR);
 }
 
 void *
@@ -95,11 +102,20 @@ kmem_zalloc(size_t size, int flag)
 void
 kmem_free(void *p, size_t size)
 {
-	(void) size;
+	char *h;
+	size_t had;
+
 	if (p == NULL)
 		return;
+	h = (char *)p - HOST_KMEM_HDR;
+	memcpy(&had, h, sizeof (had));
+	if (had != size) {
+		fprintf(stderr, "kmem_free(%p, %zu): allocated with %zu\n", p,
+		    size, had);
+		abort();
+	}
 	lkpi_host_kmem_live--;
-	free(p);
+	free(h);
 }
 
 /* The layer's kmalloc() (src/lkpi_slab.c in the kernel). */

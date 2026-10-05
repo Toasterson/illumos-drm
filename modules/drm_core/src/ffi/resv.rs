@@ -179,6 +179,20 @@ pub unsafe extern "C" fn dma_resv_init(obj: *mut f::dma_resv) {
     if obj.is_null() {
         return;
     }
+    // A reservation that has one already (a GEM object's `_resv`, or a
+    // second init) keeps it: overwriting would orphan the core's.
+    // SAFETY: the caller's structure; a fresh one holds no matching pair.
+    let (c0, c1) = unsafe { ((*obj).__core[0], (*obj).__core[1]) };
+    if c0 != 0 && c1 == c0 ^ crate::MAGIC_RESV {
+        // SAFETY: a constant format without arguments.
+        unsafe {
+            ddi::sys::cmn_err(
+                ddi::sys::CE_WARN,
+                c"drm_core: dma_resv_init of a reservation that has one already; ignored".as_ptr(),
+            )
+        };
+        return;
+    }
     // SAFETY: the caller's structure, not in use yet.
     unsafe {
         (*obj).__core[0] = 0;
