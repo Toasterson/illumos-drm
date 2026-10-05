@@ -30,10 +30,14 @@ enum drm_ioctl_flags {
 
 /*
  * A driver ioctl handler. `data` is a kernel copy of the argument
- * structure: the core copies the caller's structure in (for _IOW and
- * _IOWR commands), zero-extends it to the table's size, calls the
- * handler, and copies it back out (for _IOR and _IOWR) if the handler
- * returned 0. Returns 0 or a negative errno.
+ * structure, at least the table entry's size: the core copies the
+ * caller's structure in, zero-extends it to the table's size, calls the
+ * handler, and copies it back out if the handler returned 0. It copies in
+ * and out only in the directions both the caller's command and the
+ * entry's `cmd` have, as Linux does: an _IOW call of an _IOWR entry is
+ * copied in and not back out, and an _IOR call of an _IOWR entry is not
+ * copied in, so the handler starts from zeros. Returns 0 or a negative
+ * errno.
  */
 typedef int drm_ioctl_t(struct drm_device *dev, void *data,
     struct drm_file *file_priv);
@@ -43,14 +47,22 @@ typedef int drm_ioctl_t(struct drm_device *dev, void *data,
  * header (DRM_IOWR(DRM_COMMAND_BASE + n, struct ...)), with a number from
  * DRM_COMMAND_BASE (0x40) to below 0xa0.
  *
- * Matching: a command whose complete value equals an entry's `cmd` uses
- * that entry with the entry's size, so a table may list one number
- * several times with different structure sizes (older layouts of one
- * ioctl). Otherwise the first entry with the same number and direction is
- * used with Linux's size rule: a shorter caller structure is
- * zero-extended, a longer one keeps its extra bytes, and the handler
- * always sees at least the table's size. A command of no entry fails with
- * ENOTTY, and any driver command from a 32-bit process with ENOTSUP.
+ * Matching, in three stages:
+ *  1. the entry whose `cmd` equals the caller's complete command value,
+ *     so a table may list one number several times with different
+ *     structure sizes (older layouts of one ioctl) or directions;
+ *  2. otherwise the first entry with the same number and direction, of
+ *     any size;
+ *  3. otherwise, as Linux's drm_ioctl() (which indexes the table by
+ *     number), the first entry with the same number in any direction:
+ *     i915 lists DRM_IOCTL_I915_GEM_EXECBUFFER2_WR (_IOWR) only, and Mesa
+ *     calls DRM_IOCTL_I915_GEM_EXECBUFFER2 (_IOW, the same number).
+ * After stages 2 and 3 the argument follows Linux's size rule: a shorter
+ * caller structure is zero-extended, a longer one keeps its extra bytes,
+ * and the handler always sees at least the table's size; it is copied in
+ * the directions both commands have (drm_ioctl_t). A number with no entry
+ * fails with ENOTTY, and any driver command from a 32-bit process with
+ * ENOTSUP.
  */
 struct drm_ioctl_desc {
 	unsigned int cmd;
@@ -76,8 +88,8 @@ extern int drm_copy_to_user(uint64_t uaddr, const void *src, size_t len);
 /*
  * The command value of the table entry the calling thread's handler was
  * matched with, and the caller's own command value (which differs in the
- * size bits when Linux's size rule applied); 0 outside a handler. An
- * illumos addition: one handler can serve several entries.
+ * size or direction bits when the entry was matched by number); 0 outside
+ * a handler. An illumos addition: one handler can serve several entries.
  */
 extern unsigned int drm_illumos_ioctl_cmd(void);
 extern unsigned int drm_illumos_ioctl_user_cmd(void);

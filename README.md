@@ -1014,14 +1014,23 @@ other size with `ENOTTY`. The size field of an illumos command has eight
 bits, so a size is known exactly below 256 bytes; every core and
 mode-setting structure is smaller (the tests check each handler's
 structure against the size its command carries). What stays
-different from Linux: a command must have the table's direction (Linux
-uses the intersection of both, here another direction is `ENOTTY`), an
-unused number is `ENOTTY` (Linux: `EINVAL`), the handlers copy their
-result out when they have one (Linux copies its buffer back after every
-call, also a failed one; the handlers here undo work whose result cannot
-reach the caller), and driver-private commands keep the exact match on
-the complete value, each accepted size listed by the driver
-(`virtio_gpu`'s `EXECBUFFER` and transfers, see *R4: uAPI*). The four
+different from Linux: a core or mode-setting command must have the
+table's direction (Linux uses the intersection of both, here another
+direction is `ENOTTY`), an unused number is `ENOTTY` (Linux: `EINVAL`),
+and the handlers copy their result out when they have one (Linux copies
+its buffer back after every call, also a failed one; the handlers here
+undo work whose result cannot reach the caller). Driver-private commands
+match in three stages (`drm_core::ioctl::lookup_driver`): the entry with
+the complete value, so that a driver can list each accepted size
+(`virtio_gpu`'s `EXECBUFFER` and transfers, see *R4: uAPI*); otherwise
+the first entry with the same number and direction, of any size;
+otherwise, as in Linux, the first entry with the same number in any
+direction (i915 lists `DRM_IOCTL_I915_GEM_EXECBUFFER2_WR`, `_IOWR`, only,
+and Mesa submits with `DRM_IOCTL_I915_GEM_EXECBUFFER2`, the `_IOW` form).
+Their argument follows the same size rule and is copied in and out only
+in the directions both commands have, so an `_IOW` call of an `_IOWR`
+entry is not copied back and an `_IOR` call of one starts from zeros; a
+number with no entry is `ENOTTY`. The four
 commands whose structures grew between the libdrm 2.4.109 headers this
 uAPI comes from and libdrm 2.4.134 (`SYNCOBJ_HANDLE_TO_FD` and
 `FD_TO_HANDLE`, 16 to 24 bytes, `SYNCOBJ_WAIT`, 32 to 40,
