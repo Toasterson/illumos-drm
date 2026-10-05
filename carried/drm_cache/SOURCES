@@ -1,0 +1,7 @@
+# The Linux files carried for drm_cache, vendored unmodified under linux/
+# at the revision of ../linux.pin: path in the Linux tree, SHA-256,
+# licence. Both carry an MIT permission notice in their header comment
+# (Tungsten Graphics; Red Hat) and no SPDX tag; it stays intact (and is in
+# ./LICENSE for the package).
+drivers/gpu/drm/drm_cache.c	510ffa7f075630669f8c011b486c6a3683881dbd10aa6f0e502de9821681d337	MIT
+include/drm/drm_cache.h	2626120d1dd4222c14779b71a352e239aa80536aeebc1e742cf552abb77598ed	MIT

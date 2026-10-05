@@ -1,0 +1,4 @@
+# The illumos patch series of drm_mm, applied in this order with patch -p1
+# in the Linux tree root by ../../fetch-and-patch. Empty: drm_mm.c and
+# drm_mm.h build unmodified against linuxkpi's headers and the facade
+# (CONFIG_DRM_DEBUG_MM off, so the stack-depot code is not compiled).
