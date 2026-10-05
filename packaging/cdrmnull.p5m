@@ -17,7 +17,9 @@
 # package that delivers misc/drm_core (modules/drm_core).
 #
 # The driver action attaches the pseudo device of cdrmnull.conf and gives
-# the card and render nodes mode 0666, as the test runs expect. The devlink
+# the card and render nodes "* 0666 root sys", as the test runs expect;
+# the service drm-perms of driver/graphics/drmadm keeps them so across
+# boots (README, "Device node permissions"). The devlink
 # attribute makes devfsadm create /dev/dri/card<N> and
 # /dev/dri/renderD<128+N> where the SUNW_drm_link module of OpenIndiana's
 # DRM package is not installed (see devlink.tab).

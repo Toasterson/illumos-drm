@@ -12,10 +12,23 @@
 #
 #   pkgsend publish -s <repo> -d <proto> -d . packaging/drmadm.p5m
 #
+# with packaging/drm-perms.xml as lib/svc/manifest/system/drm-perms.xml
+# in <proto>.
+#
 # It is a package of its own, which driver/graphics/drm-core requires, so
 # that it stays when the new stack's packages are removed: its
 # /etc/system.d fragment (written by drmadm, delivered by no package)
 # keeps excluding the legacy modules until "drmadm select legacy" runs.
+#
+# The service svc:/system/graphics/drm-perms (packaging/drm-perms.xml, as
+# lib/svc/manifest/system/drm-perms.xml) runs "drmadm perms" at every boot
+# before console-login: ttymon(8) applies the /etc/logindevperm rule
+# "/dev/dri/*" when it opens the console and would set the device nodes of
+# this repository's drivers to 0600 root root, which devfs keeps across
+# reboots (see drmadm(8) and the README's "Device node permissions"). It
+# is in this package, not in drm-core, because the restricted rule it
+# leaves in /etc/logindevperm names the legacy drivers and stays right
+# after the new stack's packages are removed.
 #
 # No package of this repository binds an Intel GPU at installation: the
 # Intel driver (reserved name i915n) is delivered without aliases, and
@@ -25,11 +38,17 @@
 #
 set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drmadm@0.0.1,5.11-2026.0.0.0
 set name=pkg.summary value="Select the DRM driver stack (drmadm)"
-set name=pkg.description value="drmadm(8) shows which DRM driver stack is installed, loaded and selected, and selects the legacy stack (misc/drm, i915) or the illumos-drm stack (misc/drm_core and its drivers) for the next boot: it moves the Intel GPU aliases between the two Intel drivers and excludes the other stack's kernel modules."
+set name=pkg.description value="drmadm(8) shows which DRM driver stack is installed, loaded and selected, and selects the legacy stack (misc/drm, i915) or the illumos-drm stack (misc/drm_core and its drivers) for the next boot: it moves the Intel GPU aliases between the two Intel drivers and excludes the other stack's kernel modules. Its service svc:/system/graphics/drm-perms keeps the device nodes of the illumos-drm drivers at their /etc/minor_perm permissions."
 set name=info.classification value="org.opensolaris.category.2008:System/Administration and Configuration"
 set name=info.source-url value=https://code.aopc.cloud/illumos/illumos-drm
 set name=variant.arch value=i386
 set name=org.opensolaris.consolidation value=userland
+dir  path=lib owner=root group=bin mode=0755
+dir  path=lib/svc owner=root group=bin mode=0755
+dir  path=lib/svc/manifest owner=root group=sys mode=0755
+dir  path=lib/svc/manifest/system owner=root group=sys mode=0755
+file path=lib/svc/manifest/system/drm-perms.xml owner=root group=sys \
+    mode=0444 restart_fmri=svc:/system/manifest-import:default
 dir  path=usr owner=root group=sys mode=0755
 dir  path=usr/sbin owner=root group=bin mode=0755
 file path=usr/sbin/drmadm owner=root group=bin mode=0555
