@@ -1,0 +1,30 @@
+#
+# SPDX-License-Identifier: MIT
+# Copyright 2026 The illumos-drm authors
+#
+# The kernel symbols misc/drm_kms uses that neither the gate's ddi.mapfile
+# nor the mapfiles of its dependencies (drm_facade.mapfile,
+# linuxkpi.mapfile, drm_helpers.mapfile) declare, for its link with
+# -z defs (carried/drm_kms/build.sh). Declarations only (EXTERN): genunix
+# provides them.
+#
+$mapfile_version 2
+
+SYMBOL_SCOPE {
+	global:
+		#
+		# The kernel's C memory and string functions
+		# (common/util/memstr.c, common/util/string.c), which the
+		# carried Linux code calls directly; the DDI lists bcmp,
+		# memcpy, memset and strlcpy but not these.
+		#
+		memcmp			{ FLAGS = EXTERN };
+		memmove			{ FLAGS = EXTERN };
+		strlcat			{ FLAGS = EXTERN };
+		#
+		# The module operations of a misc module (modlmisc), which
+		# every misc module's linkage names (misc/linuxkpi lists it
+		# in its private.d too).
+		#
+		mod_miscops		{ FLAGS = EXTERN };
+};

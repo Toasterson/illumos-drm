@@ -11,6 +11,9 @@
 # without it, the TUs of tus.txt, i915's own headers and mit-headers.txt.
 #
 #   drivers/i915/gen-license.sh <patched Linux tree> <output file> [inputs]
+#
+# MODULE=drm_kms writes misc/drm_kms' licence file instead (inputs: the
+# linux-inputs.txt of carried/drm_kms/build.sh).
 set -euo pipefail
 PATH=/usr/gnu/bin:$PATH
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -19,6 +22,10 @@ out=${2:?usage: gen-license.sh <linux> <out>}
 I915=drivers/gpu/drm/i915
 
 inputs=${3:-}
+if [ "${MODULE:-i915n}" = drm_kms ] && [ -z "$inputs" ]; then
+	echo "gen-license: MODULE=drm_kms needs carried/drm_kms/build.sh's linux-inputs.txt" >&2
+	exit 1
+fi
 if [ -n "$inputs" ]; then
 	# The tree's copies of the MIT headers stand for their originals.
 	sed 's|^\.illumos/mit-include/uapi/|include/uapi/|; s|^\.illumos/mit-include/|include/|' \
@@ -34,11 +41,20 @@ else
 	} | sort -u > "$out.files"
 fi
 
+tag=$(sed -n 's/^LINUX_TAG=//p' "$HERE/PIN")
 {
-	echo "i915n is built from these files of Linux $(sed -n 's/^LINUX_TAG=//p' "$HERE/PIN") (drivers/gpu/drm/i915,"
-	echo "include/drm, include/uapi/drm), MIT-licensed, with the illumos patches"
-	echo "of illumos-drm drivers/i915/patches, and from illumos-drm's own MIT"
-	echo "sources (drivers/i915/illumos). Their copyright notices:"
+	if [ "${MODULE:-i915n}" = drm_kms ]; then
+		echo "misc/drm_kms is built from these files of Linux $tag (drivers/gpu/drm,"
+		echo "drivers/gpu/drm/display, drivers/video/hdmi.c, include/drm,"
+		echo "include/uapi/drm), MIT-licensed, with the illumos patches of"
+		echo "illumos-drm carried/drm_kms/patches, and from illumos-drm's own MIT"
+		echo "sources (carried/drm_kms/illumos). Their copyright notices:"
+	else
+		echo "i915n is built from these files of Linux $tag (drivers/gpu/drm/i915,"
+		echo "include/drm, include/uapi/drm), MIT-licensed, with the illumos patches"
+		echo "of illumos-drm drivers/i915/patches, and from illumos-drm's own MIT"
+		echo "sources (drivers/i915/illumos). Their copyright notices:"
+	fi
 	echo
 	while read -r f; do
 		[ -f "$LINUX/$f" ] || continue
