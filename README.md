@@ -57,16 +57,16 @@ R5e (the Linux DRM helpers C drivers need; see *R5e* under *Decisions*):
 `drm_cache`'s `drm_clflush_virt_range` (one patch of conditionals), on MIT
 reimplementations of the Linux interfaces they need (`linuxkpi/`), and
 exports exactly the eleven functions of them i915's headless build imports.
-On 4 October 2026, at `b5670f9`, it was built on illumos (gcc 14.3, the
+On 5 October 2026, at `65afae7`, it was built on illumos (gcc 14.3, the
 gate's kernel flags, `-z defs`; 14 global symbols, as its scope mapfile)
 and tested on a fresh guest of `golden-20260930` (illumos `7e802e88a3`)
-with `tools/test/run-r5e-test.sh` (of `46366a7`, which changed only that
-script): 27 checks passed, none failed. The module loaded and unloaded
+with `tools/test/run-r5e-test.sh`: 27 checks passed, none failed (as on
+4 October at `b5670f9`). The module loaded and unloaded
 alone; the test driver `drm_helpers_test`, linked with
 `-N misc/drm_helpers` against the exported functions only, ran the 16
 self-tests (14 `drm_mm`, 2 `drm_cache`) at attach for five seeds up to
 scale 50 (130,876 checks at scale 1, 6,464,544 at scale 50, none failed,
-8.7 s); `misc/drm_helpers` refused to unload under it and unloaded after
+9.1 s); `misc/drm_helpers` refused to unload under it and unloaded after
 `rem_drv`; an injected failing check was counted and logged with the attach
 still succeeding; `/etc` and `/devices/pseudo` were as before; and the
 package (`packaging/drm-helpers.p5m`, published, pkglint-clean, as a p5p)
