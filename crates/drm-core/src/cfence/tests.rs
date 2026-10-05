@@ -554,6 +554,73 @@ fn the_bridge_signals_the_shadow_and_keeps_the_fence() {
 }
 
 #[test]
+fn a_shadow_leads_back_to_its_driver_structure_until_release() {
+    let d = domain();
+    let (fence, c) = mock(&FULL, true, &d);
+    // SAFETY: a live fence.
+    let shadow = unsafe { core_fence(fence) }.unwrap();
+    // While the driver's structure lives, the core hands out that one.
+    let p = structure_of(shadow.clone(), &d);
+    assert_eq!(p, fence, "the driver's own structure, not a proxy");
+    // SAFETY: the reference structure_of took.
+    unsafe { put(p, Ctx::Sleep(&sleep()), &d) };
+    // Signal; the bridge's reference goes (parked), then the driver's.
+    // SAFETY: the test's reference.
+    unsafe {
+        signal(fence, None);
+        put(fence, Ctx::Sleep(&sleep()), &d);
+    }
+    d.drain(&sleep());
+    assert_eq!(c.released.load(Ordering::SeqCst), 1);
+    // Released: the shadow no longer leads anywhere; a proxy instead.
+    assert!(native_of(&shadow).is_none());
+    let q = structure_of(shadow.clone(), &d);
+    assert!(!q.is_null() && q != fence);
+    // SAFETY: a live proxy with one reference.
+    unsafe {
+        assert!(is_signaled(q));
+        put(q, Ctx::Sleep(&sleep()), &d);
+    }
+    d.drain(&sleep());
+    shadow.put(Ctx::Sleep(&sleep()));
+}
+
+#[test]
+fn native_of_races_the_last_put() {
+    // A thread asks for the structure while the driver drops its last
+    // reference: it gets the structure with a reference, or nothing; the
+    // structure is released exactly once.
+    let d = domain();
+    for _ in 0..200 {
+        let (fence, c) = mock(&PLAIN, false, &d);
+        // SAFETY: a live fence, signalled so no bridge holds it.
+        let shadow = unsafe {
+            signal(fence, None);
+            core_fence(fence)
+        }
+        .unwrap();
+        let fp = fence as usize;
+        let s2 = shadow.clone();
+        let t = thread::spawn(move || {
+            let got = native_of(&s2);
+            if let Some(p) = got {
+                assert_eq!(p as usize, fp);
+                // SAFETY: the reference native_of took.
+                unsafe { put(p, Ctx::Sleep(&sleep()), &FenceDomain::new_test(&sleep())) };
+            }
+            s2.put(Ctx::Sleep(&sleep()));
+        });
+        // SAFETY: the driver's last reference.
+        unsafe { put(fence, Ctx::Sleep(&sleep()), &d) };
+        t.join().unwrap();
+        d.drain(&sleep());
+        assert_eq!(c.released.load(Ordering::SeqCst), 1);
+        assert!(native_of(&shadow).is_none());
+        shadow.put(Ctx::Sleep(&sleep()));
+    }
+}
+
+#[test]
 fn a_driver_signalling_by_hand_reaches_the_core() {
     // i915's breadcrumbs: set the bit, take the list, set the time, run
     // the callbacks, all under the fence's lock.

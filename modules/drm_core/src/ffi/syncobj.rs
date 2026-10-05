@@ -210,3 +210,79 @@ pub unsafe extern "C" fn sync_file_get_fence(fd: i32) -> *mut f::dma_fence {
         _ => ptr::null_mut(),
     }
 }
+
+// --- facade 1.1: sync objects a driver owns ---
+
+/// Wraps a sync object in a new handle structure (as `drm_syncobj_find`).
+fn boxed(s: Syncobj) -> *mut f::drm_syncobj {
+    let b = Box::into_raw(Box::new(SyncobjBox { magic: 0, s }));
+    // SAFETY: just made.
+    unsafe { (*b).magic = MAGIC_SYNCOBJ ^ (b as u64) };
+    b.cast()
+}
+
+/// Linux's `drm_syncobj_create`: a new sync object without a handle,
+/// signalled if `flags` has DRM_SYNCOBJ_CREATE_SIGNALED, holding `fence`
+/// if not NULL. 0 and the object in `*out` (release with
+/// `drm_syncobj_put`), `-EINVAL` or `-ENOMEM`. Thread context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_syncobj_create(
+    out: *mut *mut f::drm_syncobj,
+    flags: u32,
+    fence: *mut f::dma_fence,
+) -> i32 {
+    // SAFETY: documented for thread context.
+    let ctx = unsafe { super::sleepable() };
+    if out.is_null() || flags & !drm_uapi::DRM_SYNCOBJ_CREATE_SIGNALED != 0 {
+        return neg(Errno::EINVAL);
+    }
+    let signaled = flags & drm_uapi::DRM_SYNCOBJ_CREATE_SIGNALED != 0;
+    let s = match drm_core::syncobj::create(crate::module_fences(), signaled, &ctx) {
+        Ok(s) => s,
+        Err(e) => return neg(e),
+    };
+    if !fence.is_null() {
+        // SAFETY: the caller holds the fence.
+        let fc = unsafe { super::fence::core_fence(fence) };
+        s.replace_fence(fc, &ctx);
+    }
+    let b = boxed(s);
+    if b.is_null() {
+        return neg(Errno::ENOMEM);
+    }
+    // SAFETY: checked above.
+    unsafe { *out = b };
+    0
+}
+
+/// A new handle structure for the same sync object (release each with
+/// `drm_syncobj_put`); NULL without memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_syncobj_dup(obj: *mut f::drm_syncobj) -> *mut f::drm_syncobj {
+    // SAFETY: the caller's handle.
+    match unsafe { syncobj(obj) } {
+        Some(s) => boxed(s.clone()),
+        None => ptr::null_mut(),
+    }
+}
+
+/// Linux's `drm_syncobj_fence_get`: the sync object's current fence with a
+/// new reference (the core's view of it), or NULL if it has none.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_syncobj_fence_get(obj: *mut f::drm_syncobj) -> *mut f::dma_fence {
+    // SAFETY: the caller's handle.
+    let Some(s) = (unsafe { syncobj(obj) }) else { return ptr::null_mut() };
+    match s.fence() {
+        Some(fc) => super::fence::proxy(fc),
+        None => ptr::null_mut(),
+    }
+}
+
+/// Linux's `drm_is_current_master`: whether `file` is its device's
+/// current master; false for an unknown file.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_is_current_master(file: *mut f::drm_file) -> bool {
+    // SAFETY: the caller's open file.
+    let Some((c, core)) = (unsafe { file_of(file) }) else { return false };
+    core.device().is_some_and(|d| d.is_current_master(c))
+}

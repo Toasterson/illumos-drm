@@ -38,6 +38,9 @@ use crate::ckms::CKms;
 /// The settings a driver makes between allocation and registration.
 pub(crate) struct Setup {
     pub(crate) registered: bool,
+    /// `drm_dev_illumos_unplug` took the device out of the table: its last
+    /// put runs the driver's release first, then unregisters (see put).
+    pub(crate) unplugged: bool,
     pub(crate) dma: Option<DmaAttr>,
     pub(crate) fence_pri: Option<IntrPriority>,
     /// The bus ID (`drm_dev_set_unique`), NUL-terminated.
@@ -234,6 +237,7 @@ impl DevCore {
             descs,
             setup: KMutex::new(Setup {
                 registered: false,
+                unplugged: false,
                 dma: None,
                 fence_pri: None,
                 unique: [0; BUS_ID_MAX + 1],
@@ -365,7 +369,7 @@ impl DevCore {
     /// # Safety
     /// `this` is a live `DevCore` whose device holds a reference the
     /// caller gives up.
-    pub(crate) unsafe fn put(this: *const DevCore) {
+    pub(crate) unsafe fn put(this: *const DevCore) -> Result<(), Errno> {
         // SAFETY: the caller's contract.
         let core = unsafe { &*this };
         let d = core.ddev();
@@ -376,13 +380,38 @@ impl DevCore {
             sys::atomic_dec_32_nv(c)
         };
         if left != 0 {
-            return;
+            return Ok(());
         }
         if core.device.is_published() {
-            core.dip.warn(format_args!("last reference to a registered DRM device dropped; device leaked"));
-            return;
-        }
-        if let Some(rel) = core.table.release {
+            if !core.setup.lock().unplugged {
+                core.dip.warn(format_args!("last reference to a registered DRM device dropped; device leaked"));
+                return Err(Errno::EBUSY);
+            }
+            // A driver that unplugged its device (Linux's order: unplug,
+            // remove, last put) frees its own GEM objects in its release:
+            // release first, then the core unregisters the device, now
+            // that the driver's objects are gone. If the core still finds
+            // state (fences, objects), the device stays, leaked, with a
+            // warning: the caller's detach then fails.
+            if let Some(rel) = core.table.release {
+                // SAFETY: the driver's callback, with its device.
+                unsafe { rel(d) };
+            }
+            // Fences the driver's last requests signal may still be
+            // released by the deferred releases: up to five seconds.
+            let mut tries = 0;
+            // SAFETY: the device's last reference, thread context (the
+            // caller's detach).
+            while unsafe { crate::ffi::device::unregister(d, core) } != 0 {
+                tries += 1;
+                if tries >= 100 {
+                    core.dip.warn(format_args!("the DRM device keeps state after its driver's release; device leaked"));
+                    return Err(Errno::EBUSY);
+                }
+                // SAFETY: delay(9F) in thread context.
+                unsafe { sys::delay(sys::drv_usectohz(50_000)) };
+            }
+        } else if let Some(rel) = core.table.release {
             // SAFETY: the driver's callback, with its device.
             unsafe { rel(d) };
         }
@@ -402,6 +431,7 @@ impl DevCore {
             drop(Box::from_raw(this as *mut DevCore));
             sys::kmem_free(base.as_ptr() as *mut c_void, size);
         }
+        Ok(())
     }
 
     /// Takes another reference.

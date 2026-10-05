@@ -779,6 +779,12 @@ pub trait GemObject: Send + Sync + Sized + 'static {
     fn handle_closed(&self, file: CloneId, ctx: &Sleepable) {
         let _ = (file, ctx);
     }
+    /// Called after one of file `file`'s handles to the object was removed
+    /// while the file still holds another one. Locks as for
+    /// [`GemObject::handle_closed`]. Nothing by default.
+    fn handle_dropped(&self, file: CloneId, ctx: &Sleepable) {
+        let _ = (file, ctx);
+    }
     /// Called when the object is destroyed, in thread context, before its
     /// memory is freed: a device driver tells the device to stop using the
     /// memory here (virtio-gpu's `RESOURCE_UNREF`) and waits for it.
@@ -1215,6 +1221,9 @@ impl<O: GemObject> objects::Hooks<GemRef<O>> for FileHooks<'_> {
     fn closed(&self, obj: &GemRef<O>) {
         obj.object().handle_closed(self.clone, self.ctx);
         self.stats.attached.fetch_sub(1, Ordering::Relaxed);
+    }
+    fn handle_dropped(&self, obj: &GemRef<O>) {
+        obj.object().handle_dropped(self.clone, self.ctx);
     }
 }
 

@@ -91,6 +91,57 @@ extern long dma_resv_wait_timeout(struct dma_resv *obj,
 extern bool dma_resv_test_signaled(struct dma_resv *obj,
     enum dma_resv_usage usage);
 
+/*
+ * Facade 1.1.
+ *
+ * dma_resv_init(), dma_resv_fini()
+ *	a driver's own reservation (not a GEM object's _resv): init gives it
+ *	a core reservation, fini releases it (a GEM object's reservation is
+ *	the core's: fini does nothing for it). Thread context; init waits
+ *	for memory.
+ * dma_resv_trylock()
+ *	takes the lock without waiting, as dma_resv_lock(obj, NULL) would;
+ *	false if anyone holds it.
+ * drm_illumos_ww_stamp(), drm_illumos_resv_lock_ctx(),
+ * drm_illumos_resv_unlock_ctx()
+ *	transactions that a compatibility layer keeps (Linux's
+ *	ww_acquire_ctx): a stamp from the core's reservation class, then
+ *	lock with the stamp and the number of reservations the transaction
+ *	holds; the core applies its wait-die rule against every holder.
+ *	0, -EDEADLK (release everything, then lock the contended one with
+ *	slow), -EALREADY (held by the transaction), -EINTR (intr), -EINVAL.
+ *	The lock belongs to the calling thread; release it with
+ *	drm_illumos_resv_unlock_ctx() and the same stamp (0, or -EPERM and
+ *	the lock unchanged if the thread does not hold it for that stamp).
+ *	drm_illumos_resv_trylock_ctx() takes it for the stamp without
+ *	waiting (false if held); drm_illumos_resv_is_locked() reports
+ *	whether anyone holds it (assertions).
+ * drm_illumos_resv_fences()
+ *	a snapshot of the fences with a usage at least as important as
+ *	`usage` (unsignalled ones only, unless `flags` has
+ *	DRM_ILLUMOS_RESV_SIGNALED): up to `max` of them, each with a new
+ *	reference, into `fences`, the usage of each into `usages` (if not
+ *	NULL; an enum dma_resv_usage value), and the number the reservation
+ *	had into `*count` (retry with a larger array when it exceeds max;
+ *	the stored fences are the caller's to put either way). Every fence
+ *	appears once. A fence a driver made with dma_fence_init() comes back
+ *	as that driver's own structure while it lives (so i915 recognises its
+ *	requests); other fences as structures the core made. Thread context.
+ */
+#define	DRM_ILLUMOS_RESV_SIGNALED	0x1
+extern void dma_resv_init(struct dma_resv *obj);
+extern void dma_resv_fini(struct dma_resv *obj);
+extern bool dma_resv_trylock(struct dma_resv *obj);
+extern uint64_t drm_illumos_ww_stamp(void);
+extern int drm_illumos_resv_lock_ctx(struct dma_resv *obj, uint64_t stamp,
+    uint32_t acquired, bool slow, bool intr);
+extern bool drm_illumos_resv_trylock_ctx(struct dma_resv *obj, uint64_t stamp);
+extern int drm_illumos_resv_unlock_ctx(struct dma_resv *obj, uint64_t stamp);
+extern bool drm_illumos_resv_is_locked(struct dma_resv *obj);
+extern int drm_illumos_resv_fences(struct dma_resv *obj,
+    enum dma_resv_usage usage, uint32_t flags, struct dma_fence **fences,
+    uint8_t *usages, uint32_t max, uint32_t *count);
+
 #ifdef	__cplusplus
 }
 #endif

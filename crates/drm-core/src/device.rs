@@ -270,6 +270,27 @@ impl<D: Driver> Device<D> {
         Ok(())
     }
 
+    /// Whether user space still uses the device: open files (anonymous
+    /// files of dma-bufs and sync files included) or user mappings of GEM
+    /// objects. A driver whose own teardown must come before the core's
+    /// (a Linux driver's remove, which frees its GEM objects) asks this
+    /// first: `Err` with a warning while user space holds the device.
+    pub fn user_check(&self) -> Result<(), DdiError> {
+        let open = self.state.lock().open_files();
+        if open != 0 {
+            self.dev.warn(format_args!("detach refused: {open} files open"));
+            return Err(DdiError);
+        }
+        if let Some(g) = &self.gem {
+            let s = g.stats();
+            if s.mappings + s.pending_maps != 0 {
+                self.dev.warn(format_args!("detach refused: {} user mappings remain", s.mappings + s.pending_maps));
+                return Err(DdiError);
+            }
+        }
+        Ok(())
+    }
+
     /// The first half of [`Device::detach`], on a shared device: every
     /// check that may refuse the detach (open files, framebuffers, GEM
     /// state, fences and sync objects), with [`Driver::before_detach`] and
@@ -350,6 +371,12 @@ impl<D: Driver> Device<D> {
         let off = g.mmap_offset(&obj, ctx);
         obj.put(ctx);
         off
+    }
+
+    /// Reports whether open file `c` is the device's current master (a
+    /// compatibility layer's `drm_is_current_master`).
+    pub fn is_current_master(&self, c: CloneId) -> bool {
+        self.state.lock().is_current_master(c)
     }
 
     /// Returns the synchronisation state: the fence domain drivers create

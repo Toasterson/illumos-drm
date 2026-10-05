@@ -43,7 +43,7 @@ enum drm_minor_type {
 struct drm_minor {
 	int index;		/* the node's minor: N, or 128 + N */
 	int type;		/* enum drm_minor_type */
-	dev_info_t *kdev;	/* the node the minor node was created on */
+	DRM_FACADE_DEVICE_T *kdev;	/* the node the minor node was created on */
 	struct drm_device *dev;
 };
 
@@ -81,8 +81,8 @@ struct drm_vma_offset_manager;
 struct drm_device {
 	int if_version;
 	struct kref ref;
-	dev_info_t *dev;
-	dev_info_t *dma_dev;
+	DRM_FACADE_DEVICE_T *dev;
+	DRM_FACADE_DEVICE_T *dma_dev;
 	struct {
 		struct list_head resources;
 		void *final_kfree;
@@ -95,7 +95,7 @@ struct drm_device {
 	bool registered;
 	uint32_t driver_features;
 	bool unplugged;
-	void *anon_inode;
+	DRM_FACADE_INODE_T *anon_inode;
 	char *unique;
 	atomic_t open_count;
 	struct lx_mutex filelist_mutex;
@@ -163,6 +163,29 @@ extern int drm_dev_register(struct drm_device *dev, unsigned long flags);
  * device is gone; the device structure stays until drm_dev_put().
  */
 extern int drm_dev_unregister(struct drm_device *dev);
+
+/*
+ * Facade 1.1. For a driver that tears its own state down before the core
+ * can unregister (a Linux driver's remove() frees its GEM objects after
+ * drm_dev_unplug()): refuses with -EBUSY, changing nothing, while user
+ * space holds the device (open files, dma-buf or sync-file descriptors,
+ * user mappings); otherwise no new open reaches the device and it returns
+ * 0. The device keeps working for the driver until drm_dev_unregister(),
+ * which may still refuse while fences or sync objects remain. 0 for a
+ * device that is not registered. detach(9E) context.
+ */
+extern int drm_dev_illumos_unplug(struct drm_device *dev);
+
+/*
+ * Facade 1.1. drm_dev_put() that reports the outcome: 0, or -EBUSY when
+ * this was the last reference of an unplugged device (drm_dev_illumos_unplug())
+ * and the core could not unregister it after the driver's release (the
+ * driver frees its own GEM objects there, as Linux's i915 does): the
+ * core waits a few seconds for leftover fences, then keeps the device,
+ * leaked and unreachable, and the driver's detach(9E) must fail. On 0 the
+ * structure may be gone. detach(9E) context.
+ */
+extern int drm_dev_illumos_put(struct drm_device *dev);
 
 extern void drm_dev_get(struct drm_device *dev);
 extern void drm_dev_put(struct drm_device *dev);

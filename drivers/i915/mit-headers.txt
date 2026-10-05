@@ -1,0 +1,73 @@
+# Linux headers the i915 build uses unchanged from the pinned tree. They
+# are copied into <tree>/.illumos/mit-include by fetch-and-patch.sh, which
+# refuses any file that is not MIT-licensed (SPDX "MIT", the MIT
+# permission notice, or the older permissive HPND/X11 notice "Permission to
+# use, copy, modify, distribute, and sell" that several DRM headers carry); GPL-only headers are reimplemented in
+# linuxkpi/include instead (decision D7). One path per line, relative to
+# the Linux tree; the destination drops the leading "include/".
+include/drm/intel/display_member.h
+include/drm/intel/display_parent_interface.h
+include/drm/intel/i915_component.h
+include/drm/intel/i915_drm.h
+include/drm/intel/i915_gsc_proxy_mei_interface.h
+include/drm/intel/i915_pxp_tee_interface.h
+include/drm/intel/intel_gmd_interrupt_regs.h
+include/drm/intel/intel_gmd_misc_regs.h
+include/drm/intel/intel_lb_mei_interface.h
+include/drm/intel/intel_pcode_regs.h
+include/drm/intel/mchbar_regs.h
+include/drm/intel/pci_config.h
+include/drm/intel/pciids.h
+include/drm/intel/pick.h
+include/drm/intel/reg_bits.h
+include/drm/intel/step.h
+include/drm/intel/vlv_iosf_sb_regs.h
+include/uapi/drm/drm.h
+include/uapi/drm/drm_mode.h
+include/uapi/drm/drm_fourcc.h
+include/uapi/drm/i915_drm.h
+include/drm/drm_mm.h
+include/drm/drm_cache.h
+include/drm/drm_util.h
+include/drm/drm_buddy.h
+include/linux/gpu_buddy.h
+include/drm/ttm/ttm_allocation.h
+include/drm/ttm/ttm_backup.h
+include/drm/ttm/ttm_bo.h
+include/drm/ttm/ttm_caching.h
+include/drm/ttm/ttm_device.h
+include/drm/ttm/ttm_kmap_iter.h
+include/drm/ttm/ttm_placement.h
+include/drm/ttm/ttm_pool.h
+include/drm/ttm/ttm_range_manager.h
+include/drm/ttm/ttm_resource.h
+include/drm/ttm/ttm_tt.h
+include/drm/drm_fourcc.h
+include/drm/drm_panic.h
+include/drm/drm_color_mgmt.h
+include/drm/drm_atomic_helper.h
+include/drm/drm_connector.h
+include/drm/drm_crtc.h
+include/drm/drm_property.h
+include/drm/drm_audio_component.h
+include/linux/hdmi.h
+include/drm/display/drm_dp_dual_mode_helper.h
+include/drm/drm_mode_object.h
+include/drm/drm_modeset_lock.h
+include/drm/drm_modes.h
+include/drm/drm_plane.h
+include/drm/drm_encoder.h
+include/drm/drm_atomic.h
+include/drm/drm_framebuffer.h
+include/drm/drm_blend.h
+include/drm/drm_mode_config.h
+include/drm/drm_rect.h
+include/drm/drm_vblank_work.h
+include/drm/drm_probe_helper.h
+include/drm/drm_modeset_helper_vtables.h
+include/drm/drm_modeset_helper.h
+include/drm/drm_atomic_state_helper.h
+include/drm/drm_debugfs_crc.h
+include/drm/drm_colorop.h
+include/drm/drm_client_event.h
+include/drm/drm_client.h

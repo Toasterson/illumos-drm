@@ -128,6 +128,21 @@ impl Resv {
         Ok(out)
     }
 
+    /// Returns references to the fences with a usage at least as important
+    /// as `usage`, each with its own usage, as a snapshot; signalled ones
+    /// too if `signaled` (a holder of the lock sees every fence, as Linux's
+    /// locked iteration does, including errors of signalled ones).
+    pub fn entries(&self, usage: Usage, signaled: bool, ctx: &Sleepable) -> Result<KVec<(Fence, Usage)>, Errno> {
+        let mut out = KVec::new();
+        let l = self.fences.lock();
+        for (f, u) in l.iter() {
+            if *u <= usage && (signaled || !f.is_signaled()) {
+                out.push((f.clone(), *u), ctx)?;
+            }
+        }
+        Ok(out)
+    }
+
     /// Reports whether every fence with a usage at least as important as
     /// `usage` has signalled.
     pub fn test_signaled(&self, usage: Usage) -> bool {

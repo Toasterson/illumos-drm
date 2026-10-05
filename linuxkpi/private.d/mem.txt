@@ -1,0 +1,20 @@
+kmem_cache_create	# documented 9F (kmem_cache_create(9F)): Linux slab caches (lkpi_slab.c), the page-aligned alloc_pages() and descriptor caches (lkpi_page.c), and one reclaim-callback cache per shrinker (lkpi_shrinker.c)
+kmem_cache_alloc	# documented 9F (kmem_cache_create(9F)): kmem_cache_alloc() of Linux slab caches, alloc_pages() memory and page descriptors
+kmem_cache_free	# documented 9F (kmem_cache_create(9F)): kmem_cache_free() (directly or after the RCU grace period of SLAB_TYPESAFE_BY_RCU caches), page and descriptor frees
+kmem_cache_destroy	# documented 9F (kmem_cache_create(9F)): kmem_cache_destroy(), shrinker_free(), module unload
+ddi_umem_alloc	# documented 9F (ddi_umem_alloc(9F)): the backing memory of a shmem file (GEM object), whose cookie the DRM core maps to user space
+ddi_umem_free	# documented 9F (ddi_umem_alloc(9F)): frees a shmem file's backing after truncation/release and its last page reference
+ddi_umem_lock	# documented 9F (ddi_umem_lock(9F)): pin_user_pages_fast()/get_user_pages_fast() lock the user range (i915 userptr)
+ddi_umem_unlock	# documented 9F (ddi_umem_lock(9F)): unpin_user_pages() releases the pin with its last page
+ddi_umem_iosetup	# documented 9F (ddi_umem_iosetup(9F)): a buf for the locked user range, so bp_mapin() can give it a kernel address (struct page has a kernel address)
+bp_mapin	# documented 9F (bp_mapin(9F)): kernel mapping of a pinned user range; the pages' kernel addresses
+bp_mapout	# documented 9F (bp_mapout(9F)): unmaps a pinned user range at unpin
+freerbuf	# documented 9F (getrbuf(9F)): frees the buf ddi_umem_iosetup() allocated, at unpin
+hat_getpfnum	# non-DDI kernel interface (vm/hat.h): page_to_phys()/virt_to_phys() of a layer page, frames of the pages vmap() maps, and the DMA check that a streaming binding needs no rootnex copy buffer (lkpi_dma.c); the DDI has no kernel-address-to-frame call
+hat_devload	# non-DDI kernel interface (vm/hat.h): vmap()/vmap_pfn() load page frames into a kernel heap range with WB/WC/UC caching, as gfx_private's gfxp_map_kernel_space() does
+hat_unload	# non-DDI kernel interface (vm/hat.h): vunmap() unloads the range vmap()/vmap_pfn() loaded
+kas	# non-DDI kernel interface (vm/as.h): the kernel address space, whose a_hat the hat_*() calls take
+heap_arena	# non-DDI kernel interface (vm/seg_kmem.h): the kernel heap VA arena vmap()/vmap_pfn() reserve their ranges from
+vmem_alloc	# non-DDI kernel interface (sys/vmem.h): reserves the vmap() kernel VA range in heap_arena (VM_NOSLEEP)
+vmem_free	# non-DDI kernel interface (sys/vmem.h): releases a vmap() VA range at vunmap()
+physmem	# non-DDI kernel interface (sys/systm.h): totalram_pages()/si_mem_available() (physmem_lkpi()); i915 sizes shrinker targets and its largest object by it; kmalloc() refuses sizes beyond it instead of blocking forever

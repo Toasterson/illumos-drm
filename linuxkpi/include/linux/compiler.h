@@ -2,68 +2,57 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * Linux's compiler annotations used by the carried helpers (carried/):
- * branch hints, inlining and unused markers, READ_ONCE()/WRITE_ONCE().
- *
- * To be reconciled with R5c: a minimal stand-in written for R5e before
- * R5c's compatibility layer existed; R5c's header of the same name
- * replaces it.
- *
- * Origin: the names and meaning follow Linux v7.2's
- * include/linux/compiler.h and compiler_types.h (GPL-2.0). This file is a
- * reimplementation for GCC on illumos, not a copy (decision D7).
+ * Linux's compiler helpers (include/linux/compiler.h, GPL-2.0;
+ * reimplemented). READ_ONCE()/WRITE_ONCE() are volatile accesses of the
+ * object's own size, as on Linux; the memory barriers are in <asm/barrier.h>.
  */
+#ifndef _LINUX_COMPILER_H
+#define	_LINUX_COMPILER_H
 
-#ifndef _LINUXKPI_LINUX_COMPILER_H
-#define	_LINUXKPI_LINUX_COMPILER_H
+#include <linux/compiler_types.h>
 
-/*
- * The system's annotations first (illumos' sys/ccompile.h, through the
- * facade's base types, defines __maybe_unused and others); each one below
- * is defined only where the system has none.
- */
-#include <linux/types.h>
+#define	likely(x)		__builtin_expect(!!(x), 1)
+#define	unlikely(x)		__builtin_expect(!!(x), 0)
+#define	likely_notrace(x)	likely(x)
+#define	unlikely_notrace(x)	unlikely(x)
+#define	barrier()		__asm__ __volatile__("" : : : "memory")
+#define	barrier_data(p)		__asm__ __volatile__("" : : "r"(p) : "memory")
+#define	unreachable()		__builtin_unreachable()
+#define	OPTIMIZER_HIDE_VAR(var)	__asm__ ("" : "=r" (var) : "0" (var))
+#define	RELOC_HIDE(p, off)	({ unsigned long __p = (unsigned long)(p); \
+	(typeof (p))(__p + (off)); })
 
-/*
- * Linux code writes typeof; the illumos-gate's kernel flags include
- * -fno-asm, which in GNU C mode removes the typeof (and asm) keywords and
- * leaves only __typeof__.
- */
-#ifndef	typeof
-#define	typeof	__typeof__
-#endif
+#define	__READ_ONCE(x)		(*(const volatile typeof (x) *)&(x))
+#define	READ_ONCE(x)		__READ_ONCE(x)
+#define	__WRITE_ONCE(x, val)	do { \
+	*(volatile typeof (x) *)&(x) = (val); \
+	} while (0)
+#define	WRITE_ONCE(x, val)	__WRITE_ONCE(x, val)
+#define	data_race(expr)		(expr)
+#define	ASSERT_EXCLUSIVE_WRITER(v)	((void)0)
+#define	ASSERT_EXCLUSIVE_ACCESS(v)	((void)0)
+#define	kcsan_check_access(p, s, t)	((void)0)
 
-#ifndef	likely
-#define	likely(x)	__builtin_expect(!!(x), 1)
-#endif
-#ifndef	unlikely
-#define	unlikely(x)	__builtin_expect(!!(x), 0)
-#endif
+#define	__must_be_array(a)	BUILD_BUG_ON_ZERO(__same_type((a), &(a)[0]))
+#define	__must_be_byte_array(a)	0
+#define	__must_be_cstr(p)	0
+#define	__is_constexpr(x) \
+	(sizeof (int) == sizeof (*(8 ? ((void *)((long)(x) * 0l)) : (int *)8)))
+#define	is_signed_type(type)	(((type)(-1)) < (__force type)1)
+#define	is_unsigned_type(type)	(!is_signed_type(type))
+#define	statically_true(x)	(__builtin_constant_p(x) && (x))
+#define	const_true(x)		statically_true(x)
+#define	__UNIQUE_ID(prefix)	__lkpi_cat(__lkpi_cat(__UNIQUE_ID_, prefix), __COUNTER__)
+#define	__lkpi_cat2(a, b)	a##b
+#define	__lkpi_cat(a, b)	__lkpi_cat2(a, b)
+#define	___PASTE(a, b)		a##b
+#define	__PASTE(a, b)		___PASTE(a, b)
+#define	__ADDRESSABLE(sym)
+#define	prevent_tail_call_optimization()	barrier()
+#define	__scalar_type_to_expr_cases(type) \
+	unsigned type: (unsigned type)0, signed type: (signed type)0
 
-#ifndef	__always_inline
-#define	__always_inline	inline __attribute__((__always_inline__))
-#endif
-#ifndef	noinline
-#define	noinline	__attribute__((__noinline__))
-#endif
-#ifndef	__maybe_unused
-#define	__maybe_unused	__attribute__((__unused__))
-#endif
-#ifndef	__must_check
-#define	__must_check	__attribute__((__warn_unused_result__))
-#endif
+#include <linux/build_bug.h>
+#include <asm/rwonce.h>
 
-/* A compiler barrier: no memory access is moved across it. */
-#ifndef	barrier
-#define	barrier()	__asm__ __volatile__("" : : : "memory")
 #endif
-
-/*
- * One access of exactly the object's size, neither merged, split nor
- * repeated by the compiler (scalars of 1, 2, 4 or 8 bytes).
- */
-#define	READ_ONCE(x)	(*(const volatile __typeof__(x) *)&(x))
-#define	WRITE_ONCE(x, v) \
-	do { *(volatile __typeof__(x) *)&(x) = (v); } while (0)
-
-#endif	/* _LINUXKPI_LINUX_COMPILER_H */

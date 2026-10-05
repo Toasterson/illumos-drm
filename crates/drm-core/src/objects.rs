@@ -33,6 +33,9 @@
 //! Linux), but only the first and the last change what the driver set up,
 //! so closing a second handle, or importing an object the file holds
 //! already, never takes the object away from the file's other handle.
+//! A driver that keeps per-handle state (i915's lookup tables) is told
+//! about every other removed handle too ([`Hooks::handle_dropped`]), as
+//! Linux's `close` for every handle would.
 //! Each file's [`FileTable`] has a hook lock that is held across the
 //! decision, the hook and the change of the table, so that the hooks of
 //! one file and object strictly alternate even when several threads of a
@@ -222,6 +225,13 @@ pub trait Hooks<R> {
     /// The file's last handle to `obj` is gone, or the handle for which
     /// [`Hooks::opened`] just succeeded could not be made.
     fn closed(&self, obj: &R);
+    /// A handle of the file to `obj` is gone and the file still holds
+    /// another one (Linux calls `close` for every handle; drivers that
+    /// rely on that, as i915 does to drop its per-handle lookup caches,
+    /// get it here). Nothing by default.
+    fn handle_dropped(&self, obj: &R) {
+        let _ = obj;
+    }
 }
 
 /// The handles of one open file, and the hook lock that keeps the
@@ -355,6 +365,8 @@ impl<R: ObjRef, B: IdAlloc> Locked<'_, R, B> {
         // no handle left anywhere, it holds none either.
         if r.common().handle_count() == 0 || !self.holds(&r) {
             hooks.closed(&r);
+        } else {
+            hooks.handle_dropped(&r);
         }
         (r, name_ref)
     }
@@ -621,6 +633,7 @@ mod tests {
         file: u32,
         opens: AtomicUsize,
         closes: AtomicUsize,
+        drops: AtomicUsize,
         fail_open: std::sync::atomic::AtomicBool,
         /// Yield inside the hooks, to widen the windows between threads.
         slow: bool,
@@ -631,6 +644,7 @@ mod tests {
                 file,
                 opens: AtomicUsize::new(0),
                 closes: AtomicUsize::new(0),
+                drops: AtomicUsize::new(0),
                 fail_open: std::sync::atomic::AtomicBool::new(false),
                 slow: false,
             }
@@ -661,6 +675,15 @@ mod tests {
             let was = obj.attached.fetch_and(!bit, Ordering::SeqCst);
             assert_ne!(was & bit, 0, "closed for an object the file does not have open");
             self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+        fn handle_dropped(&self, obj: &KArc<Obj<'a>>) {
+            let bit = 1 << self.file;
+            assert_ne!(
+                obj.attached.load(Ordering::SeqCst) & bit,
+                0,
+                "dropped for an object the file does not have open"
+            );
+            self.drops.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -732,12 +755,14 @@ mod tests {
         assert!(nr.is_none());
         drop(r);
         assert_eq!(da.counts(), (1, 0), "the file still holds the object");
+        assert_eq!(da.drops.load(Ordering::SeqCst), 1, "handle_dropped for the removed handle");
         assert!(attached(&o, 0));
         assert_eq!(a.lock().remove(&names, h, &da).err(), Some(Errno::EINVAL));
         // The last handle of the file closes.
         let (r, _) = a.lock().remove(&names, h2, &da).unwrap();
         drop(r);
         assert_eq!(da.counts(), (1, 1));
+        assert_eq!(da.drops.load(Ordering::SeqCst), 1, "the last handle closes instead");
         assert!(!attached(&o, 0));
         assert!(attached(&o, 1), "the other file is not affected");
         // close(9E) of the other file.

@@ -1,0 +1,28 @@
+#
+# SPDX-License-Identifier: MIT
+# Copyright 2026 The illumos-drm authors
+#
+# The kernel symbols i915n uses that neither the gate's ddi.mapfile nor
+# the mapfiles of its dependencies (drm_facade.mapfile, linuxkpi.mapfile,
+# drm_helpers.mapfile) declare, for its link with -z defs
+# (drivers/i915/build.sh). Declarations only (EXTERN): genunix provides
+# them.
+#
+$mapfile_version 2
+
+SYMBOL_SCOPE {
+	global:
+		#
+		# PAGESHIFT of <sys/param.h>, a variable in the kernel:
+		# the facade's inline drm_vma_node_offset_addr()
+		# (include/drm/drm_gem.h) shifts by it.
+		#
+		_pageshift		{ FLAGS = EXTERN };
+		#
+		# The kernel's C string functions (common/util/string.c),
+		# which i915 calls directly; the DDI lists bcmp and strcmp
+		# but not these two.
+		#
+		memcmp			{ FLAGS = EXTERN };
+		strrchr			{ FLAGS = EXTERN };
+};

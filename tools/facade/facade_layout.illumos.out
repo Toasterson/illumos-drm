@@ -119,6 +119,7 @@ offset drm_gem_object_funcs.illumos_umem 32
 offset drm_gem_object_funcs.illumos_mapped 40
 offset drm_gem_object_funcs.illumos_access 48
 offset drm_gem_object_funcs.illumos_movable 56
+offset drm_gem_object_funcs.illumos_close_every_handle 57
 size drm_gem_object 256
 offset drm_gem_object.refcount 0
 offset drm_gem_object.handle_count 4

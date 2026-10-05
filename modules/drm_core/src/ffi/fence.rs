@@ -82,7 +82,8 @@ pub(crate) unsafe fn core_fence(fence: *mut f::dma_fence) -> Option<Fence> {
 /// A new structure for a core fence, with one reference; NULL without
 /// memory. Any context.
 pub(crate) fn proxy(fence: Fence) -> *mut f::dma_fence {
-    let p = cfence::proxy(fence, crate::module_fences());
+    // A driver's own structure when the core fence shadows one.
+    let p = cfence::structure_of(fence, crate::module_fences());
     publish_module();
     p
 }

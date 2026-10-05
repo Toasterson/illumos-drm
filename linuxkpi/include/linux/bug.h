@@ -2,57 +2,71 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * Linux's run-time warnings and compile-time assertions for the carried
- * helpers (carried/): WARN(), WARN_ON(), WARN_ONCE(), WARN_ON_ONCE(),
- * BUILD_BUG_ON() and BUILD_BUG_ON_INVALID().
- *
- * A warning is a CE_WARN message through cmn_err(9F) naming the file and
- * line; the macro's value is the condition, as in Linux. There is no
- * BUG()/BUG_ON() here: the helpers carried so far (drm_mm without
- * CONFIG_DRM_DEBUG_MM) do not use them, and R5c decides what they become.
- *
- * To be reconciled with R5c: a minimal stand-in written for R5e before
- * R5c's compatibility layer existed; R5c's header of the same name
- * replaces it.
- *
- * Origin: the names and meaning follow Linux v7.2's include/linux/bug.h,
- * include/asm-generic/bug.h and include/linux/build_bug.h (GPL-2.0). This
- * file is a reimplementation for illumos, not a copy (decision D7).
+ * Linux's BUG() and WARN() (include/linux/bug.h, asm-generic/bug.h;
+ * GPL-2.0; reimplemented). BUG() and a true BUG_ON() panic, as on Linux.
+ * WARN*() log the condition, file and line with cmn_err(CE_WARN) and
+ * return the condition; the *_ONCE forms log once per call site.
  */
-
-#ifndef _LINUXKPI_LINUX_BUG_H
-#define	_LINUXKPI_LINUX_BUG_H
+#ifndef _LINUX_BUG_H
+#define	_LINUX_BUG_H
 
 #include <linux/compiler.h>
-#include <sys/cmn_err.h>
-#include <sys/atomic.h>
+#include <linux/build_bug.h>
+#include <linux/once_lite.h>
+#include <linux/instrumentation.h>
 
-/* Compile-time: a negative array size when `cond` is true. */
-#define	BUILD_BUG_ON(cond)	((void)sizeof (char[1 - 2 * !!(cond)]))
-/* Type-checks `e` without evaluating it (the disabled-assertion form). */
-#define	BUILD_BUG_ON_INVALID(e)	((void)(sizeof ((long)(e))))
+/* WARN()s fired since misc/linuxkpi loaded (lkpi_printf.c). */
+extern volatile uint64_t lkpi_warnings;
+extern void lkpi_warn(const char *file, int line, const char *fmt, ...)
+    __printf(3, 4) __cold;
+extern void lkpi_bug(const char *file, int line) __noreturn __cold;
 
-#define	WARN(cond, fmt, ...) __extension__ ({				\
-	int __lkpi_warn_c = !!(cond);					\
-	if (unlikely(__lkpi_warn_c))					\
-		cmn_err(CE_WARN, "WARNING: %s:%d: " fmt,		\
-		    __FILE__, __LINE__, ##__VA_ARGS__);			\
-	unlikely(__lkpi_warn_c);					\
-})
+#define	BUG()		lkpi_bug(__FILE__, __LINE__)
+#define	BUG_ON(cond)	do { if (unlikely(cond)) BUG(); } while (0)
+#define	__WARN()	lkpi_warn(__FILE__, __LINE__, NULL)
+#define	__WARN_printf(taint, fmt, ...) \
+	lkpi_warn(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
-#define	WARN_ON(cond)	WARN((cond), "WARN_ON(%s)", #cond)
+#define	WARN_ON(cond) ({ \
+	bool __w = !!(cond); \
+	if (unlikely(__w)) \
+		lkpi_warn(__FILE__, __LINE__, "WARN_ON(%s)", #cond); \
+	unlikely(__w); })
+#define	WARN(cond, fmt, ...) ({ \
+	bool __w = !!(cond); \
+	if (unlikely(__w)) \
+		lkpi_warn(__FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+	unlikely(__w); })
+#define	WARN_ON_ONCE(cond) ({ \
+	static volatile uint32_t __warned; \
+	bool __w = !!(cond); \
+	if (unlikely(__w) && __atomic_exchange_n(&__warned, 1, __ATOMIC_SEQ_CST) == 0) \
+		lkpi_warn(__FILE__, __LINE__, "WARN_ON_ONCE(%s)", #cond); \
+	unlikely(__w); })
+#define	WARN_ONCE(cond, fmt, ...) ({ \
+	static volatile uint32_t __warned; \
+	bool __w = !!(cond); \
+	if (unlikely(__w) && __atomic_exchange_n(&__warned, 1, __ATOMIC_SEQ_CST) == 0) \
+		lkpi_warn(__FILE__, __LINE__, fmt, ##__VA_ARGS__); \
+	unlikely(__w); })
+#define	WARN_TAINT(cond, taint, fmt, ...)	WARN(cond, fmt, ##__VA_ARGS__)
+#define	WARN_TAINT_ONCE(cond, taint, fmt, ...)	WARN_ONCE(cond, fmt, ##__VA_ARGS__)
+#define	WARN_ON_SMP(cond)	WARN_ON(cond)
+#define	BUILD_BUG_ON_ZERO_OR_NULL(e)	BUILD_BUG_ON_ZERO(e)
+#define	MAYBE_BUILD_BUG_ON(cond)	((void)sizeof (char[1 - 2 * !!(cond)]))
 
-/* Warns at the first true evaluation of this call site only. */
-#define	WARN_ONCE(cond, fmt, ...) __extension__ ({			\
-	static volatile uint32_t __lkpi_warned;				\
-	int __lkpi_warn_c = !!(cond);					\
-	if (unlikely(__lkpi_warn_c) &&					\
-	    atomic_cas_32(&__lkpi_warned, 0, 1) == 0)			\
-		cmn_err(CE_WARN, "WARNING: %s:%d: " fmt,		\
-		    __FILE__, __LINE__, ##__VA_ARGS__);			\
-	unlikely(__lkpi_warn_c);					\
-})
+enum bug_trap_type {
+	BUG_TRAP_TYPE_NONE = 0,
+	BUG_TRAP_TYPE_WARN = 1,
+	BUG_TRAP_TYPE_BUG = 2
+};
 
-#define	WARN_ON_ONCE(cond)	WARN_ONCE((cond), "WARN_ON_ONCE(%s)", #cond)
+#define	TAINT_WARN		9
+#define	TAINT_USER		6
+#define	TAINT_MACHINE_CHECK	4
+#define	LOCKDEP_STILL_OK	0
+#define	LOCKDEP_NOW_UNRELIABLE	1
+#define	add_taint(flag, lockdep)	((void)(flag), (void)(lockdep))
+#define	test_taint(flag)		0
 
-#endif	/* _LINUXKPI_LINUX_BUG_H */
+#endif

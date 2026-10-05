@@ -15,9 +15,10 @@ virtio-gpu driver on top of it. Existing vendor drivers stay in C and would
 be carried later through a C interface of the core. The milestones are R0
 (uAPI, device registration, per-file state, core ioctls), R1 (GEM and dumb
 buffers), R2 (fences, syncobj, PRIME), R3 (KMS and atomic), R4
-(virtio-gpu), all five done, and R5 (C interface), whose first step R5a
+(virtio-gpu), all five done, and R5 (C interface), whose steps R5a
 (the `misc/drm_core` kernel module with a versioned C facade, and the C test
-driver `cdrmnull`) is done.
+driver `cdrmnull`), R5b (public layouts), R5e (carried helpers) and R5c
+(the Linux compatibility layer and the headless i915, `i915n`) are done.
 
 ## Where things stand
 
@@ -76,6 +77,31 @@ red-black/interval tree tests: 26 tests and 840,436 checks with gcc on
 illumos, 24 tests and 839,569 checks with clang under AddressSanitizer and
 UndefinedBehaviorSanitizer on arm64 (no `drm_cache` there); a seed gives
 the same `drm_mm` counts on every compiler and in the kernel.
+
+R5c (the Linux compatibility layer and the headless i915; see *R5c* under
+*Decisions*): `misc/linuxkpi` (`linuxkpi/`, MIT) implements the Linux
+kernel interfaces Linux v7.2's i915 needs over the DDI and the facade
+(1.1), and `i915n` (`drivers/i915/`: 154 Linux translation units, ten
+illumos patches, generated display stubs) links against it with `-z defs`
+and no unresolved symbol. On 5 October 2026, at `05e43d0` (modules built
+at `57022d7`, the following commit changed the test script only), on
+oibuild (gcc 14.3.0-oi-4): 35 layer files, 157 i915 units, every one of
+the 483 Linux files the compiler read MIT or HPND, `i915n` linked, and the
+three packages (`linuxkpi`, `drm-helpers`, `i915n`) published as a p5p,
+pkglint-clean. On a guest of `golden-20260930` (illumos `7e802e88a3`,
+`-device pci-testdev`) `tools/test/run-r5c-test.sh` passed 22 checks (its
+second run there; the first, on the fresh guest, failed only the test
+script's lookup of the DRM node, fixed in `05e43d0`): no module defines a kernel symbol, `linuxkpi_selftest`
+passed 157 checks (including the concurrency tests of the scheduling,
+memory and reservation parts and a DRM device made as i915 makes its own:
+GEM object before registration, freed in the release at detach), detach
+was refused while a node was open, `i915n` loaded and unloaded twice and
+refused a device outside its ID table, and nothing warned outside the
+self-test; `run-r5e-test.sh` with `misc/drm_helpers` on the layer passed
+(16 tests, 130,876 checks at seed 20261004, as R5e). The host tests pass
+(the layer's: 30 tests, 777 checks; the carried helpers': 24 tests;
+`drm-core`: 160). i915n has not attached to an Intel GPU yet: that is the
+first step on the owner's ThinkPad X230 and MacBook Pro.
 
 G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
 of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
@@ -501,11 +527,26 @@ pinned Linux revision, with `-u` it refreshes them) and applies the series;
 `carried/build.sh` builds `misc/drm_helpers` (`carried/drm_helpers/`) and
 the test driver `drm_helpers_test` (`carried/test/`, run by
 `tools/test/run-r5e-test.sh`); `carried/host-test.sh` runs the self-tests
-as a userland program. `linuxkpi/` holds the Linux kernel interfaces the
-carried code compiles against (`linuxkpi/include/{linux,asm}/*.h`,
-`linuxkpi/lib/`); see *R5e: compatibility headers* for how they
-relate to R5c's compatibility layer. `packaging/drm-helpers.p5m` packages
-the module.
+as a userland program. `packaging/drm-helpers.p5m` packages the module.
+
+`linuxkpi/` is the illumos Linux compatibility layer of R5c, the kernel
+module `misc/linuxkpi` (see *R5c* under *Decisions*): one MIT header per
+Linux header the i915 build and the carried helpers include
+(`linuxkpi/include/{linux,asm,acpi,drm,lkpi,trace,uapi,xen}`, with the
+force-included prologue `lkpi/prologue.h`), the implementation
+(`linuxkpi/src/`), the symbols it uses beyond the DDI with the reason for
+each (`linuxkpi/private.d/`), the kernel flags of everything built on it
+(`linuxkpi/kflags.sh`), `linuxkpi/build.sh`, the kernel self-test driver
+`linuxkpi_selftest` (`linuxkpi/selftest/`, run by
+`tools/test/run-r5c-test.sh`) and host tests (`linuxkpi/tests/host/`).
+`drivers/i915/` builds `i915n`, Linux v7.2's i915 without display, on
+it: the pin (`PIN`), the configuration (`config/`), the translation units
+(`tus.txt`), the MIT Linux headers used unchanged (`mit-headers.txt`), the
+illumos patch series (`patches/`), `fetch-and-patch.sh` (no Linux source
+is in this repository), `build.sh`, the licence checks
+(`check-licences.py`, `gen-license.sh`) and the illumos glue
+(`illumos/`). `packaging/linuxkpi.p5m` and `packaging/i915n.p5m` package
+them.
 
 ## Decisions
 
@@ -1556,15 +1597,16 @@ Linux modules (`drm_suballoc_helper`, `drm_exec`, the buddy allocator,
 needs them, so the provider table of the R5 analysis maps one to one. The
 module is linked `-z defs -B reduce` with `drm_helpers_scope.mapfile`: its
 global symbols are `_init`, `_fini`, `_info`, the ten `drm_mm` functions
-i915 imports and `drm_clflush_virt_range`, nothing else (`drm_mm_print()`,
-which i915 does not import, the red-black tree and the processor facts
-stay local); `build.sh` fails otherwise.
+i915 imports, `drm_clflush_virt_range` and (since R5c) `drm_clflush_sg`,
+nothing else (`drm_mm_print()` and `drm_cache`'s other functions stay
+local); `build.sh` fails otherwise.
 Dependents link with `-N misc/drm_helpers -M
-carried/drm_helpers/drm_helpers.mapfile`. The module depends on nothing but
-genunix and needs no guard against the legacy stack; its only state is
-what `drm_cache` reads from CPUID in `_init` (CLFLUSH, CLFLUSHOPT, the
-line size), read-only afterwards, and `_init` refuses a processor without
-CLFLUSH;
+carried/drm_helpers/drm_helpers.mapfile`. The module depended on nothing
+but genunix and kept the processor facts `drm_cache` reads from CPUID;
+since R5c it links against `misc/linuxkpi`, which fills them
+(`boot_cpu_data`) when it loads, and which depends on `misc/drm_core`, so
+`drmadm`'s exclusion of the new stack covers it; `_init` refuses a
+processor without CLFLUSH;
 gfx-drm's `misc/drm` exports `drm_mm` functions under the same names, and
 krtld resolves each module against its own dependencies, so the stacks do
 not mix.
@@ -1580,12 +1622,10 @@ and every difference from Linux lives in the compatibility headers.
 `drm_cache` has one patch, which only adds conditionals: its page and
 scatterlist functions need R5c's `struct page` and `sg_table` and are
 built only with `CONFIG_LKPI_STRUCT_PAGE`, which R5c's layer defines once
-those exist (then `drm_clflush_sg`, which i915 imports, compiles unchanged
-and joins the mapfiles); its swiotlb and write-combining-copy functions
-need `iosys_map`, Xen and memory-encryption state, static keys and the
-kernel FPU, which i915's headless build does not use, and are built only
-with `CONFIG_LKPI_IOSYS_MAP`. Until then the module builds
-`drm_clflush_virt_range` alone; with both defined the patch can go. Linux's fallback for processors
+those exist; then `drm_clflush_sg` (which i915 imports) compiles
+unchanged, joins the mapfiles and the patch can go. (R5c did that:
+`drm_cache.c` builds unmodified on `misc/linuxkpi`, the series is empty
+and `drm_clflush_sg` is exported.) Linux's fallback for processors
 without CLFLUSH, `wbinvd_on_all_cpus()`, has no definition here: CLFLUSH
 is a constant true after `_init`'s check, the compiler drops the call, and
 the `-z defs` link would fail if it did not. The configuration of the
@@ -1612,8 +1652,10 @@ and a few headers that only have to exist (`slab.h`, `seq_file.h`,
 `linuxkpi/include/` and `linuxkpi/lib/`, written for R5e
 before R5c's compatibility layer existed, MIT reimplementations (Linux's
 are GPL; decision D7), each marked "to be reconciled with R5c": R5c builds
-the full layer at the same paths, so the merge replaces these files, and
-`misc/drm_helpers` then links R5c's trees instead of its local copy. The
+the full layer at the same paths, so the merge replaced these files, and
+`misc/drm_helpers` now links `misc/linuxkpi`'s trees and processor facts
+(`-N misc/linuxkpi`) instead of its local copy (`linuxkpi/lib/` is gone;
+the host tests build on `linuxkpi/tests/host`). The
 illumos kernel headers shape them: `struct list_head` and the base types
 come from the facade, `list_move_tail()` is left out (illumos has its own
 with another signature in `sys/list.h`), `__maybe_unused` comes from
@@ -1640,6 +1682,127 @@ flush every shape of range (empty, one byte, across lines and pages, the
 end of a buffer, random), also from four threads at once, and check the
 memory is unchanged; whether a GPU sees the data is the i915 port's test
 on hardware.
+
+**R5c: the compatibility layer is a module of its own.** `misc/linuxkpi`
+(`linuxkpi/`) is a separate kernel module, linked `-N misc/drm_core -z
+defs` against the DDI, the facade and `linuxkpi/private.d`; Linux drivers
+(`i915n`) and the carried helpers (`misc/drm_helpers`, since R5c) link
+`-N misc/linuxkpi` against the `linuxkpi.mapfile` `linuxkpi/build.sh`
+writes from the module's globals. It is not compiled into each driver,
+because its state is shared: the task structures behind `current`, the RCU
+and SRCU grace periods, the timer thread, the workqueue and tasklet
+threads, the page index, the DMA and `vmap` records, the IRQ table, the
+PCI device list and the driver tables of the DRM devices. It is not
+part of the Rust core either, so `misc/drm_core` stays free of C. Being
+linked against `misc/drm_core`, it belongs to the new stack:
+`drmadm select legacy` excludes `misc/drm_core`, which keeps it and
+everything built on it from loading. Its ABI is versioned
+(`LINUXKPI_ABI` in `lkpi/version.h`; a driver calls `linuxkpi_check()` in
+`_init`).
+
+**R5c: one header per Linux header.** About 250 headers under
+`linuxkpi/include`, all MIT, written for illumos from the Linux
+interfaces' documented semantics (FreeBSD's LinuxKPI, BSD-2-Clause, was a
+structural reference for a few; no Linux text is copied). The prologue
+(`lkpi/prologue.h`, force-included before everything) includes the illumos
+headers the layer needs, renames the illumos structure tags that collide
+with Linux's (`mutex`, `page`, `pid`, `file`, `module`, `kstat`,
+`kmem_cache`, `resume`) and undefines the illumos macros Linux names
+differently. Linux names that are function-like macros over illumos
+functions of the same name are reached with parentheses
+(`(mutex_init)(...)`). Every header says what it implements, over which
+DDI interface, and what it leaves out; the explicit stubs (runtime PM,
+debugfs, sysfs, hwmon, tracepoints, perf, ACPI, vga_switcheroo, PM QoS,
+component) answer as "not present". `lkpi/config.h` refuses a driver
+configuration that turns on what the layer does not provide.
+
+**R5c: the illumos model of each part.** Allocation: `kmalloc` over
+`kmem_alloc` with a 16-byte header (Linux's alignment; unknown and double
+frees refused), slab caches over `kmem_cache_create`, may-fail requests
+(`__GFP_NORETRY`, `__GFP_RETRY_MAYFAIL`, and anything above 4 MiB) never
+wait for memory. Pages: a descriptor per page with an owner, indexed by
+kernel address; shmem files over one `ddi_umem_alloc` each (the cookie
+the DRM core maps for user space); `vmap` over `hat_devload` with WB, WC
+or UC. DMA: `ddi_dma` with one page per scatterlist entry, refusing
+mappings that would need a copy buffer. Locks: spinlocks and mutexes are
+adaptive kmutexes (interrupt handlers run below LOCK_LEVEL), rwsems
+krwlocks, ww_mutexes the core's wait-die reservation locks. Time: HZ is
+1000 over `gethrtime`; timers on one high-priority thread with an AVL
+tree, workqueues and tasklets on `ddi_taskq` threads, RCU and SRCU with
+per-epoch reader counts and a callback thread. PCI, MMIO and interrupts
+over the DDI (`pci_config_*`, `ddi_regs_map_setup`, `ddi_intr_*` with
+MSI-X, MSI and INTx in that order; threaded handlers are refused). Printing through the layer's
+`vsnprintf` with Linux's `%p` extensions (plain `%p` prints a keyed hash).
+Firmware over `firmload(9F)`. SSE4.1 is not reported to drivers, so no
+kernel FPU section runs (i915 and `drm_cache` copy from WC memory without
+MOVNTDQA).
+
+**R5c: facade 1.1.** The layer needed from the core: the hooks that let
+`drm_device.dev` and `drm_file.filp` be the layer's structures
+(`DRM_FACADE_DEVICE_T`, `DRM_FACADE_FILE_T`, `DRM_FACADE_INODE_T`),
+reservations a driver owns (`dma_resv_init`/`fini`), transactions of C
+code in the core's wait-die class (`drm_illumos_ww_stamp`,
+`drm_illumos_resv_lock_ctx` and friends; a C transaction and a Rust one
+order by stamp like two of either), fence snapshots of a reservation with
+each fence's usage (`drm_illumos_resv_fences`; a driver's own fence comes
+back as its own structure, so i915 recognises its requests), sync objects
+without a handle (`drm_syncobj_create`, `drm_syncobj_fence_get`),
+`drm_is_current_master`, `illumos_close_every_handle` (Linux's `close`
+for every removed handle, which i915's lookup tables need),
+`drm_dev_illumos_unplug` and `drm_dev_illumos_put` (Linux's DRM device
+lifecycle: the layer registers the device already in `devm_drm_dev_alloc()`,
+because i915 makes GEM objects long before its `drm_dev_register()`;
+detach first refuses while user space holds the device and takes it out of
+the device table; the driver's `remove()` runs; the last put runs the
+driver's release, which frees the driver's own GEM objects, and then the
+core unregisters, waiting a few seconds for leftover fences, or keeps the
+device and makes detach fail). The minor version is 1; drivers built for
+1.0 keep working.
+
+**R5c: i915n.** Linux v7.2's i915 (`drivers/i915/PIN`), headless: 154 of
+the 163 headless translation units of the R5c configuration (all MIT)
+and three illumos ones. Left out: the display (145 units; the 108 display
+functions the rest calls are generated stubs that answer "no display",
+`illumos/gen-nodisplay.py`), the TTM, local-memory and GSC units (the
+integrated GPUs place nothing with TTM; `ttm_device_init` is not called,
+`intel_region_ttm_device_init` refuses discrete GPUs), the tracepoint
+units, the PMU (no perf) and the gen2-5 GTT. The ten patches
+(`drivers/i915/patches`, each guarded by `__illumos__` and explained in
+its header) make the core own the device file, drop the panic screen,
+route handle lookups and user mappings through the core (one write-back
+offset per object; WC/UC only where the CPU cache is coherent, which
+`SET_CACHING` then keeps), install execbuffer out-fences through the core,
+set the display engine's interrupt master enable without the display code
+(on gen5-7 every interrupt depends on it), resolve timeline points through
+the core, and refuse GPUs outside gen6 to gen9.5 with a PCH. The two
+GPL-2.0 tracepoint headers are replaced in the fetched tree by generated
+MIT no-op headers (event names only) and `intel_ips.h` by an MIT one;
+`build.sh` licence-checks every Linux file the compiler read
+(`check-licences.py`) and the package's licence file lists their
+copyright lines (`gen-license.sh`). The module links `-ztype=kmod -N
+misc/drm_core -N misc/linuxkpi -N misc/drm_helpers -z defs` with no
+unresolved symbol; the three kernel symbols beyond the mapfiles of its
+dependencies are in `drivers/i915/private.mapfile`. Its package ships the
+driver action without aliases; `drmadm select new` gives it the Intel
+GPU aliases. See `notes/i915n-bringup-runbook.md` in the workspace for the
+first attach on hardware.
+
+**R5c: tests.** `linuxkpi/tests/host` runs the layer's pure-logic files
+(trees, xarray, IDR/IDA, bitmaps, lists, refcount, printf, strings,
+kobjects) as a userland program (`host-test.sh`, with clang's sanitizers
+where available). `linuxkpi_selftest` is a Linux PCI driver on the layer
+that binds QEMU's PCI test device and checks, from its probe(), locks,
+workqueues, timers, waits, RCU, idr/xarray, slab caches, pages and DMA,
+and the concurrency of the scheduling, memory and reservation parts
+(`st_sched.c`, `st_mem.c`, `st_resv.c`). The self-test also registers a DRM device the way i915 does (a GEM
+object made before `drm_dev_register()` and freed in the driver's release).
+`tools/test/run-r5c-test.sh` checks that no module defines a kernel
+symbol, loads the layer, runs the self-test, holds a node of its DRM device
+open across a refused detach and checks the release at the detach that
+follows, loads `misc/drm_helpers` and `i915n` (without a device, twice),
+checks that `i915n` refuses a device outside its ID table, and that
+nothing in the layer warned outside the self-test. (No probe of i915
+itself has run: there is no Intel GPU in the guest.)
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
@@ -2169,7 +2332,27 @@ carried/fetch-and-patch -f           # vendored files = Linux at the pin
 ```
 
 `tools/test/run-r5e-test.sh` installs, tests and removes both modules on a
-disposable guest (see its header).
+disposable guest (see its header). Since R5c the helpers build on the
+compatibility layer, so `carried/build.sh` needs `LKPI_MAPFILE` (below).
+
+The compatibility layer and i915n (R5c) build on illumos with gcc (bash,
+GNU grep, python3, the pinned Linux tree fetched once, about 260 MB):
+
+```sh
+export DDI_MAPFILE=<gate>/usr/src/uts/common/mapfiles/ddi.mapfile JOBS=2
+OUT=target/linuxkpi linuxkpi/build.sh all      # misc/linuxkpi, linuxkpi_selftest, linuxkpi.mapfile
+LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile OUT=target/carried carried/build.sh
+drivers/i915/fetch-and-patch.sh target/linux   # Linux v7.2 + patches/, licence checks
+LINUX=target/linux LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile \
+    OUT=target/i915 drivers/i915/build.sh all  # i915n, linked -z defs
+drivers/i915/gen-license.sh target/linux target/i915/LICENSE.i915n \
+    target/i915/linux-inputs.txt               # the package's licence file
+linuxkpi/tests/host/host-test.sh               # the layer's host tests
+```
+
+`tools/test/run-r5c-test.sh` loads, tests and removes the layer, its
+self-test, `misc/drm_helpers` and `i915n` on a disposable guest with
+QEMU's `-device pci-testdev` (see its header).
 
 ## Checks
 

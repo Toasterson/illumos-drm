@@ -1,0 +1,8 @@
+firmware_open	# documented 9F (firmload(9F), genunix uts/common/os/firmload.c): request_firmware() opens firmware/<dir>/<file> in the module path
+firmware_get_size	# documented 9F (firmload(9F)): the size of the firmware image, to read it whole into one kmem buffer
+firmware_read	# documented 9F (firmload(9F)): reads the firmware image for struct firmware.data
+firmware_close	# documented 9F (firmload(9F)): closes the firmware handle after the read
+random_get_pseudo_bytes	# non-DDI kernel interface (<sys/random.h>, the kernel crypto framework PRNG; no 9F page): get_random_bytes()/get_random_u32()/get_random_u64(); the DDI has no random source
+kernel_fpu_begin	# non-DDI kernel interface (<sys/kfpu.h>, uts/intel/os/fpu.c): kernel_fpu_begin() of Linux code that uses SSE in inline assembly (i915 WC reads); KFPU_NO_STATE with preemption disabled
+kernel_fpu_end	# non-DDI kernel interface (<sys/kfpu.h>): ends the section entered with kernel_fpu_begin()
+kpreempt	# non-DDI kernel interface (<sys/disp.h>): called by the kpreempt_enable() macro that closes a kernel FPU section

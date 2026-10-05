@@ -1,0 +1,43 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 08] i915: keep objects coherent while a WB mapping stands for WC
+
+Patch 0005 hands out a write-back user mapping for a WC or UC request
+where the object is coherent with the CPU cache (shared LLC). Changing
+such an object's caching to a non-coherent level would leave the
+mapping's writes in the CPU cache unseen by the GPU, so
+DRM_IOCTL_I915_GEM_SET_CACHING refuses it with -EBUSY on illumos.
+
+--- a/drivers/gpu/drm/i915/gem/i915_gem_domain.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_domain.c
+@@ -403,6 +403,18 @@
+ 	if (ret)
+ 		goto out;
+ 
++#ifdef __illumos__
++	/*
++	 * A user mapping handed out as WC/UC is write-back here, which is
++	 * only right while the CPU cache stays coherent with the GPU.
++	 */
++	if (test_bit(I915_BO_ILLUMOS_WB_FOR_WC_BIT, &obj->flags) &&
++	    level != I915_CACHE_LLC) {
++		i915_gem_object_unlock(obj);
++		ret = -EBUSY;
++		goto out;
++	}
++#endif
+ 	ret = i915_gem_object_set_cache_level(obj, level);
+ 	i915_gem_object_unlock(obj);
+ 
+--- a/drivers/gpu/drm/i915/gem/i915_gem_object_types.h
++++ b/drivers/gpu/drm/i915/gem/i915_gem_object_types.h
+@@ -368,6 +368,10 @@
+ #define I915_BO_READONLY          BIT(10)
+ #define I915_TILING_QUIRK_BIT     11 /* unknown swizzling; do not release! */
+ #define I915_BO_PROTECTED         BIT(12)
++#ifdef __illumos__
++/* A write-back user mapping stands for a WC/UC one (patch 0005). */
++#define I915_BO_ILLUMOS_WB_FOR_WC_BIT	14
++#endif
+ 	/**
+ 	 * @mem_flags - Mutable placement-related flags
+ 	 *

@@ -1,0 +1,92 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 01] i915: the DRM core owns the device file on illumos
+
+On illumos the DRM core (misc/drm_core) is the device's character driver
+(cb_ops) and exports, imports and maps dma-bufs itself:
+
+- i915_driver_fops is Linux's struct file_operations for the device file;
+  its open/read/poll/ioctl/mmap entries are Linux file operations that do
+  not exist on illumos. Not built.
+- The drm_driver table carries the facade version (DRM_FACADE_DRIVER_VERSION,
+  required by drm_dev_alloc()) instead of .fops, .show_fdinfo (no proc
+  fdinfo on illumos) and the fbdev hook (no fbdev emulation).
+- i915's GEM object functions leave out .export/.vmap/.vunmap, which the
+  facade's struct drm_gem_object_funcs does not have: PRIME export is the
+  core's.
+
+License: the hunks are trivial preprocessor guards on GPL-2.0/MIT Linux
+files; this patch is applied to the pinned Linux tree, not part of
+illumos-drm's sources.
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_object.c b/drivers/gpu/drm/i915/gem/i915_gem_object.c
+index 5172d3982..8fbc7969d 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_object.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_object.c
+@@ -897,9 +897,12 @@ int __init i915_objects_module_init(void)
+ static const struct drm_gem_object_funcs i915_gem_object_funcs = {
+ 	.free = i915_gem_free_object,
+ 	.close = i915_gem_close_object,
++#ifndef __illumos__
++	/* On illumos the DRM core exports and maps dma-bufs itself. */
+ 	.export = i915_gem_prime_export,
+ 	.vmap = i915_gem_vmap_object,
+ 	.vunmap = i915_gem_vunmap_object,
++#endif
+ };
+ 
+ /**
+diff --git a/drivers/gpu/drm/i915/i915_driver.c b/drivers/gpu/drm/i915/i915_driver.c
+index 58081b524..f95182ce1 100644
+--- a/drivers/gpu/drm/i915/i915_driver.c
++++ b/drivers/gpu/drm/i915/i915_driver.c
+@@ -1769,6 +1769,7 @@ const struct dev_pm_ops i915_pm_ops = {
+ 	.runtime_resume = i915_pm_runtime_resume,
+ };
+ 
++#ifndef __illumos__
+ static const struct file_operations i915_driver_fops = {
+ 	.owner = THIS_MODULE,
+ 	.open = drm_open,
+@@ -1784,6 +1785,7 @@ static const struct file_operations i915_driver_fops = {
+ #endif
+ 	.fop_flags = FOP_UNSIGNED_OFFSET,
+ };
++#endif /* !__illumos__: the DRM core owns the device file on illumos */
+ 
+ static int
+ i915_gem_reject_pin_ioctl(struct drm_device *dev, void *data,
+@@ -1870,6 +1872,9 @@ static const struct drm_ioctl_desc i915_ioctls[] = {
+ #define DRIVER_PATCHLEVEL	0
+ 
+ static const struct drm_driver i915_drm_driver = {
++#ifdef __illumos__
++	DRM_FACADE_DRIVER_VERSION,
++#endif
+ 	.driver_features =
+ 	    DRIVER_GEM |
+ 	    DRIVER_RENDER | DRIVER_MODESET | DRIVER_ATOMIC | DRIVER_SYNCOBJ |
+@@ -1877,18 +1882,24 @@ static const struct drm_driver i915_drm_driver = {
+ 	.release = i915_driver_release,
+ 	.open = i915_driver_open,
+ 	.postclose = i915_driver_postclose,
++#ifndef __illumos__
+ 	.show_fdinfo = PTR_IF(IS_ENABLED(CONFIG_PROC_FS), i915_drm_client_fdinfo),
++#endif
+ 
+ 	.gem_prime_import = i915_gem_prime_import,
+ 
+ 	.dumb_create = i915_gem_dumb_create,
+ 	.dumb_map_offset = i915_gem_dumb_mmap_offset,
+ 
++#ifndef __illumos__
+ 	INTEL_FBDEV_DRIVER_OPS,
++#endif
+ 
+ 	.ioctls = i915_ioctls,
+ 	.num_ioctls = ARRAY_SIZE(i915_ioctls),
++#ifndef __illumos__
+ 	.fops = &i915_driver_fops,
++#endif
+ 	.name = DRIVER_NAME,
+ 	.desc = DRIVER_DESC,
+ 	.major = DRIVER_MAJOR,

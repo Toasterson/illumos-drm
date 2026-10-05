@@ -104,17 +104,36 @@ jobs:
           https://raw.githubusercontent.com/illumos/illumos-gate/cda5b9a49f77a86a151a20cdde0e948a49b37160/usr/src/uts/common/mapfiles/ddi.mapfile &&
           DDI_MAPFILE=target/ddi.mapfile OUT=target/cdrmnull drivers/cdrmnull/build.sh &&
           elfdump -d target/cdrmnull/cdrmnull | grep SUNW_KMOD
+      # misc/linuxkpi, the Linux compatibility layer (linuxkpi/), and its
+      # test driver linuxkpi_selftest: gcc with the gate's kernel flags and
+      # the Linux dialect (linuxkpi/kflags.sh), -z defs against the gate's
+      # ddi.mapfile, the facade's mapfile and the layer's private.d.
+      - run: >
+          DDI_MAPFILE=target/ddi.mapfile OUT=target/linuxkpi linuxkpi/build.sh all &&
+          elfdump -d target/linuxkpi/linuxkpi | grep NEEDED &&
+          elfdump -d target/linuxkpi/linuxkpi_selftest | grep NEEDED
       # misc/drm_helpers, the carried Linux helpers (carried/), and its test
-      # driver: the vendored Linux files against their pinned SHA-256, gcc
-      # with the gate's kernel flags, -z defs against the gate's
-      # ddi.mapfile; the module's global symbols must be exactly
+      # driver: the vendored Linux files against their pinned SHA-256, the
+      # layer's flags, -z defs against the gate's ddi.mapfile and
+      # linuxkpi.mapfile; the module's global symbols must be exactly
       # drm_helpers_scope.mapfile's, and the test driver links with
       # -N misc/drm_helpers against drm_helpers.mapfile only.
       - run: >
-          DDI_MAPFILE=target/ddi.mapfile OUT=target/carried carried/build.sh &&
-          elfdump -d target/carried/drm_helpers | grep SUNW_KMOD &&
+          DDI_MAPFILE=target/ddi.mapfile OUT=target/carried
+          LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile carried/build.sh &&
+          elfdump -d target/carried/drm_helpers | grep NEEDED &&
           elfdump -d target/carried/drm_helpers_test | grep NEEDED
-      # The same helpers and linuxkpi's trees as a userland program: the
-      # drm_mm self-tests the test driver runs, the host-only ones and the
-      # red-black and interval tree tests.
+      # The i915n link gate: the pinned Linux tree (a shallow fetch) with
+      # the illumos patches, every Linux input licence-checked, all TUs
+      # compiled with the layer's flags (any failure fails the step) and
+      # linked with -z defs against the facade, layer, helpers and DDI.
+      - run: >
+          drivers/i915/fetch-and-patch.sh target/linux &&
+          LINUX=target/linux DDI_MAPFILE=target/ddi.mapfile
+          LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile OUT=target/i915 JOBS=4
+          drivers/i915/build.sh all &&
+          elfdump -d target/i915/i915n | grep NEEDED
+      # The layer's host tests (trees, xarray/IDR, bitmaps, lists, refcount,
+      # printf, strings) and the carried helpers' as userland programs.
+      - run: CC=gcc linuxkpi/tests/host/host-test.sh
       - run: CC=gcc carried/host-test.sh

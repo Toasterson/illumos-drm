@@ -574,6 +574,9 @@ struct State {
     /// Callbacks, most recently added first.
     cbs: *mut CbHdr,
     timestamp: Nanos,
+    /// The address of the driver structure this fence shadows (cfence's
+    /// native fences), 0 for none; cleared before that structure is freed.
+    origin: usize,
 }
 
 // SAFETY: the raw pointers are nodes the list owns references to.
@@ -786,7 +789,7 @@ impl Fence {
             seqno,
             flags: AtomicU32::new(0),
             error: AtomicI32::new(0),
-            state: KMutex::with_priority(State { cbs: ptr::null_mut(), timestamp: 0 }, domain.pri),
+            state: KMutex::with_priority(State { cbs: ptr::null_mut(), timestamp: 0, origin: 0 }, domain.pri),
             cv: KCondVar::new(),
             kind,
         }
@@ -834,6 +837,17 @@ impl Fence {
     /// Returns the sequence number.
     pub fn seqno(&self) -> u64 {
         self.inner().seqno
+    }
+    /// Records the driver structure this fence shadows (0: none any more).
+    /// The structure's owner clears it before the structure is freed.
+    pub fn set_origin(&self, origin: usize) {
+        self.inner().state.lock().origin = origin;
+    }
+    /// Calls `f` with the recorded origin (0 for none) while it cannot be
+    /// cleared, so `f` may take a reference on a non-zero origin.
+    pub fn with_origin<R>(&self, f: impl FnOnce(usize) -> R) -> R {
+        let st = self.inner().state.lock();
+        f(st.origin)
     }
     /// Reports whether both refer to the same fence.
     pub fn ptr_eq(a: &Fence, b: &Fence) -> bool {

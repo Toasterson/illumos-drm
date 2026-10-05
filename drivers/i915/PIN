@@ -1,0 +1,7 @@
+# The Linux tree the i915 port is built from (R5c, 2026-10-04).
+# Linux v7.2, the revision the R5 analysis counted. v7.2 is a stable,
+# not a longterm, release; the newest longterm (6.18) predates the DRM
+# facade's Linux 7.2 rules, so the pin stays on v7.2.
+LINUX_REPO=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+LINUX_TAG=v7.2
+LINUX_REV=8d3ae59288f1e7d58d76558a6ee96d533bc5019f

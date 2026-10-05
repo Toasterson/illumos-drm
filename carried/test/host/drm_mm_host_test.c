@@ -22,7 +22,6 @@
 
 #include "selftest.h"
 
-extern unsigned long lkpi_host_warnings;
 
 struct st_buf {
 	char text[1024];
@@ -104,15 +103,15 @@ st_mm_takedown_dirty(struct st_ctx *ctx)
 	a.start = 10;
 	a.size = 10;
 	ST_CHECK(ctx, drm_mm_reserve_node(&mm, &a) == 0, "reserve");
-	before = lkpi_host_warnings;
+	before = lkpi_warnings;
 	(void) fprintf(stderr, "(the next warning is expected)\n");
 	drm_mm_takedown(&mm);
-	ST_CHECK(ctx, lkpi_host_warnings == before + 1,
+	ST_CHECK(ctx, lkpi_warnings == before + 1,
 	    "takedown of a used allocator did not warn");
 	drm_mm_remove_node(&a);
-	before = lkpi_host_warnings;
+	before = lkpi_warnings;
 	drm_mm_takedown(&mm);
-	ST_CHECK(ctx, lkpi_host_warnings == before,
+	ST_CHECK(ctx, lkpi_warnings == before,
 	    "takedown of a clean allocator warned");
 }
 

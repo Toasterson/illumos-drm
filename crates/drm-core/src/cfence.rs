@@ -406,6 +406,9 @@ pub unsafe fn init(
         Some(c) => {
             // SAFETY: the bridge is empty until added.
             unsafe { list_init(ptr::addr_of_mut!((*c.bridge.get()).node)) };
+            if let Some(shadow) = c.fence() {
+                shadow.set_origin(fence as usize);
+            }
             set_core(fence, c);
         }
         None => {
@@ -561,6 +564,30 @@ impl FenceCallback for Relay {
         unsafe { put_deferred(c, None) };
         None
     }
+}
+
+/// The driver's own structure of core fence `fence` (the shadow of a
+/// native fence), with a new reference; `None` if `fence` shadows no
+/// structure or that structure is being released.
+pub fn native_of(fence: &Fence) -> Option<*mut f::dma_fence> {
+    fence.with_origin(|o| {
+        let p = o as *mut f::dma_fence;
+        // The origin is cleared, under the same lock, before the structure
+        // is freed: it is valid here, and a zero count means "released".
+        (!p.is_null() && get_unless_zero(p)).then_some(p)
+    })
+}
+
+/// The structure for core fence `fence`, with one reference: the driver's
+/// own if `fence` shadows a native fence that is still alive (so a driver
+/// recognises its fences in reservations and sync objects, as on Linux),
+/// else a new proxy; NULL without memory. Any context.
+pub fn structure_of(fence: Fence, domain: &KArc<FenceDomain>) -> *mut f::dma_fence {
+    if let Some(p) = native_of(&fence) {
+        drop(fence);
+        return p;
+    }
+    proxy(fence, domain)
 }
 
 /// A new structure for core fence `fence`, with one reference; NULL
@@ -749,6 +776,13 @@ pub unsafe fn release(fence: *mut f::dma_fence, ctx: &Sleepable) {
             signal_locked_c(fence, ksync::now());
         }
         lk::exit(l);
+        // The shadow no longer leads back here (native_of).
+        if let Some(core) = core_of(fence)
+            && core.kind == Kind::Native
+            && let Some(cf) = core.fence()
+        {
+            cf.set_origin(0);
+        }
         if let Some(core) = take_core(fence) {
             if let (Some(r), Some(cf)) = (&core.relay, core.fence())
                 && core.relayed.load(Ordering::Acquire)

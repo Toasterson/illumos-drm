@@ -323,6 +323,7 @@ impl<T: GemObject> Funcs for T {
         illumos_mapped: Some(mapped_thunk::<T>),
         illumos_access: Some(access_thunk::<T>),
         illumos_movable: T::MOVABLE,
+        illumos_close_every_handle: false,
     };
 }
 
