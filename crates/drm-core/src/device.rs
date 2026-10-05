@@ -39,6 +39,13 @@
 //! a file's node kind never changes and a file never loses its
 //! authentication. `close(9E)` runs only after every ioctl of the file has
 //! returned, so no GEM ioctl can see a file whose GEM state is gone.
+//!
+//! A Linux-KMS device (facade 2.0, [`crate::lkms`]) adds the event queues
+//! of its files behind their own lock, which the driver's KMS code takes
+//! from its event functions, also in interrupt context; the device mutex
+//! may be held while taking it (a file's master status is mirrored into
+//! its queue), never the other way round, and neither is held while the
+//! KMS code's hooks run.
 
 use ddi::prelude::*;
 use ddi::sys;
@@ -54,10 +61,11 @@ use crate::ioctl::{self, Entry, Op, SizePlan};
 use crate::karc::KArc;
 use crate::kms::dev::{Caller, Kms};
 use crate::kms::ioctl as kmsioctl;
+use crate::lkms::{self, dev::LkmsQueues};
 use crate::minor::{self, CloneId, MAX_DEVICES, NodeKind};
 use crate::offsets::PAGE_SIZE;
-use crate::state::{DeviceState, IF_MAJOR, IF_MINOR, Opener, SetVersion};
-use crate::uaccess::{CoreArg, UserArg, copy_in_bytes, copy_out_bytes};
+use crate::state::{DeviceState, FileFlags, IF_MAJOR, IF_MINOR, Opener, SetVersion};
+use crate::uaccess::{ArgIo, CoreArg, UserArg, copy_in_bytes, copy_out_bytes};
 
 /// One DRM device: the driver's state, the card and render minor nodes, and
 /// the per-file state.
@@ -77,6 +85,9 @@ pub struct Device<D: Driver> {
     gem: Option<KArc<GemCore<D::Object>>>,
     /// The mode-setting state, for drivers with a [`Driver::kms`].
     kms: Option<Kms<D::Object>>,
+    /// Facade 2.0: the event queues of a Linux-KMS device (a driver with
+    /// [`Driver::lkms`]), whose mode setting is the driver's C code.
+    lkms: Option<LkmsQueues>,
     /// Fences, sync objects, dma-bufs and sync files (R2).
     sync: KArc<SyncCore<D::Object>>,
     // Dropping these removes the minor nodes.
@@ -193,6 +204,26 @@ impl<D: Driver> Device<D> {
                 return Err(DdiError);
             }
         };
+        // Facade 2.0: a Linux-KMS device has the core's files and event
+        // queues, and no mode-setting state of the core's.
+        let lkms = match driver.lkms() {
+            Some(_) if driver.kms().is_some() => {
+                dev.warn(format_args!("a driver has the core's mode setting or Linux's, not both"));
+                return Err(DdiError);
+            }
+            Some(_) if !info.features.contains(Features::MODESET) => {
+                dev.warn(format_args!("Linux mode setting needs MODESET"));
+                return Err(DdiError);
+            }
+            Some(_) => match LkmsQueues::new(driver.fence_priority(), ctx) {
+                Ok(q) => Some(q),
+                Err(e) => {
+                    dev.warn(format_args!("cannot set up the event queues: {e:?}"));
+                    return Err(DdiError);
+                }
+            },
+            None => None,
+        };
         let kms = match driver.kms() {
             Some(k) if gem.is_some() && info.features.contains(Features::MODESET) => {
                 let modifiers = info.mode_config.fb_modifiers;
@@ -234,6 +265,7 @@ impl<D: Driver> Device<D> {
             has_render: render.is_some(),
             gem,
             kms,
+            lkms,
             sync,
             _card: card,
             _render: render,
@@ -342,6 +374,19 @@ impl<D: Driver> Device<D> {
         }
     }
 
+    /// Undoes [`Device::attach`] of a device that never served a file,
+    /// without the driver's detach hooks: facade 2.0's
+    /// `drm_dev_register()` whose `register_dev` failed. The minor nodes
+    /// and the device number go with the device.
+    pub fn abandon(self, ctx: &Sleepable) {
+        if let Some(k) = &self.kms {
+            k.teardown(ctx);
+        }
+        if self.gem.is_some() {
+            registry::remove(self.index);
+        }
+    }
+
     /// The core's own `MODE_CREATE_DUMB`: [`Driver::dumb_layout`], the
     /// size limits, the device's memory budget, system memory,
     /// [`Driver::dumb_object`], the object and its handle in `file`.
@@ -377,6 +422,27 @@ impl<D: Driver> Device<D> {
     /// compatibility layer's `drm_is_current_master`).
     pub fn is_current_master(&self, c: CloneId) -> bool {
         self.state.lock().is_current_master(c)
+    }
+
+    /// What the facade's `drm_file` of open file `c` mirrors (facade 2.0):
+    /// its client capabilities and master status.
+    pub fn file_flags(&self, c: CloneId) -> Option<FileFlags> {
+        self.state.lock().file_flags(c)
+    }
+
+    /// Facade 2.0: the event queues of a Linux-KMS device.
+    pub fn lkms_events(&self) -> Option<&LkmsQueues> {
+        self.lkms.as_ref()
+    }
+
+    /// Passes the state of file `c` that the driver mirrors to it and to
+    /// the event queues, after a change, with the state lock held.
+    fn mirror(&self, s: &DeviceState, c: CloneId) {
+        let Some(f) = s.file_flags(c) else { return };
+        if let Some(q) = &self.lkms {
+            q.set_master(c, f.is_master);
+        }
+        self.driver.file_flags(c, &f);
     }
 
     /// Returns the synchronisation state: the fence domain drivers create
@@ -581,7 +647,23 @@ impl<D: Driver> CharDevice for Device<D> {
         if let Some(k) = &self.kms {
             k.file_open(clone, ctx);
         }
+        if let Some(q) = &self.lkms {
+            let master = self.state.lock().is_current_master(clone);
+            if let Err(e) = q.open(clone, master, ctx) {
+                if let Some(g) = &self.gem {
+                    g.file_close(clone, ctx);
+                }
+                self.sync.file_close(clone, ctx);
+                self.state.lock().close(clone);
+                return Err(e);
+            }
+        }
+        // For a Linux-KMS device the driver's file_open runs the KMS
+        // code's open before the driver's own (lkms::open_file).
         if let Err(e) = self.driver.file_open(self, clone, ctx) {
+            if let Some(q) = &self.lkms {
+                q.close(clone);
+            }
             if let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) {
                 k.file_close(clone, drv, ctx);
             }
@@ -608,22 +690,45 @@ impl<D: Driver> CharDevice for Device<D> {
             // sync object state, so that a concurrent open cannot be given
             // the same id while that state still exists (Linux's
             // drm_file_free order; such an open would fail with EBUSY).
-            // Framebuffers hold GEM references: KMS goes before GEM.
-            if let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) {
-                k.file_close(c, drv, ctx);
+            // Framebuffers hold GEM references: KMS goes before GEM. For a
+            // Linux-KMS device the file's queued events go first and the
+            // KMS code's file_close runs before the release (it removes
+            // the file's framebuffers and blobs), lastclose after the last
+            // file (lkms::close_file).
+            let hooks = if self.lkms.is_some() { self.driver.lkms() } else { None };
+            if let Some(q) = &self.lkms {
+                q.begin_close(c);
             }
-            if let Some(g) = &self.gem {
-                g.file_close(c, ctx);
-            }
-            self.sync.file_close(c, ctx);
-            self.driver.file_close(self, c, ctx);
-            self.state.lock().close(c);
+            lkms::close_file(
+                hooks,
+                c.get(),
+                || {
+                    if let (Some(k), Some(drv)) = (&self.kms, self.driver.kms()) {
+                        k.file_close(c, drv, ctx);
+                    }
+                    if let Some(g) = &self.gem {
+                        g.file_close(c, ctx);
+                    }
+                    self.sync.file_close(c, ctx);
+                    self.driver.file_close(self, c, ctx);
+                    if let Some(q) = &self.lkms {
+                        q.close(c);
+                    }
+                    let mut s = self.state.lock();
+                    s.close(c);
+                    s.open_files() == 0
+                },
+                ctx,
+            );
         }
         Ok(())
     }
 
     fn read(&self, minor: Minor, uio: &mut Uio<'_>, _cred: &Cred<'_>, ctx: &Sleepable) -> Result<()> {
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
+        if let Some(q) = &self.lkms {
+            return q.read(c, uio, ctx);
+        }
         self.kms.as_ref().ok_or(Errno::ENXIO)?.read(c, uio, ctx)
     }
 
@@ -639,6 +744,9 @@ impl<D: Driver> CharDevice for Device<D> {
             return self.sync.anon_chpoll(id);
         }
         let c = minor::decode(minor.0).and_then(|d| d.clone).ok_or(Errno::ENXIO)?;
+        if let Some(q) = &self.lkms {
+            return q.chpoll(c);
+        }
         self.kms.as_ref().ok_or(Errno::ENXIO)?.chpoll(c)
     }
 
@@ -690,7 +798,7 @@ impl<D: Driver> CharDevice for Device<D> {
         }
         if let Some(entry) = kmsioctl::lookup(cmd) {
             let a = CoreArg::new(&arg, SizePlan::new(entry.cmd, cmd))?;
-            self.kms_ioctl(entry, c, privileged, &a, ctx)?;
+            self.kms_ioctl(entry, cmd, c, privileged, &a, ctx)?;
             return Ok(0);
         }
         let entry = *ioctl::lookup_driver(self.driver.ioctls(), cmd).ok_or(Errno::ENOTTY)?;
@@ -711,15 +819,27 @@ impl<D: Driver> CharDevice for Device<D> {
 
 impl<D: Driver> Device<D> {
     /// A mode-setting ioctl: the permission check under the device mutex,
-    /// then the KMS layer (`EOPNOTSUPP` for a device without display).
+    /// then the KMS layer (`EOPNOTSUPP` for a device without display), or,
+    /// for a Linux-KMS device, the driver's KMS code with the kernel copy
+    /// of the argument (`cmd` is the caller's command).
     fn kms_ioctl(
         &self,
         entry: &kmsioctl::KmsEntry,
+        cmd: u32,
         c: CloneId,
         privileged: &dyn Fn() -> bool,
         arg: &CoreArg<'_>,
         ctx: &Sleepable,
     ) -> Result<(), Errno> {
+        if self.lkms.is_some() {
+            let nr = u32::from(drm_uapi::ioc::ioc_nr(entry.cmd));
+            return lkms::forward_ioctl(
+                nr,
+                arg,
+                || self.state.lock().permit(c, entry.perm, privileged),
+                |nr, data| self.driver.lkms_ioctl(self, c, (entry.cmd, cmd), nr, data, arg.io(), ctx),
+            );
+        }
         let (caps, master) = {
             let s = self.state.lock();
             s.permit(c, entry.perm, privileged)?;
@@ -839,16 +959,19 @@ impl<D: Driver> Device<D> {
                 s.permit(c, perm, privileged)?;
                 let f = s.file_mut(c).ok_or(Errno::ENXIO)?;
                 f.caps.set(self.driver.info().features, a.get().capability, a.get().value)?;
+                self.mirror(&s, c);
             }
             Op::SetMaster => {
                 let mut s = self.state.lock();
                 s.permit(c, perm, privileged)?;
                 s.set_master(c, privileged, caller_pid(), ctx)?;
+                self.mirror(&s, c);
             }
             Op::DropMaster => {
                 let mut s = self.state.lock();
                 s.permit(c, perm, privileged)?;
                 s.drop_master(c, privileged, caller_pid())?;
+                self.mirror(&s, c);
             }
             Op::GemClose => {
                 let a = UserArg::<uapi::drm_gem_close>::read(arg)?;

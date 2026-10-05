@@ -9,7 +9,9 @@
 //! libdrm 2.4.109 era, with one difference: a capability reports what this
 //! core implements today, not what Linux always implements. Dumb buffers
 //! exist since R1, PRIME and sync objects since R2, `ADDFB2` modifiers and
-//! vblank events since R3; asynchronous and targeted page flips report 0.
+//! vblank events since R3; targeted page flips report 0, and asynchronous
+//! ones 0 unless a Linux-KMS device's mode configuration (facade 2.0) has
+//! them.
 
 use ddi::Errno;
 use drm_uapi as uapi;
@@ -81,7 +83,10 @@ pub fn get_cap(features: Features, mode: &ModeConfig, cap: u64) -> Result<u64, E
         // target flips are not implemented.
         uapi::DRM_CAP_ADDFB2_MODIFIERS => u64::from(mode.fb_modifiers),
         uapi::DRM_CAP_VBLANK_HIGH_CRTC | uapi::DRM_CAP_CRTC_IN_VBLANK_EVENT => 1,
-        uapi::DRM_CAP_ASYNC_PAGE_FLIP | uapi::DRM_CAP_PAGE_FLIP_TARGET => 0,
+        // Facade 2.0: a Linux-KMS device's mode configuration says whether
+        // it flips asynchronously; R3 never does.
+        uapi::DRM_CAP_ASYNC_PAGE_FLIP => u64::from(mode.async_page_flip),
+        uapi::DRM_CAP_PAGE_FLIP_TARGET => 0,
         _ => return Err(Errno::EINVAL),
     })
 }
@@ -193,6 +198,7 @@ mod tests {
             preferred_depth: 24,
             prefer_shadow: true,
             fb_modifiers: true,
+            async_page_flip: true,
         };
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_CURSOR_WIDTH as u64), Ok(256));
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_CURSOR_HEIGHT as u64), Ok(128));
@@ -201,6 +207,9 @@ mod tests {
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_CRTC_IN_VBLANK_EVENT as u64), Ok(1));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_VBLANK_HIGH_CRTC as u64), Ok(1));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_ASYNC_PAGE_FLIP as u64), Ok(0));
+        assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_ASYNC_PAGE_FLIP as u64), Ok(1));
+        assert_eq!(get_cap(Features::GEM, &big, uapi::DRM_CAP_ASYNC_PAGE_FLIP as u64), Err(EOPNOTSUPP));
+        assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_PAGE_FLIP_TARGET as u64), Ok(0));
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_DUMB_PREFERRED_DEPTH as u64), Ok(24));
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_DUMB_PREFER_SHADOW as u64), Ok(1));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_DUMB_PREFERRED_DEPTH as u64), Ok(0));

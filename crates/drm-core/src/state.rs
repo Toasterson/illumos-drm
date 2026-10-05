@@ -73,6 +73,75 @@ impl DrmFile {
     }
 }
 
+/// What the facade's `struct drm_file` of an open file mirrors of its
+/// state (facade 2.0): the client capabilities and whether the file is,
+/// or ever was, its device's master. The core writes it into the file's
+/// structure after every change ([`FileFlags::store`]), for C code that
+/// reads Linux's fields; [`DeviceState`] stays the authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileFlags {
+    /// The client capabilities.
+    pub caps: ClientCaps,
+    /// The file is the current master (Linux's `drm_file.is_master`).
+    pub is_master: bool,
+    /// The file was master at some time (Linux's `drm_file.was_master`).
+    pub was_master: bool,
+}
+
+impl FileFlags {
+    /// The booleans at the start of `struct drm_file`, in Linux's order:
+    /// `stereo_allowed`, `universal_planes`, `atomic`,
+    /// `aspect_ratio_allowed`, `writeback_connectors`,
+    /// `plane_color_pipeline`, `was_master`, `is_master`,
+    /// `supports_virtualized_cursor_plane`. The core refuses the client
+    /// capabilities of the sixth and the last, which stay false.
+    pub fn linux(&self) -> [bool; 9] {
+        let c = &self.caps;
+        [
+            c.stereo_3d,
+            c.universal_planes,
+            c.atomic,
+            c.aspect_ratio,
+            c.writeback_connectors,
+            false,
+            self.was_master,
+            self.is_master,
+            false,
+        ]
+    }
+
+    /// Writes the flags into the facade structure `fp`, one atomic byte
+    /// store per field, so that C code reading them concurrently sees each
+    /// field old or new (a snapshot, as `drm_file.h` documents).
+    ///
+    /// # Safety
+    /// `fp` points to a live `struct drm_file`.
+    pub unsafe fn store(&self, fp: *mut drm_facade_sys::drm_file) {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        let base = fp as *mut u8;
+        for (i, v) in self.linux().into_iter().enumerate() {
+            // SAFETY: the nine booleans are the structure's first nine
+            // bytes (asserted below); the caller's pointer is live, and
+            // AtomicBool has bool's layout.
+            unsafe { AtomicBool::from_ptr(base.add(i).cast::<bool>()).store(v, Ordering::Relaxed) };
+        }
+    }
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    use drm_facade_sys::drm_file as F;
+    assert!(offset_of!(F, stereo_allowed) == 0);
+    assert!(offset_of!(F, universal_planes) == 1);
+    assert!(offset_of!(F, atomic) == 2);
+    assert!(offset_of!(F, aspect_ratio_allowed) == 3);
+    assert!(offset_of!(F, writeback_connectors) == 4);
+    assert!(offset_of!(F, plane_color_pipeline) == 5);
+    assert!(offset_of!(F, was_master) == 6);
+    assert!(offset_of!(F, is_master) == 7);
+    assert!(offset_of!(F, supports_virtualized_cursor_plane) == 8);
+};
+
 /// Who opens a file, as far as the state cares.
 #[derive(Clone, Copy, Debug)]
 pub struct Opener {
@@ -183,6 +252,13 @@ impl DeviceState {
     /// Reports whether `c` is the current master.
     pub fn is_current_master(&self, c: CloneId) -> bool {
         self.current == Some(c)
+    }
+
+    /// What the facade's `drm_file` of open file `c` mirrors
+    /// ([`FileFlags`]).
+    pub fn file_flags(&self, c: CloneId) -> Option<FileFlags> {
+        let f = self.file(c)?;
+        Some(FileFlags { caps: f.caps, is_master: self.is_current_master(c), was_master: f.was_master })
     }
 
     /// Registers a new open file and returns its clone id. Fails with
@@ -688,6 +764,77 @@ mod tests {
         assert_eq!(s.permit(m, ROOT_AUTH_MASTER, ask), Err(Errno::EACCES));
         assert_eq!(s.drop_master(m, ask, 2), Err(Errno::EACCES));
         assert_eq!(asked.get(), 2);
+    }
+
+    /// The master snapshot of `drm_file` (facade 2.0) through every
+    /// transition: the first open, SET_MASTER, DROP_MASTER, the close of
+    /// the master, and a later open that becomes master again.
+    #[test]
+    fn file_flags_track_master() {
+        let ctx = ctx();
+        let mut s = DeviceState::new();
+        let flags = |s: &DeviceState, c| {
+            let f: FileFlags = s.file_flags(c).unwrap();
+            (f.is_master, f.was_master)
+        };
+        let a = s.open(user(NodeKind::Primary, 1), &ctx).unwrap();
+        let b = s.open(user(NodeKind::Primary, 2), &ctx).unwrap();
+        let r = s.open(user(NodeKind::Render, 3), &ctx).unwrap();
+        assert_eq!(flags(&s, a), (true, true), "the first open is master");
+        assert_eq!(flags(&s, b), (false, false));
+        assert_eq!(flags(&s, r), (false, false));
+        assert_eq!(s.drop_master(a, || false, 1), Ok(()));
+        assert_eq!(flags(&s, a), (false, true));
+        assert_eq!(s.set_master(b, || true, 2, &ctx), Ok(()));
+        assert_eq!(flags(&s, b), (true, true));
+        assert_eq!(flags(&s, a), (false, true));
+        assert_eq!(s.set_master(a, || false, 1, &ctx), Err(Errno::EBUSY));
+        assert_eq!(flags(&s, a), (false, true), "a refused SET_MASTER changes nothing");
+        assert!(s.close(b));
+        assert!(s.file_flags(b).is_none());
+        assert_eq!(flags(&s, a), (false, true), "the master's close makes nobody master");
+        let c = s.open(user(NodeKind::Primary, 4), &ctx).unwrap();
+        assert_eq!(flags(&s, c), (true, true));
+        // The client capabilities come along.
+        let all = crate::driver::Features::MODESET.union(crate::driver::Features::ATOMIC);
+        s.file_mut(c).unwrap().caps.set(all, uapi_atomic(), 1).unwrap();
+        let f = s.file_flags(c).unwrap();
+        assert_eq!(f.linux(), [false, true, true, true, false, false, true, true, false]);
+        s.check();
+    }
+
+    fn uapi_atomic() -> u64 {
+        u64::from(drm_uapi::DRM_CLIENT_CAP_ATOMIC)
+    }
+
+    /// FileFlags::store writes Linux's booleans in place and nothing else.
+    #[test]
+    fn file_flags_store_into_drm_file() {
+        let mut fp: drm_facade_sys::drm_file = Default::default();
+        fp.pid = 77;
+        fp.client_id = 0x1234;
+        let f = FileFlags {
+            caps: ClientCaps {
+                stereo_3d: true,
+                universal_planes: false,
+                atomic: true,
+                aspect_ratio: false,
+                writeback_connectors: true,
+            },
+            is_master: true,
+            was_master: false,
+        };
+        // SAFETY: a live structure on the stack.
+        unsafe { f.store(&mut fp) };
+        assert!(fp.stereo_allowed && !fp.universal_planes && fp.atomic && !fp.aspect_ratio_allowed);
+        assert!(fp.writeback_connectors && !fp.plane_color_pipeline && !fp.was_master && fp.is_master);
+        assert!(!fp.supports_virtualized_cursor_plane);
+        assert_eq!((fp.pid, fp.client_id), (77, 0x1234));
+        let none = FileFlags::default();
+        // SAFETY: as above.
+        unsafe { none.store(&mut fp) };
+        assert_eq!(none.linux(), [false; 9]);
+        assert!(!fp.stereo_allowed && !fp.atomic && !fp.writeback_connectors && !fp.is_master);
     }
 
     #[test]

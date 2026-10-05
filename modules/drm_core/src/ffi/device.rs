@@ -127,6 +127,8 @@ pub unsafe extern "C" fn drm_dev_illumos_set_mode_config(
         preferred_depth: c.preferred_depth,
         prefer_shadow: c.prefer_shadow,
         fb_modifiers: c.fb_modifiers,
+        // R3 has no asynchronous flips.
+        async_page_flip: false,
     };
     // SAFETY: not registered; the driver's attach is the only user.
     unsafe { core.set_mode_config(m) };
