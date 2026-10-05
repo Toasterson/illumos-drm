@@ -30,6 +30,7 @@
 #include <drm/drm_auth.h>
 #include <drm/drm_device.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_lkms.h>
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_ioctl.h>
@@ -310,7 +311,12 @@ lkpi_drm_dev_register(struct drm_device *dev, unsigned long flags)
 	if (!dev->registered && (ret = (drm_dev_register)(dev, flags)) != 0)
 		return (ret);
 	lkpi_drm_set_kdev(dev);
-	return (0);
+	/*
+	 * Facade 2.0: the driver's mode configuration exists now (Linux
+	 * drivers set it up before drm_dev_register()); start Linux KMS
+	 * for a DRIVER_MODESET device (a no-op otherwise).
+	 */
+	return (drm_dev_illumos_lkms_register(dev));
 }
 
 void

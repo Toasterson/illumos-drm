@@ -22,7 +22,8 @@
 #
 # Environment: CC [gcc], LD [/usr/bin/ld], SYSINC [/usr/include],
 # DDI_MAPFILE (the gate's ddi.mapfile), OUT [./out-linuxkpi], JOBS [2],
-# CROSS [0] (see kflags.sh), SRCS (only these src/ files, for development).
+# CROSS [0] (see kflags.sh), SRCS (only these src/ files, for development),
+# FACADE_MAPFILE [include/drm/drm_facade.mapfile].
 set -u
 export LC_ALL=C
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -34,6 +35,7 @@ OUT=${OUT:-$PWD/out-linuxkpi}
 JOBS=${JOBS:-2}
 CROSS=${CROSS:-0}
 mode=${1:-all}
+FACADE_MAPFILE=${FACADE_MAPFILE:-$REPO/include/drm/drm_facade.mapfile}
 
 rm -rf "$OUT/log"
 mkdir -p "$OUT/obj" "$OUT/log"
@@ -84,7 +86,7 @@ if [ "$mode" = link ] || [ "$mode" = all ]; then
 		echo '};'
 	} > "$OUT/private.mapfile"
 	"$LD" -ztype=kmod -N misc/drm_core -z defs -M "$DDI_MAPFILE" \
-	    -M "$REPO/include/drm/drm_facade.mapfile" -M "$OUT/private.mapfile" \
+	    -M "$FACADE_MAPFILE" -M "$OUT/private.mapfile" \
 	    -o "$OUT/linuxkpi" "$OUT"/obj/*.o || exit 1
 	{
 		echo '#'
@@ -118,7 +120,7 @@ if [ "$mode" = selftest ] || [ "$mode" = all ]; then
 	[ "$mode" = selftest ] && [ ! -f "$OUT/linuxkpi.mapfile" ] &&
 	    { echo "linuxkpi: link the layer first"; exit 1; }
 	"$LD" -ztype=kmod -N misc/linuxkpi -N misc/drm_core -z defs \
-	    -M "$DDI_MAPFILE" -M "$REPO/include/drm/drm_facade.mapfile" \
+	    -M "$DDI_MAPFILE" -M "$FACADE_MAPFILE" \
 	    -M "$OUT/linuxkpi.mapfile" -o "$OUT/$b" "$OUT"/selftest/*.o || exit 1
 	echo "linuxkpi: linked $OUT/$b"
 fi
