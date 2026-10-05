@@ -1,0 +1,87 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH kms 02] registered means the mode-setting objects are registered
+
+Linux sets dev->registered in drm_dev_register() right before
+drm_modeset_register_all(). On illumos the LinuxKPI layer registers the
+device with the DRM core much earlier (devm_drm_dev_alloc(): i915 creates
+GEM objects before its drm_dev_register()), so dev->registered is true
+while i915 creates its static mode objects: every object then tripped the
+"added after registration" warnings, and drm_connector_register() would
+register connectors before drm_modeset_register_all(). The checks read
+drm_kms_dev_registered(dev) instead, which misc/drm_kms sets around
+drm_modeset_register_all()/drm_modeset_unregister_all() (the LinuxKPI
+layer defines it); elsewhere it is dev->registered. Conditional on
+__illumos__.
+
+diff -ru a/drivers/gpu/drm/drm_connector.c b/drivers/gpu/drm/drm_connector.c
+--- a/drivers/gpu/drm/drm_connector.c	2026-10-05 20:28:40.248284828 +0000
++++ b/drivers/gpu/drm/drm_connector.c	2026-10-05 20:28:40.264284962 +0000
+@@ -41,6 +41,10 @@
+ #include <video/cmdline.h>
+ 
+ #include "drm_crtc_internal.h"
++
++#ifndef __illumos__
++#define drm_kms_dev_registered(dev)	((dev)->registered)
++#endif
+ #include "drm_internal.h"
+ 
+ /**
+@@ -811,7 +815,7 @@
+ 
+ 	memset(connector, 0, sizeof(*connector));
+ 
+-	if (dev->registered)
++	if (drm_kms_dev_registered(dev))
+ 		drm_sysfs_hotplug_event(dev);
+ }
+ EXPORT_SYMBOL(drm_connector_cleanup);
+@@ -838,7 +842,7 @@
+ {
+ 	int ret = 0;
+ 
+-	if (!connector->dev->registered)
++	if (!drm_kms_dev_registered(connector->dev))
+ 		return 0;
+ 
+ 	mutex_lock(&connector->mutex);
+diff -ru a/drivers/gpu/drm/drm_mode_object.c b/drivers/gpu/drm/drm_mode_object.c
+--- a/drivers/gpu/drm/drm_mode_object.c	2026-10-05 20:28:40.246284811 +0000
++++ b/drivers/gpu/drm/drm_mode_object.c	2026-10-05 20:28:40.266284979 +0000
+@@ -39,6 +39,9 @@
+ #else
+ #define drm_driver_legacy_load(dev)	((dev)->driver->load != NULL)
+ #endif
++#ifndef __illumos__
++#define drm_kms_dev_registered(dev)	((dev)->registered)
++#endif
+ 
+ /*
+  * Internal function to assign a slot in the object idr and optionally
+@@ -50,7 +53,7 @@
+ {
+ 	int ret;
+ 
+-	WARN_ON(!drm_driver_legacy_load(dev) && dev->registered && !obj_free_cb);
++	WARN_ON(!drm_driver_legacy_load(dev) && drm_kms_dev_registered(dev) && !obj_free_cb);
+ 
+ 	mutex_lock(&dev->mode_config.idr_mutex);
+ 	ret = idr_alloc(&dev->mode_config.object_idr, register_obj ? obj : NULL,
+@@ -113,7 +116,7 @@
+ void drm_mode_object_unregister(struct drm_device *dev,
+ 				struct drm_mode_object *object)
+ {
+-	WARN_ON(!drm_driver_legacy_load(dev) && dev->registered && !object->free_cb);
++	WARN_ON(!drm_driver_legacy_load(dev) && drm_kms_dev_registered(dev) && !object->free_cb);
+ 
+ 	mutex_lock(&dev->mode_config.idr_mutex);
+ 	if (object->id) {
+@@ -253,7 +256,7 @@
+ 		WARN_ON(!drm_driver_legacy_load(dev) &&
+ 			connector->registration_state == DRM_CONNECTOR_REGISTERED);
+ 	} else {
+-		WARN_ON(!drm_driver_legacy_load(dev) && dev->registered);
++		WARN_ON(!drm_driver_legacy_load(dev) && drm_kms_dev_registered(dev));
+ 	}
+ 
+ 	if (count == DRM_OBJECT_MAX_PROPERTY) {

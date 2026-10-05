@@ -149,12 +149,20 @@ drm_kms_lastclose(struct drm_device *dev)
 static int
 drm_kms_register_dev(struct drm_device *dev)
 {
-	return (drm_modeset_register_all(dev));
+	int ret;
+
+	/* Linux's drm_dev_register(): registered, then the objects. */
+	WRITE_ONCE(dev->illumos_kms_registered, true);
+	if ((ret = drm_modeset_register_all(dev)) != 0)
+		WRITE_ONCE(dev->illumos_kms_registered, false);
+	return (ret);
 }
 
 static void
 drm_kms_unregister_dev(struct drm_device *dev)
 {
+	/* Linux's drm_dev_unregister(): unregistered, then the objects. */
+	WRITE_ONCE(dev->illumos_kms_registered, false);
 	drm_modeset_unregister_all(dev);
 }
 

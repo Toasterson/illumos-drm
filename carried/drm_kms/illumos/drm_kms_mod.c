@@ -11,7 +11,7 @@
  * the core hands the device's mode-setting ioctls and file events to this
  * module (facade 2.0, drm_lkms.h).
  *
- * The module has no global state. It depends on misc/drm_core (the
+ * The module's only global state is Linux's connector name IDs. It depends on misc/drm_core (the
  * facade; _init refuses a core whose facade differs from the one this
  * module was compiled against, as the drivers do), misc/linuxkpi (the
  * Linux kernel interfaces; _init checks its ABI) and misc/drm_helpers.
@@ -23,6 +23,10 @@
 #include <linux/module.h>
 #include <lkpi/version.h>
 #include <drm/drm_facade.h>
+
+/* drivers/gpu/drm/drm_crtc_internal.h (drm_core_init() in Linux) */
+extern void drm_connector_ida_init(void);
+extern void drm_connector_ida_destroy(void);
 
 static struct modlmisc drm_kms_modlmisc = {
 	.misc_modops = &mod_miscops,
@@ -43,7 +47,15 @@ _init(void)
 		return (ret);
 	if ((ret = linuxkpi_check("drm_kms", LINUXKPI_ABI)) != 0)
 		return (ret);
-	return (mod_install(&drm_kms_modlinkage));
+	/*
+	 * Linux's drm_core_init(): the per-type connector name IDs
+	 * (drm_connector_enum_list[].ida, "LVDS-1", "VGA-1", ...). Without
+	 * them every drm_connector_init() fails.
+	 */
+	drm_connector_ida_init();
+	if ((ret = mod_install(&drm_kms_modlinkage)) != 0)
+		drm_connector_ida_destroy();
+	return (ret);
 }
 
 int
@@ -55,6 +67,7 @@ _fini(void)
 		return (ret);
 	/* Nothing of the layer may call into this module's text any more. */
 	lkpi_module_quiesce(&drm_kms_modlinkage);
+	drm_connector_ida_destroy();
 	return (0);
 }
 
