@@ -306,6 +306,10 @@ st_vm_worker(struct st_worker *w)
 		if (va == NULL) {
 			errors++;
 		} else {
+			/* i915 unmaps an object's mapping only if this holds. */
+			if (!is_vmalloc_addr(va) ||
+			    !is_vmalloc_addr(va + 3 * PAGE_SIZE + 10))
+				errors++;
 			if (((u32 *)va)[0] != ST_PAT_A ||
 			    ((u32 *)(va + PAGE_SIZE))[5] != ST_PAT_B ||
 			    ((u32 *)(va + 2 * PAGE_SIZE))[7] != ST_PAT_A ||
@@ -320,7 +324,7 @@ st_vm_worker(struct st_worker *w)
 
 		/* Contiguous write-back: the pages' own address. */
 		wb = vmap(t->shm, 4, VM_MAP, PAGE_KERNEL);
-		if (wb != page_address(t->shm[0]))
+		if (wb != page_address(t->shm[0]) || !is_vmalloc_addr(wb))
 			errors++;
 		if (wb != NULL)
 			vunmap(wb);
@@ -398,6 +402,20 @@ st_vmap(void)
 	    errors == 0);
 	if (errors < 0)
 		return;
+
+	/* is_vmalloc_addr(): live mappings only (i915's unmap_object()). */
+	va = vmap(t->heap, 4, VM_MAP, PAGE_KERNEL);
+	CHECK("is_vmalloc_addr() of a vmap() address",
+	    va != NULL && is_vmalloc_addr(va));
+	if (va != NULL) {
+		vunmap(va);
+		CHECK("is_vmalloc_addr() after vunmap() is false",
+		    !is_vmalloc_addr(va));
+	}
+	va = kmalloc(64, GFP_KERNEL);
+	CHECK("is_vmalloc_addr() of kmalloc() memory is false",
+	    va != NULL && !is_vmalloc_addr(va));
+	kfree(va);
 
 	/* VM_MAP_PUT_PAGES: vfree() puts the pages and frees the array. */
 	arr = kmalloc_array(2, sizeof (*arr), GFP_KERNEL);

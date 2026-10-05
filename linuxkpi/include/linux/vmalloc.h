@@ -34,7 +34,16 @@
 #define	vmalloc_array(n, size)		vmalloc(size_mul((n), (size)))
 #define	vcalloc(n, size)		vzalloc(size_mul((n), (size)))
 #define	vfree(p)			lkpi_kfree(p)
-#define	is_vmalloc_addr(p)		false
+/*
+ * Linux: an address inside the vmalloc area. Here: inside a live vmap() or
+ * vmap_pfn() mapping (including the contiguous ones that are the pages' own
+ * address), so that a caller that unmaps only what it mapped does so: i915's
+ * unmap_object() calls vunmap() only when this is true (with "false", every
+ * pinned mapping of a GEM object outlived its freed pages). vmalloc() memory
+ * is kmem here and answers false; vfree() and kvfree() free either kind.
+ */
+extern bool lkpi_is_vmap_addr(const void *addr);
+#define	is_vmalloc_addr(p)		lkpi_is_vmap_addr(p)
 
 /* No vmap-space pressure notifications on illumos: nothing to register. */
 #define	register_vmap_purge_notifier(nb)	((void)(nb), 0)
