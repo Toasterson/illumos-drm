@@ -1,0 +1,38 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# IPS manifest of the virtio-gpu DRM driver (drivers/virtio-gpu). Publish
+# from a directory holding the linked module as kernel/drv/amd64/virtio_gpu
+# (tools/test/run-r4-test.sh links it), this repository's LICENSE and
+# packaging/xorg.conf.d:
+#
+#   pkgsend publish -s <repo> -d <proto> -d . packaging/virtio-gpu.p5m
+#
+# The driver action binds the module to the modern virtio-gpu PCI function
+# (1af4:1050) and gives the card and render nodes mode 0666, as other DRM
+# drivers on OpenIndiana have. The devlink attribute makes devfsadm create
+# /dev/dri/card<N> and /dev/dri/renderD<128+N> where the SUNW_drm_link
+# module of driver/graphics/drm is not installed (see devlink.tab).
+#
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/virtio-gpu@0.0.1,5.11-2026.0.0.0
+set name=pkg.summary value="virtio-gpu DRM driver (Rust)"
+set name=pkg.description value="The illumos-drm Rust driver for the virtio GPU device of QEMU and other hypervisors: kernel mode setting with EDID and a cursor, and virgl 3D acceleration through the host's virglrenderer for Mesa's virtio_gpu driver."
+set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
+set name=info.source-url value=https://code.aopc.cloud/illumos/illumos-drm
+set name=variant.arch value=i386
+set name=org.opensolaris.consolidation value=userland
+dir  path=etc owner=root group=sys mode=0755
+dir  path=etc/X11 owner=root group=bin mode=0755
+dir  path=etc/X11/xorg.conf.d owner=root group=bin mode=0755
+file path=etc/X11/xorg.conf.d/20-virtio-gpu.conf \
+    owner=root group=bin mode=0644 preserve=renamenew \
+    original_name=driver/graphics/virtio-gpu:etc/X11/xorg.conf.d/20-virtio-gpu.conf
+dir  path=kernel owner=root group=sys mode=0755
+dir  path=kernel/drv owner=root group=sys mode=0755
+dir  path=kernel/drv/amd64 owner=root group=sys mode=0755
+file path=kernel/drv/amd64/virtio_gpu owner=root group=sys mode=0755 reboot-needed=true
+driver name=virtio_gpu alias=pci1af4,1050 perms="* 0666 root sys" \
+    devlink=type=ddi_display:drm;name=virtio_gpu\tdri/\M0
+license LICENSE license=MPL-2.0

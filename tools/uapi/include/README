@@ -1,0 +1,14 @@
+virtgpu_drm.h
+
+Source: Linux v6.12, include/uapi/drm/virtgpu_drm.h, unchanged
+(https://raw.githubusercontent.com/torvalds/linux/v6.12/include/uapi/drm/virtgpu_drm.h,
+SHA-256 7280341d812e0e9ecfddaafd2a3fb0d5a748873ddf3e0f253dd52c8c2a04bdd7).
+Licence: MIT, as stated in the header itself ("Copyright 2013 Red Hat").
+
+tools/uapi/generate.sh copies it over the virtgpu_drm.h of libdrm 2.4.109,
+which lacks DRM_VIRTGPU_RESOURCE_CREATE_BLOB, DRM_VIRTGPU_CONTEXT_INIT, the
+VIRTGPU_PARAM_* values after CAPSET_QUERY_FIX and the sync object arrays of
+struct drm_virtgpu_execbuffer. The header is the ABI the kernel accepts;
+the older 32-byte (libdrm 2.4.109, Linux 5.15 and earlier) and 40-byte
+(Mesa 21.3's copy, Linux 5.16 to 6.5) EXECBUFFER layouts are in
+crates/drm-uapi/src/virtgpu_compat.rs.

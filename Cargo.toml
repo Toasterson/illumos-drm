@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull", "xtask"]
-default-members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull"]
+members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull", "drivers/virtio-gpu", "xtask"]
+default-members = ["crates/drm-uapi", "crates/drm", "examples/rdrmnull", "drivers/virtio-gpu"]
 
 [workspace.package]
 version = "0.0.1"
@@ -13,15 +13,15 @@ rust-version = "1.97"
 [workspace.dependencies]
 drm-uapi = { path = "crates/drm-uapi" }
 drm = { path = "crates/drm" }
-# illumos-ddi at the head of its r2-private-fd branch: its r3-kms-glue
-# branch (clone opens, the devmap(9E) entry point, OwnNode, and chpoll(9E)
-# in the CharDevice glue with pinned pollheads, which the KMS event queue
-# needs) plus the private tier (file descriptors for dma-bufs, sync
-# objects and sync files), the segmap(9E) check, PollBox and the
-# thread-context drop rule for pollheads. Move the pin to the merge commit
-# on illumos-ddi main once those branches are merged.
-ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "faec57598b4b73fbf8f2971871a62ad5737a39d7" }
-ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "faec57598b4b73fbf8f2971871a62ad5737a39d7", default-features = false }
+# illumos-ddi at the head of its r4-virtio branch: its r2-private-fd
+# branch (clone opens, the devmap(9E) entry point, OwnNode, chpoll(9E),
+# the private tier for dma-bufs, sync objects and sync files, PollBox)
+# plus the private crate for the virtio framework and its safe wrapper
+# ddi::private::virtio (feature unstable-gate-cda5b9a49f-virtio), which the
+# virtio-gpu driver needs. Move the pin to the merge commit on
+# illumos-ddi main once those branches are merged.
+ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "be7845567053f61a635f9d47176676e6f0cd05ff" }
+ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "be7845567053f61a635f9d47176676e6f0cd05ff", default-features = false }
 serde_json = "1"
 
 # Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug

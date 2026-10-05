@@ -145,7 +145,7 @@ fn add_fb(m: &Mock, k: &mut KmsCore<Buf>, file: u32, w: u32, h: u32, format: u32
     let r = req(w, h, format);
     k.check_fb(&r, m).unwrap();
     let size = u64::from(r.pitches[0]) * u64::from(h);
-    k.add_fb(Some(file), &r, [Some(m.buf(size)), None, None, None], (0, 0), false, &ctx()).unwrap().id
+    k.add_fb(FbOwner::File(file), &r, [Some(m.buf(size)), None, None, None], (0, 0), false, &ctx()).unwrap().id
 }
 
 fn ids(k: &KmsCore<Buf>) -> (u32, u32, u32, u32, u32) {
@@ -237,8 +237,14 @@ fn framebuffers_and_modifiers() {
     assert_eq!(k.check_fb(&r, &m), Ok(1));
     assert_eq!(k.check_fb(&req(64, 64, NV12), &m), Err(Errno::EINVAL), "no plane scans NV12 out");
     // An object too small for the image.
-    let small =
-        k.add_fb(Some(FILE), &req(64, 64, XRGB8888), [Some(m.buf(100)), None, None, None], (0, 0), false, &ctx());
+    let small = k.add_fb(
+        FbOwner::File(FILE),
+        &req(64, 64, XRGB8888),
+        [Some(m.buf(100)), None, None, None],
+        (0, 0),
+        false,
+        &ctx(),
+    );
     assert_eq!(small.err(), Some(Errno::EINVAL));
     assert_eq!(m.released.load(Ordering::SeqCst), 1, "the object reference goes back");
     let a = add_fb(&m, &mut k, FILE, 64, 64, XRGB8888);
@@ -561,4 +567,53 @@ fn gamma() {
     assert_eq!(k.set_gamma(23, 256, &lut[..10], &m), Err(Errno::EINVAL));
     k.set_gamma(23, 256, &lut, &m).unwrap();
     assert_eq!(k.get_gamma(23, 256).unwrap().2[0], 512);
+}
+
+/// Closing the file whose framebuffer the primary plane shows turns the
+/// CRTC off and every other plane on it: a legacy cursor, whose internal
+/// framebuffer belongs to no file, does not stay on the dark CRTC with its
+/// buffer referenced (modetest -C left one, which refused virtio_gpu's
+/// detach on 30 September 2026).
+#[test]
+fn close_turns_off_the_cursor_of_the_crtc_it_turns_off() {
+    let (m, mut k) = setup();
+    let (crtc, ..) = ids(&k);
+    let fb = add_fb(&m, &mut k, FILE, 1024, 768, XRGB8888);
+    let mut st = modeset_state(&mut k, fb, true).unwrap();
+    k.check(&mut st, 0, &m).unwrap();
+    let done = k.commit(st, &m, &ctx());
+    super::core::release_old(done.old, &ctx());
+    let r = req(64, 64, ARGB8888);
+    let cfb = k
+        .add_fb(FbOwner::Cursor(FILE), &r, [Some(m.buf(64 * 64 * 4)), None, None, None], (0, 0), false, &ctx())
+        .unwrap();
+    let mut st = k.cursor(crtc, Some(Some(cfb)), Some((5, 5))).unwrap();
+    k.check(&mut st, 0, &m).unwrap();
+    let done = k.commit(st, &m, &ctx());
+    super::core::release_old(done.old, &ctx());
+    assert_eq!(k.counts().0, 2, "the file's framebuffer and the internal cursor one");
+    k.file_close(FILE, &m, &ctx()).unwrap();
+    assert!(k.cur.planes.iter().all(|p| p.fb.is_none() && p.crtc.is_none()), "no plane left on");
+    assert_eq!(k.detach_check(&ctx()), Ok(()), "no framebuffer left referenced");
+}
+
+#[test]
+fn close_turns_off_the_legacy_cursors_the_file_set() {
+    let (m, mut k) = setup();
+    let (crtc, ..) = ids(&k);
+    let r = req(64, 64, ARGB8888);
+    // A cursor on a CRTC that is off (never turned on, or turned off by
+    // SETCRTC, which keeps the cursor as Linux does).
+    let cfb = k.add_fb(FbOwner::Cursor(OTHER), &r, [Some(m.buf(64 * 64 * 4)), None, None, None], (0, 0), true, &ctx());
+    let mut st = k.cursor(crtc, Some(Some(cfb.unwrap())), Some((5, 5))).unwrap();
+    k.check(&mut st, 0, &m).unwrap();
+    let done = k.commit(st, &m, &ctx());
+    super::core::release_old(done.old, &ctx());
+    assert!(k.cur.planes.iter().any(|p| p.fb.is_some()), "the cursor is on");
+    k.file_close(FILE, &m, &ctx()).unwrap();
+    assert!(k.cur.planes.iter().any(|p| p.fb.is_some()), "another file's close leaves it");
+    assert_eq!(k.detach_check(&ctx()), Err(1));
+    k.file_close(OTHER, &m, &ctx()).unwrap();
+    assert!(k.cur.planes.iter().all(|p| p.fb.is_none() && p.crtc.is_none()), "no plane left on");
+    assert_eq!(k.detach_check(&ctx()), Ok(()), "no framebuffer left referenced");
 }

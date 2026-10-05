@@ -5,17 +5,18 @@ version = 4
 [[package]]
 name = "ddi"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=faec57598b4b73fbf8f2971871a62ad5737a39d7#faec57598b4b73fbf8f2971871a62ad5737a39d7"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=be7845567053f61a635f9d47176676e6f0cd05ff#be7845567053f61a635f9d47176676e6f0cd05ff"
 dependencies = [
  "ddi-sys",
  "illumos-kernel-private-sys",
+ "illumos-kernel-private-virtio-sys",
  "zerocopy",
 ]
 
 [[package]]
 name = "ddi-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=faec57598b4b73fbf8f2971871a62ad5737a39d7#faec57598b4b73fbf8f2971871a62ad5737a39d7"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=be7845567053f61a635f9d47176676e6f0cd05ff#be7845567053f61a635f9d47176676e6f0cd05ff"
 
 [[package]]
 name = "drm"
@@ -32,7 +33,15 @@ version = "0.0.1"
 [[package]]
 name = "illumos-kernel-private-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=faec57598b4b73fbf8f2971871a62ad5737a39d7#faec57598b4b73fbf8f2971871a62ad5737a39d7"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=be7845567053f61a635f9d47176676e6f0cd05ff#be7845567053f61a635f9d47176676e6f0cd05ff"
+dependencies = [
+ "ddi-sys",
+]
+
+[[package]]
+name = "illumos-kernel-private-virtio-sys"
+version = "0.0.1"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=be7845567053f61a635f9d47176676e6f0cd05ff#be7845567053f61a635f9d47176676e6f0cd05ff"
 dependencies = [
  "ddi-sys",
 ]
@@ -145,6 +154,15 @@ name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+
+[[package]]
+name = "virtio_gpu"
+version = "0.0.1"
+dependencies = [
+ "ddi",
+ "drm",
+ "drm-uapi",
+]
 
 [[package]]
 name = "xtask"

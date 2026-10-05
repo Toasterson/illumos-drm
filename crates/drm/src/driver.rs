@@ -228,6 +228,24 @@ pub trait Driver: Send + Sync + Sized + 'static {
         dumb::standard_layout(req)
     }
 
+    /// Makes the object of a new dumb buffer from its memory, after
+    /// [`Driver::dumb_layout`] accepted `req` with `layout`. The default
+    /// converts the memory with `From`; a driver whose objects need more
+    /// (virtio-gpu creates a host resource for each) does that here. An
+    /// error fails `MODE_CREATE_DUMB` and frees the memory.
+    #[cfg(not(test))]
+    fn dumb_object(
+        &self,
+        dev: &crate::Device<Self>,
+        mem: crate::gem::SysMem,
+        req: &DumbRequest,
+        layout: &DumbLayout,
+        ctx: &ddi::Sleepable,
+    ) -> Result<Self::Object, Errno> {
+        let _ = (dev, req, layout, ctx);
+        Ok(Self::Object::from(mem))
+    }
+
     /// Handles one of [`Driver::IOCTLS`], after the core has checked its
     /// permission flags. `file` is the calling file; `arg` is the ioctl
     /// argument, copied with [`crate::uaccess`].
@@ -263,6 +281,14 @@ pub trait Driver: Send + Sync + Sized + 'static {
     fn fence_priority(&self) -> Option<ddi::IntrPriority> {
         None
     }
+
+    /// Called in `close(9E)` of file `file` after the core released the
+    /// file's mode-setting state, GEM handles and sync objects, before its
+    /// clone id is freed (Linux's `postclose`): a driver drops its
+    /// per-file state here (virtio-gpu destroys the file's rendering
+    /// context).
+    #[cfg(not(test))]
+    fn file_close(&self, _dev: &crate::Device<Self>, _file: crate::minor::CloneId, _ctx: &ddi::Sleepable) {}
 
     /// Called in `detach(9E)` once no file is open, before the core checks
     /// whether the detach can proceed: the driver drops the references it

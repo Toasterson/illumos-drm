@@ -28,7 +28,7 @@ jobs:
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo clippy --workspace --target x86_64-unknown-illumos --features rdrmnull/panic-drill -- -D warnings
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo fmt --all -- --check
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude xtask --no-deps --target x86_64-unknown-illumos
-      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo test -p drm -p drm-uapi
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo test -p drm -p drm-uapi && cargo test -p virtio_gpu --no-default-features
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo xtask uapi-check tools/uapi/drm_layout.oibldofgate.out
 
   kmod-illumos:
@@ -49,3 +49,14 @@ jobs:
           ld -ztype=kmod -N fs/specfs -z allextract
           target/x86_64-illumos-kmod/release/rdrmnull.a -o target/rdrmnull &&
           elfdump -d target/rdrmnull | grep SUNW_KMOD && nm -u target/rdrmnull
+      # The virtio-gpu driver: built and linked as a kernel module against
+      # the virtio framework (misc/virtio) and specfs.
+      - run: >
+          export PATH="$HOME/.cargo/bin:$PATH" && export SCCACHE_STARTUP_TIMEOUT=60 &&
+          cargo +nightly-2026-04-16 build --locked -p virtio_gpu --release
+          --target targets/x86_64-illumos-kmod.json
+          -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
+      - run: >
+          ld -ztype=kmod -N misc/virtio -N fs/specfs -z allextract
+          target/x86_64-illumos-kmod/release/virtio_gpu.a -o target/virtio_gpu &&
+          elfdump -d target/virtio_gpu | grep SUNW_KMOD && nm -u target/virtio_gpu

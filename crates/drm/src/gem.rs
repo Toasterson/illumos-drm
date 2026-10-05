@@ -751,6 +751,27 @@ pub trait GemObject: Send + Sync + Sized + 'static {
     fn access(&self, _m: &Mapping, fault: &Fault) -> c_int {
         fault.default_access()
     }
+    /// Called before a handle to the object is created in file `file`
+    /// (Linux's `drm_gem_object_funcs.open`), with no GEM lock held; an
+    /// error fails the handle's creation. Once per handle: a file may hold
+    /// several handles to one object.
+    fn handle_opened(&self, file: CloneId, ctx: &Sleepable) -> Result<(), Errno> {
+        let _ = (file, ctx);
+        Ok(())
+    }
+    /// Called after a handle of file `file` to the object was removed
+    /// (Linux's `drm_gem_object_funcs.close`), with no GEM lock held, and
+    /// for a handle whose creation failed after
+    /// [`GemObject::handle_opened`] succeeded.
+    fn handle_closed(&self, file: CloneId, ctx: &Sleepable) {
+        let _ = (file, ctx);
+    }
+    /// Called when the object is destroyed, in thread context, before its
+    /// memory is freed: a device driver tells the device to stop using the
+    /// memory here (virtio-gpu's `RESOURCE_UNREF`) and waits for it.
+    fn release(&mut self, ctx: &Sleepable) {
+        let _ = ctx;
+    }
 }
 
 impl GemObject for SysMem {
@@ -838,6 +859,13 @@ impl<O: GemObject> Drop for GemInner<O> {
         self.core.stats.memory.fetch_sub(self.obj.memory_bytes() as u64, Ordering::Relaxed);
         self.core.stats.segments.fetch_sub(self.obj.dma_segments() as u64, Ordering::Relaxed);
         self.core.publish();
+        // SAFETY: objects are destroyed in thread context only: the last
+        // reference goes through GemRef::put (Sleepable), or is parked and
+        // destroyed by the task queue or another thread-context entry point
+        // (see the module documentation); a creation that fails drops the
+        // new object in its creator's thread context.
+        let ctx = unsafe { Sleepable::assume() };
+        self.obj.release(&ctx);
         // `obj` is dropped after this, which frees its memory.
     }
 }
@@ -1387,7 +1415,7 @@ impl<O: GemObject> GemCore<O> {
         if let Some(fg) = fg {
             loop {
                 let Some((_, r)) = fg.handles.lock().pop_first() else { break };
-                self.handle_released(r, ctx);
+                self.handle_released(clone, r, ctx);
             }
             drop(fg);
         }
@@ -1471,6 +1499,10 @@ impl<O: GemObject> GemCore<O> {
                 return Err(e);
             }
         };
+        if let Err(e) = obj.object().handle_opened(clone, ctx) {
+            obj.put(ctx);
+            return Err(e);
+        }
         let r = {
             let mut names = self.names.lock();
             let mut handles = fg.handles.lock();
@@ -1483,6 +1515,7 @@ impl<O: GemObject> GemCore<O> {
                 Ok(h)
             }
             Err((obj, e)) => {
+                obj.object().handle_closed(clone, ctx);
                 obj.put(ctx);
                 Err(e)
             }
@@ -1502,13 +1535,14 @@ impl<O: GemObject> GemCore<O> {
         self.housekeeping(ctx);
         let fg = self.file(clone)?;
         let r = objects::handle_delete(&mut fg.handles.lock(), handle)?;
-        self.handle_released(r, ctx);
+        self.handle_released(clone, r, ctx);
         self.publish();
         Ok(())
     }
 
-    fn handle_released(&self, r: GemRef<O>, ctx: &Sleepable) {
+    fn handle_released(&self, clone: CloneId, r: GemRef<O>, ctx: &Sleepable) {
         let name_ref = objects::handle_released(&mut self.names.lock(), &r);
+        r.object().handle_closed(clone, ctx);
         self.stats.handles.fetch_sub(1, Ordering::Relaxed);
         if name_ref.is_some() {
             self.stats.names.fetch_sub(1, Ordering::Relaxed);
@@ -1541,12 +1575,20 @@ impl<O: GemObject> GemCore<O> {
     pub fn open_name(&self, clone: CloneId, name: u32, ctx: &Sleepable) -> Result<(u32, u64), Errno> {
         self.housekeeping(ctx);
         let fg = self.file(clone)?;
-        let (res, size) = {
+        // The driver's hook may block, so it runs between two critical
+        // sections: the reference taken in the first keeps the object alive
+        // if its name goes away meanwhile, as a concurrent GEM_CLOSE of
+        // the last other handle could make it.
+        let o = objects::open(&self.names.lock(), name)?;
+        let size = o.size() as u64;
+        if let Err(e) = o.object().handle_opened(clone, ctx) {
+            o.put(ctx);
+            return Err(e);
+        }
+        let res = {
             let mut names = self.names.lock();
-            let o = objects::open(&names, name)?;
-            let size = o.size() as u64;
             let mut handles = fg.handles.lock();
-            (objects::handle_create(&mut names, &mut handles, o, ctx), size)
+            objects::handle_create(&mut names, &mut handles, o, ctx)
         };
         match res {
             Ok(h) => {
@@ -1555,6 +1597,7 @@ impl<O: GemObject> GemCore<O> {
                 Ok((h, size))
             }
             Err((o, e)) => {
+                o.object().handle_closed(clone, ctx);
                 o.put(ctx);
                 Err(e)
             }
@@ -1744,6 +1787,12 @@ impl<O: GemObject> GemCore<O> {
                 return Err(e);
             }
         };
+        // The driver's hook may block, so it runs before the lookup; if the
+        // file already has a handle, the hook's work is undone.
+        if let Err(e) = obj.object().handle_opened(clone, ctx) {
+            obj.put(ctx);
+            return Err(e);
+        }
         let r = {
             let mut names = self.names.lock();
             let mut handles = fg.handles.lock();
@@ -1760,10 +1809,12 @@ impl<O: GemObject> GemCore<O> {
                 Ok(h)
             }
             Ok(Err((h, obj))) => {
+                obj.object().handle_closed(clone, ctx);
                 obj.put(ctx);
                 Ok(h)
             }
             Err((obj, e)) => {
+                obj.object().handle_closed(clone, ctx);
                 obj.put(ctx);
                 Err(e)
             }

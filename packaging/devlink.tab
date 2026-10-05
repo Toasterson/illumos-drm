@@ -18,3 +18,7 @@
 # misc_link module would add /dev/fbs/<minor> and /dev/fb<N> console
 # framebuffer links for every such node.
 type=ddi_display:drm;name=rdrmnull	dri/\M0
+
+# The same for virtio_gpu (drivers/virtio-gpu), whose package delivers it
+# with the devlink attribute of its driver action (packaging/virtio-gpu.p5m).
+type=ddi_display:drm;name=virtio_gpu	dri/\M0
