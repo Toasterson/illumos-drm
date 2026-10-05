@@ -23,6 +23,12 @@
 //! References to objects can be dropped in interrupt context
 //! ([`defer`]).
 //!
+//! Since milestone R3 it does kernel mode setting ([`kms`]): mode objects
+//! and properties, framebuffers and blobs, atomic commits with the legacy
+//! ioctls built on them, vblank counters and events read through `read(2)`
+//! and `poll(2)`, and EDID parsing, for drivers that implement
+//! [`kms::KmsDriver`] and return it from [`Driver::kms`].
+//!
 //! The handle and name tables are `alloc::collections::BTreeMap`s, so the
 //! driver module must provide a global allocator: enable the
 //! `global-alloc-sleep` feature of the `ddi` crate, as `rdrmnull` does. The
@@ -79,6 +85,7 @@ pub mod idmap;
 pub mod ioctl;
 pub mod karc;
 mod kmem;
+pub mod kms;
 pub mod kvec;
 pub mod minor;
 pub mod objects;

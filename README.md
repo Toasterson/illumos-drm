@@ -19,7 +19,7 @@ R4 (virtio-gpu) and R5 (C interface).
 
 ## Where things stand
 
-Milestones R0 and R1 work.
+Milestones R0, R1 and R3 work.
 
 R0 (uAPI, device registration, per-file state, core ioctls): on 28
 September 2026 the test driver `rdrmnull` was built for the kernel target,
@@ -59,6 +59,30 @@ mapping and byte of object memory back at zero before the module unloads,
 and the vmem arenas and identifier spaces of the device disappear with it.
 The refault experiment below worked.
 
+R3 (kernel mode setting), on 29 September 2026 on a disposable Hipster
+guest with the same kernel (`illumos-cda5b9a49f`): `rdrmnull` has one
+virtual connector with a synthesized EDID, one encoder, one CRTC with a
+primary and a cursor plane, a software vblank at the mode's refresh rate
+and a software scanout. libdrm's `modetest` (package `system/test/libdrm`,
+gfx-drm's build of the libdrm 2.4.109 tests) lists every object with its
+properties and decodes the `IN_FORMATS` blobs, sets 1024x768 with a dumb
+framebuffer (`-s`), page-flips at 60.00 Hz with vblank events (`-v`) and
+sets the mode and primary plane through the atomic ioctl (`-a`).
+`tools/test/drm_r3_test.c` (180 checks) covers mode objects, properties
+and their get/set round trips, blobs, `ADDFB`/`ADDFB2`/`GETFB`/`GETFB2`
+(an unsupported modifier is `EINVAL`), `TEST_ONLY` that changes nothing,
+real commits with page-flip events read through `poll(2)` and `read(2)`,
+the checksum of what the scanout shows after each flip, the legacy
+wrappers, the vblank rate (60.07 Hz measured, timestamps 16.665 ms apart),
+`WAIT_VBLANK` and CRTC sequence events, the 4096-byte event budget, close
+semantics, four threads querying while the master flips, and the `kms` and
+`gem` kstats back at their idle values before the module unloads. The R0
+and R1 tests pass unchanged apart from the two capabilities R3 turns on.
+A detach refused while `rdrmnull` holds a GEM object leaves the display
+working: after the refused `modunload`, `modetest` lists it and
+page-flips with vblank events at 60 Hz, and the module unloads once the
+object is released (29 September 2026, same guest image).
+
 ## What is in the repository
 
 `crates/drm-uapi` is the DRM userland interface as Rust types: the
@@ -86,12 +110,19 @@ device with a card and a render node, has dumb buffers in system memory
 and three test-only private ioctls (movable objects for the refault
 experiment, and a reference dropped from a timer), and is the kernel
 module the core is tested with, as well as the template for a real driver.
+Since R3 it also has a virtual display (`examples/rdrmnull/src/kms.rs`)
+and two more test-only ioctls: one reports what its software scanout
+shows, the other keeps a reference to an object across the close of every
+file, so that the R3 test can check that a refused detach leaves the
+device working.
 
 `xtask` builds and links kernel modules and checks interfaces (see below).
 `tools/uapi` regenerates `drm-uapi` and holds the C half of the layout
-check. `tools/test` holds the libdrm test programs of R0 and R1 and the
+check. `tools/test` holds the libdrm test programs of R0, R1 and R3 and the
 scripts that link, load, test and unload `rdrmnull` on an illumos machine
-(`run-r1-test.sh` runs both tests).
+(`run-r1-test.sh` runs R0 and R1, `run-r3-test.sh` runs those, the R3 test
+and `modetest`). `crates/drm/tests/edid` holds the EDID test blobs and
+`gen_edid.py`, which synthesizes them.
 `packaging/devlink.tab` is the `/dev/dri` link rule for packages.
 
 ## Decisions
@@ -297,7 +328,8 @@ Linux's 32-bit size limit; every overflow is `EINVAL`. The default layout
 size up to a page. `MAP_DUMB` and `GEM_CLOSE` ignore `pad`, as Linux does,
 since userland has never been required to clear it. `DRM_CAP_DUMB_BUFFER` is 1 for drivers with `Features::GEM` and
 `Features::DUMB`, and `DUMB_PREFERRED_DEPTH` and `DUMB_PREFER_SHADOW` report
-the driver's `ModeConfig`; `ADDFB2_MODIFIERS` stays 0 until R3.
+the driver's `ModeConfig`; `ADDFB2_MODIFIERS` reports the driver's
+`ModeConfig` since R3.
 
 **The refault experiment (R1).** Movable objects (TTM-like, needed for VRAM
 drivers in R5) must invalidate user mappings when their memory moves and
@@ -328,8 +360,8 @@ mapping with per-page patterns, before and after the pieces settle.
 | Ioctl | Allowed for | Notes |
 | --- | --- | --- |
 | `VERSION` | all files, render too | strings copied up to the caller's lengths, full lengths returned |
-| `GET_CAP` | all files, render too | `TIMESTAMP_MONOTONIC` 1; `PRIME`, `SYNCOBJ`, `SYNCOBJ_TIMELINE` 0 until R2; `DUMB_BUFFER` 1 with `GEM` and `DUMB`; vblank and page-flip capabilities 0 until R3; `CURSOR_WIDTH/HEIGHT`, `DUMB_PREFERRED_DEPTH` and `DUMB_PREFER_SHADOW` from the driver's `ModeConfig`; `ADDFB2_MODIFIERS` 0 until `ADDFB2` exists (R3), whatever the `ModeConfig`; everything else `EOPNOTSUPP` for a driver without `MODESET`, unknown `EINVAL` otherwise |
-| `SET_CLIENT_CAP` | primary | `STEREO_3D`, `UNIVERSAL_PLANES`, `ATOMIC` (needs `Features::ATOMIC`, also sets universal planes and aspect ratio, values 0 to 2), `ASPECT_RATIO`, `WRITEBACK_CONNECTORS` (needs `ATOMIC` first), values 0 or 1; Linux's refusal of `ATOMIC` = 1 to processes named `X*` needs the process name and comes with R3 |
+| `GET_CAP` | all files, render too | `TIMESTAMP_MONOTONIC` 1; `PRIME`, `SYNCOBJ`, `SYNCOBJ_TIMELINE` 0 until R2; `DUMB_BUFFER` 1 with `GEM` and `DUMB`; `VBLANK_HIGH_CRTC` and `CRTC_IN_VBLANK_EVENT` 1, `ASYNC_PAGE_FLIP` and `PAGE_FLIP_TARGET` 0 (R3); `CURSOR_WIDTH/HEIGHT`, `DUMB_PREFERRED_DEPTH`, `DUMB_PREFER_SHADOW` and `ADDFB2_MODIFIERS` from the driver's `ModeConfig`; everything else `EOPNOTSUPP` for a driver without `MODESET`, unknown `EINVAL` otherwise |
+| `SET_CLIENT_CAP` | primary | `STEREO_3D`, `UNIVERSAL_PLANES`, `ATOMIC` (needs `Features::ATOMIC`, also sets universal planes and aspect ratio, values 0 to 2), `ASPECT_RATIO`, `WRITEBACK_CONNECTORS` (needs `ATOMIC` first), values 0 or 1; Linux's refusal of `ATOMIC` = 1 to processes named `X*` needs the process name, which no committed DDI interface provides; not implemented |
 | `GET_UNIQUE` | primary | empty until the master sets interface 1.1 or later or calls `SET_UNIQUE`, as `drmOpenByName` expects |
 | `SET_UNIQUE` | authenticated master with `PRIV_SYS_DEVICES` | only the device's own bus ID, once (`EBUSY` after) |
 | `SET_VERSION` | master | interface 1.0 to 1.4, driver version checked; versions reported back in every case |
@@ -344,6 +376,7 @@ mapping with per-page patterns, before and after the pieces settle.
 | `MODE_CREATE_DUMB` | primary | see *Dumb buffers*; `ENOSYS` without `DUMB` |
 | `MODE_MAP_DUMB` | primary | any GEM handle; unknown `ENOENT`; the object's one fake offset |
 | `MODE_DESTROY_DUMB` | primary | closes the handle; unknown `EINVAL` |
+| mode setting (R3) | see *Mode setting (R3)* | `SETCRTC`, `CURSOR`, `CURSOR2`, `SETGAMMA`, `SETPROPERTY`, `OBJ_SETPROPERTY`, `PAGE_FLIP`, `DIRTYFB`, `SETPLANE`, `ATOMIC`, `ATTACHMODE`, `DETACHMODE` need the master; the others (getters, `ADDFB`, `ADDFB2`, `RMFB`, blobs, `WAIT_VBLANK`, CRTC sequences, `MODESET_CTL`) any primary file; none is allowed on render nodes (`EACCES`), as in Linux's `drm_ioctls[]`; `EOPNOTSUPP` for a device without `Driver::kms` |
 | driver range `0x40`-`0x9f` | per `Driver::IOCTLS` | matched on the whole command value; the core checks the flags, then calls `Driver::ioctl` |
 
 The first file opened on a card node while the device has no master
@@ -374,7 +407,106 @@ never drops a reference with one held; `crates/drm/src/gem.rs` and
 `crates/drm/src/objects.rs` give the argument, the host tests drive the
 handle and name rules and the reference counting from eight threads, and
 `tools/test/drm_r1_test.c` runs eight threads of GEM ioctls and mappings
-against the kernel.
+against the kernel. Mode setting has two more locks, the mode-setting lock
+and the event lock, described below.
+
+**Mode setting (R3): structure.** KMS lives in `crates/drm/src/kms/`:
+`modes` (the mode type, its uAPI conversion and validation, the VESA DMT
+and CTA-861 tables, CVT, the mode list order), `edid` (base block and
+CTA-861 extensions to a mode list), `formats` (fourcc codes, legacy
+`ADDFB` formats, the `IN_FORMATS` blob), `props` (the standard properties
+with Linux's names, types and flags), `objects` (one ID space for all mode
+objects, the driver's `Layout`, blobs, framebuffers, `ADDFB2` checks),
+`state` (object states, atomic updates, the `KmsDriver` hook trait),
+`core` (the registry, the getters, framebuffer and blob lifetimes),
+`atomic` (setting properties, check, commit), `legacy` (`SETCRTC`,
+`PAGE_FLIP`, `SETPLANE`, `CURSOR`, `DPMS` and gamma as atomic updates),
+`events` (vblank counters and per-file event queues), `ioctl` (the table
+and its permissions), `dev` (the kernel layer: locks, argument copies,
+`read(9E)`, `chpoll(9E)`, the `kms` kstat) and `soft` (a software vblank
+source). Everything but `dev` and `soft` is plain data and host-tested
+(EDID parsing against three synthesized blobs, CVT against the VESA
+generator's values, atomic state duplication and rollback, every check's
+errno, framebuffer and blob lifetimes, the event budget, with a mock
+driver). A driver without display is unaffected: `Driver::kms` defaults
+to `None`, and every mode-setting ioctl then fails with `EOPNOTSUPP`.
+
+**Mode setting (R3): objects and state.** The driver describes its
+pipeline once (`KmsDriver::layout`); the core gives every property,
+plane, CRTC, encoder, connector, blob and framebuffer an ID from one
+space, the lowest free number from 1, as Linux's `object_idr`. Each
+CRTC, plane and connector has a current state; an atomic update copies an
+object's state on first change and edits the copy, so dropping an update
+is the rollback. The core checks what Linux's `drm_atomic_check_only` and
+the atomic helpers check, with the same errnos (connector routing to an
+encoder, `ACTIVE` without a mode, mode without connectors, events on a
+CRTC that stays off, full mode sets without `ALLOW_MODESET`, plane CRTC,
+format, modifier, `ERANGE` destinations and `ENOSPC` sources), then calls
+the driver's check hooks per connector, CRTC and plane; the commit calls
+its commit hooks (CRTCs that end off, planes, CRTCs that end on,
+connectors) and swaps the states in. Framebuffers hold `GemRef`s; `RMFB`
+and the close of the owning file turn off every plane that shows the
+framebuffer and the CRTC whose primary plane that was, as Linux's
+`atomic_remove_fb`. Blobs and framebuffers are counted; one that userland
+removed stays findable until no state uses it, then its ID is freed.
+Connectors are probed when the device attaches and when the master asks
+`GETCONNECTOR` with `count_modes` 0; the core parses the EDID the driver
+returns, publishes it as the `EDID` blob, and a connected connector without
+modes gets the DMT modes up to 1024x768. Clients without the aspect-ratio
+capability see modes without aspect flags and without the duplicates that
+leaves.
+
+**Mode setting (R3): events and vblanks.** Each file has an event queue
+with Linux's 4096-byte budget (128 events); an event is allocated and
+charged by the ioctl that asks for it, `ENOMEM` if it does not fit.
+`read(2)` returns whole events only (a buffer too small for the next one
+reads 0 bytes), blocks for the first unless the file is non-blocking
+(`EAGAIN`); `poll(2)` reports `POLLIN` while events are queued, through
+the new `chpoll(9E)` support of illumos-ddi and one pinned pollhead per
+clone slot for the device's lifetime. A commit arms a flip on every active
+CRTC it touches after the driver's hooks ran, and the next vblank completes
+it and sends its events, so an event never precedes the hooks (it may come
+a frame late if a vblank fell between). A non-blocking commit or
+`PAGE_FLIP` on a CRTC with a pending flip is `EBUSY`; a blocking commit
+waits for it first and for its own flip afterwards (one second at most
+each). A driver reports vblanks through its `VblankHandle` with the
+`gethrtime(9F)` time (`TIMESTAMP_MONOTONIC`). Waits are kept sorted by
+their sequence and the event lists append in O(1), so a vblank costs only
+the events it completes; concurrent readers of one file take turns so
+that its events keep their order, without holding up other files. `rdrmnull` uses
+`kms::soft::SoftVblank`, a 10 ms `ddi_periodic(9F)` callback that reports
+every frame boundary of the mode with its exact time: 60 Hz on average,
+each vblank delivered up to 10 ms late. Events of a file that closes are
+unlinked and freed at once, so a flip or wait completing later finds
+nothing of it. Lock order: the mode-setting lock, then the event lock; the
+vblank path takes only the event lock and wakes pollers after dropping it.
+
+**Mode setting (R3): deviations and open items.** Limits Linux does not
+have, because blobs, framebuffers and events are locked kernel memory that
+any open file may create: a blob is at most 1 MiB, a file holds at most
+256 blobs and 4 MiB of blob data, the device 4096 blobs and 16 MiB; a file
+holds at most 256 framebuffers, the device 4096; the device keeps at most
+8192 events queued or pending over all files (each file's 4096-byte budget
+is Linux's); all of these fail with `ENOMEM`. The current master is exempt
+from the device-wide bounds (its per-file bounds still apply), so that
+other clients cannot starve the display server. One `MODE_ATOMIC` names at
+most 1024 objects and 16384 properties (`EINVAL`). The fence properties
+`IN_FENCE_FD` and `OUT_FENCE_PTR` exist so that their IDs are known, but
+no object carries them and setting them is `EINVAL` until fences exist
+(R2). Not implemented: leases, asynchronous and targeted page flips, the
+atomic colour-management properties (legacy `GETGAMMA`/`SETGAMMA` work),
+`VRR_ENABLED`, writeback connectors, rotation, `zpos`, `TILE`, damage
+clips, and `DIRTYFB` (`ENOSYS`, as Linux answers for a driver without
+damage tracking). The event lock has no interrupt priority, so
+`VblankHandle::vblank` demands the `Sleepable` token (thread, task queue or
+level-0 periodic context); a driver with a hardware vblank interrupt needs a
+priority-aware lock and an `Atomic` entry point, which come with the first
+such driver. `detach` checks everything before it tears anything down
+(open files, framebuffers still referenced, GEM objects left, after the
+driver's `before_detach` has dropped what it holds for itself); a refused
+device keeps its mode-setting state and its vblank source and works on.
+Only when every check has passed does the driver stop its sources
+(`before_teardown`) and the core release the KMS and GEM state. The refusal of `ATOMIC` to Xorg by process name stays open.
 
 ## Building
 

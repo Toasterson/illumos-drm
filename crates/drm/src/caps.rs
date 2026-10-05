@@ -7,9 +7,10 @@
 //!
 //! The rules follow Linux's `drm_getcap` and `drm_setclientcap` of the
 //! libdrm 2.4.109 era, with one difference: a capability reports what this
-//! core implements today, not what Linux always implements. PRIME, syncobj,
-//! `ADDFB2` modifiers, vblank and page-flip events arrive in later
-//! milestones and report 0 until then. Dumb buffers exist since R1.
+//! core implements today, not what Linux always implements. PRIME and
+//! syncobj arrive in a later milestone and report 0 until then. Dumb
+//! buffers exist since R1, `ADDFB2` modifiers and vblank events since R3;
+//! asynchronous and targeted page flips report 0.
 
 use ddi::Errno;
 use drm_uapi as uapi;
@@ -67,15 +68,13 @@ pub fn get_cap(features: Features, mode: &ModeConfig, cap: u64) -> Result<u64, E
         uapi::DRM_CAP_DUMB_BUFFER => u64::from(features.contains(Features::GEM.union(Features::DUMB))),
         uapi::DRM_CAP_DUMB_PREFERRED_DEPTH => mode.preferred_depth,
         uapi::DRM_CAP_DUMB_PREFER_SHADOW => u64::from(mode.prefer_shadow),
-        // ADDFB2, the vblank ioctl, page flips and their events are R3.
-        // Until those ioctls exist the core reports none of them, whatever
-        // the driver's ModeConfig says; the ModeConfig field for modifiers
-        // takes effect then.
-        uapi::DRM_CAP_ADDFB2_MODIFIERS
-        | uapi::DRM_CAP_VBLANK_HIGH_CRTC
-        | uapi::DRM_CAP_ASYNC_PAGE_FLIP
-        | uapi::DRM_CAP_PAGE_FLIP_TARGET
-        | uapi::DRM_CAP_CRTC_IN_VBLANK_EVENT => 0,
+        // Since R3: ADDFB2 takes modifiers when the driver says so (and
+        // IN_FORMATS lists them), WAIT_VBLANK takes the high CRTC bits, and
+        // vblank and flip events carry the CRTC ID, as on Linux. Async and
+        // target flips are not implemented.
+        uapi::DRM_CAP_ADDFB2_MODIFIERS => u64::from(mode.fb_modifiers),
+        uapi::DRM_CAP_VBLANK_HIGH_CRTC | uapi::DRM_CAP_CRTC_IN_VBLANK_EVENT => 1,
+        uapi::DRM_CAP_ASYNC_PAGE_FLIP | uapi::DRM_CAP_PAGE_FLIP_TARGET => 0,
         _ => return Err(Errno::EINVAL),
     })
 }
@@ -179,9 +178,11 @@ mod tests {
         };
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_CURSOR_WIDTH as u64), Ok(256));
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_CURSOR_HEIGHT as u64), Ok(128));
-        // No ADDFB2 before R3, so the driver's value does not show yet; the
-        // dumb-buffer preferences do.
-        assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_ADDFB2_MODIFIERS as u64), Ok(0));
+        // The driver's modifier support and the dumb-buffer preferences.
+        assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_ADDFB2_MODIFIERS as u64), Ok(1));
+        assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_CRTC_IN_VBLANK_EVENT as u64), Ok(1));
+        assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_VBLANK_HIGH_CRTC as u64), Ok(1));
+        assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_ASYNC_PAGE_FLIP as u64), Ok(0));
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_DUMB_PREFERRED_DEPTH as u64), Ok(24));
         assert_eq!(get_cap(KMS, &big, uapi::DRM_CAP_DUMB_PREFER_SHADOW as u64), Ok(1));
         assert_eq!(get_cap(KMS, &m, uapi::DRM_CAP_DUMB_PREFERRED_DEPTH as u64), Ok(0));

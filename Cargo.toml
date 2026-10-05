@@ -13,14 +13,14 @@ rust-version = "1.97"
 [workspace.dependencies]
 drm-uapi = { path = "crates/drm-uapi" }
 drm = { path = "crates/drm" }
-# illumos-ddi at the head of its loose-ends-20260928 branch: main (clone
-# opens and the devmap(9E) entry point in the CharDevice glue, which the
-# DRM core needs for per-file state and GEM mmap, and OwnNode, the
-# capability DMA handles are allocated from) plus OwnNode for minor nodes,
-# property updates and LDI identifiers. Move the pin to the merge commit on
-# illumos-ddi main once that branch is merged.
-ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "449bfe73e9e45815d34735aecc526b74becdb302" }
-ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "449bfe73e9e45815d34735aecc526b74becdb302", default-features = false }
+# illumos-ddi at the head of its r3-kms-glue branch: its loose-ends-20260928
+# branch (clone opens, the devmap(9E) entry point, OwnNode for DMA handles,
+# minor nodes, property updates and LDI identifiers) plus chpoll(9E) in the
+# CharDevice glue with pinned pollheads, which the KMS event queue needs.
+# Move the pin to the merge commit on illumos-ddi main once those branches
+# are merged.
+ddi-sys = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "5c792b3229e501bd8c2c3e73d8066d4c42e43431" }
+ddi = { git = "https://code.aopc.cloud/illumos/illumos-ddi.git", rev = "5c792b3229e501bd8c2c3e73d8066d4c42e43431", default-features = false }
 serde_json = "1"
 
 # Kernel modules are linked by `ld -ztype=kmod`, not by rustc. Keep debug
