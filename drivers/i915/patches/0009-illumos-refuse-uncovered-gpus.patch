@@ -7,11 +7,14 @@ gen9.5 with a PCH (the layer's stolen-memory decoding, patch 0006's
 interrupt setup, the stubs of the display and local-memory code).
 i915_driver_probe() refuses Valleyview, Cherryview, Broxton, Geminilake,
 discrete GPUs and every other generation with -ENODEV, before it
-touches the device.
+touches the device. i915_driver_create() has already made the display
+structure by then (a display without a display in the headless build),
+and neither i915_driver_late_release() nor i915_driver_release() runs on
+this path, so the refusal frees it itself.
 
 --- a/drivers/gpu/drm/i915/i915_driver.c
 +++ b/drivers/gpu/drm/i915/i915_driver.c
-@@ -856,6 +856,24 @@
+@@ -856,6 +856,26 @@
  		return PTR_ERR(i915);
  	}
  
@@ -28,6 +31,8 @@ touches the device.
 +	    IS_DGFX(i915)) {
 +		drm_info(&i915->drm, "i915n: this GPU (gen %d) is not "
 +		    "supported on illumos\n", GRAPHICS_VER(i915));
++		intel_display_device_remove(i915->display);
++		i915->display = NULL;
 +		pci_disable_device(pdev);
 +		return -ENODEV;
 +	}
