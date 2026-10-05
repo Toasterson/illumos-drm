@@ -1,0 +1,153 @@
+# The display TUs of i915n (paths relative to drivers/gpu/drm/i915 of the
+# pinned tree): the 145 display objects of Linux's i915.mod in the R5c
+# configuration (artifacts/i915n-kms/display-tus.txt: display/*.o and the
+# display glue i915_bo .. i915_panic) minus the families whose external
+# dependencies have no illumos counterpart and which Ivy Bridge (display
+# version 7, the only display hardware supported on illumos) never
+# reaches; generated stubs replace them in i915n (design note
+# notes/i915n-kms-design.md, section 3):
+#   DSI (MIPI DSI bus): display/icl_dsi.c, display/vlv_dsi.c,
+#     display/vlv_dsi_pll.c, display/intel_dsi.c, display/intel_dsi_vbt.c,
+#     display/intel_dsi_dcs_backlight.c
+#   HDCP (MEI/GSC firmware interface, GPL drm_hdcp_helper):
+#     display/intel_hdcp.c, display/intel_hdcp_gsc_message.c,
+#     display/intel_dp_hdcp.c, i915_hdcp_gsc.c
+#   LPE audio (platform devices, IRQ chips): display/intel_lpe_audio.c
+# and the tracepoint TU display/intel_display_trace.c (GPL-2.0; it only
+# defines the display tracepoints, which illumos does not have, as R5c's
+# two headless tracepoint TUs; fetch-and-patch.sh replaces
+# intel_display_trace.h by a generated MIT no-op header).
+# 133 TUs.
+display/dvo_ch7017.c
+display/dvo_ch7xxx.c
+display/dvo_ivch.c
+display/dvo_ns2501.c
+display/dvo_sil164.c
+display/dvo_tfp410.c
+display/g4x_dp.c
+display/g4x_hdmi.c
+display/hsw_ips.c
+display/i9xx_display_sr.c
+display/i9xx_plane.c
+display/i9xx_wm.c
+display/intel_alpm.c
+display/intel_atomic.c
+display/intel_audio.c
+display/intel_backlight.c
+display/intel_bios.c
+display/intel_bo.c
+display/intel_bw.c
+display/intel_casf.c
+display/intel_cdclk.c
+display/intel_cmtg.c
+display/intel_color.c
+display/intel_color_pipeline.c
+display/intel_colorop.c
+display/intel_combo_phy.c
+display/intel_connector.c
+display/intel_crt.c
+display/intel_crtc.c
+display/intel_crtc_state_dump.c
+display/intel_cursor.c
+display/intel_cx0_phy.c
+display/intel_dbuf_bw.c
+display/intel_ddi.c
+display/intel_ddi_buf_trans.c
+display/intel_de.c
+display/intel_display.c
+display/intel_display_clock_gating.c
+display/intel_display_conversion.c
+display/intel_display_device.c
+display/intel_display_driver.c
+display/intel_display_irq.c
+display/intel_display_params.c
+display/intel_display_power.c
+display/intel_display_power_map.c
+display/intel_display_power_well.c
+display/intel_display_reset.c
+display/intel_display_rpm.c
+display/intel_display_rps.c
+display/intel_display_snapshot.c
+display/intel_display_utils.c
+display/intel_display_wa.c
+display/intel_dkl_phy.c
+display/intel_dmc.c
+display/intel_dmc_wl.c
+display/intel_dp.c
+display/intel_dp_aux.c
+display/intel_dp_aux_backlight.c
+display/intel_dp_link_training.c
+display/intel_dp_mst.c
+display/intel_dp_test.c
+display/intel_dpio_phy.c
+display/intel_dpll.c
+display/intel_dpll_mgr.c
+display/intel_dpt.c
+display/intel_dram.c
+display/intel_drrs.c
+display/intel_dsb.c
+display/intel_dvo.c
+display/intel_encoder.c
+display/intel_fb.c
+display/intel_fbc.c
+display/intel_fdi.c
+display/intel_fifo_underrun.c
+display/intel_flipq.c
+display/intel_frontbuffer.c
+display/intel_global_state.c
+display/intel_gmbus.c
+display/intel_hdmi.c
+display/intel_hotplug.c
+display/intel_hotplug_irq.c
+display/intel_hti.c
+display/intel_initial_plane.c
+display/intel_link_bw.c
+display/intel_load_detect.c
+display/intel_lspcon.c
+display/intel_lt_phy.c
+display/intel_lvds.c
+display/intel_mchbar.c
+display/intel_modeset_lock.c
+display/intel_modeset_setup.c
+display/intel_modeset_verify.c
+display/intel_overlay.c
+display/intel_panel.c
+display/intel_parent.c
+display/intel_pch.c
+display/intel_pch_display.c
+display/intel_pch_refclk.c
+display/intel_pfit.c
+display/intel_plane.c
+display/intel_pmdemand.c
+display/intel_pps.c
+display/intel_psr.c
+display/intel_qp_tables.c
+display/intel_quirks.c
+display/intel_rom.c
+display/intel_sbi.c
+display/intel_sdvo.c
+display/intel_snps_hdmi_pll.c
+display/intel_snps_phy.c
+display/intel_sprite.c
+display/intel_sprite_uapi.c
+display/intel_tc.c
+display/intel_tv.c
+display/intel_vblank.c
+display/intel_vdsc.c
+display/intel_vga.c
+display/intel_vrr.c
+display/intel_wm.c
+display/skl_prefill.c
+display/skl_scaler.c
+display/skl_universal_plane.c
+display/skl_watermark.c
+display/vlv_clock.c
+display/vlv_sideband.c
+i915_bo.c
+i915_display_pc8.c
+i915_dpt.c
+i915_dsb_buffer.c
+i915_fb_pin.c
+i915_initial_plane.c
+i915_overlay.c
+i915_panic.c

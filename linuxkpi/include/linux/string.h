@@ -18,6 +18,8 @@
 extern size_t lkpi_strnlen(const char *s, size_t max);
 extern void *lkpi_memchr(const void *s, int c, size_t n);
 extern void *memchr_inv(const void *s, int c, size_t n);
+/* Linux's mem_is_zero(): whether the n bytes at s are all 0. */
+#define	mem_is_zero(s, n)	(memchr_inv((s), 0, (n)) == NULL)
 extern ssize_t sized_strscpy(char *dst, const char *src, size_t count);
 extern ssize_t strscpy_pad(char *dst, const char *src, size_t count);
 extern char *kstrdup(const char *s, gfp_t gfp) __malloc;

@@ -11,6 +11,7 @@
 #define	_LINUX_BUG_H
 
 #include <linux/compiler.h>
+#include <linux/stringify.h>
 #include <linux/build_bug.h>
 #include <linux/once_lite.h>
 #include <linux/instrumentation.h>

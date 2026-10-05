@@ -92,4 +92,13 @@
 #define	PCI_REBAR_CTRL_BAR_SIZE	0x00001f00
 #define	PCI_REBAR_CTRL_BAR_SHIFT	8
 
+/* PCI-to-PCI bridge control register (type 1 header) */
+#define	PCI_BRIDGE_CONTROL		0x3e
+#define	PCI_BRIDGE_CTL_PARITY		0x01
+#define	PCI_BRIDGE_CTL_SERR		0x02
+#define	PCI_BRIDGE_CTL_ISA		0x04
+#define	PCI_BRIDGE_CTL_VGA		0x08
+#define	PCI_BRIDGE_CTL_MASTER_ABORT	0x20
+#define	PCI_BRIDGE_CTL_BUS_RESET	0x40
+
 #endif

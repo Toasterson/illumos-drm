@@ -14,4 +14,10 @@
 #define	__ALIGN_KERNEL(x, a)	__ALIGN_KERNEL_MASK(x, (__typeof__(x))(a) - 1)
 #define	__ALIGN_KERNEL_MASK(x, mask)	(((x) + (mask)) & ~(mask))
 #define	__KERNEL_DIV_ROUND_UP(n, d)	(((n) + (d) - 1) / (d))
+/* Division rounding to nearest (as DIV_ROUND_CLOSEST). */
+#define	__KERNEL_DIV_ROUND_CLOSEST(x, divisor) ({ \
+	__typeof__(x) __kx = (x); __typeof__(divisor) __kd = (divisor); \
+	(((__typeof__(x))-1) > 0 || ((__typeof__(divisor))-1) > 0 || \
+	((__kx > 0) == (__kd > 0))) ? \
+	((__kx + (__kd / 2)) / __kd) : ((__kx - (__kd / 2)) / __kd); })
 #endif
