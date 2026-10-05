@@ -14,6 +14,7 @@
 #include <linux/seq_file.h>
 #include <linux/printk.h>
 #include <linux/bug.h>
+#include <linux/string_choices.h>
 /*
  * Messages are formatted by the layer (Linux's %p extensions, %pe, %pa,
  * %ph, %pV, and hashed plain %p), and the core gets the text: the facade's
@@ -24,7 +25,18 @@
 #define	__drm_printfn_info	lkpi_drm_printfn_info
 #define	__drm_printfn_dbg	lkpi_drm_printfn_dbg
 #define	__drm_printfn_err	lkpi_drm_printfn_err
+/* The facade's drm_info_printer() takes the node; Linux's the device. */
+#define	drm_info_printer	lkpi_facade_drm_info_printer
 #include_next <drm/drm_print.h>
+#undef	drm_info_printer
+
+/* Linux's drm_info_printer(): KERN_INFO messages on the layer device. */
+static inline struct drm_printer
+drm_info_printer(struct device *dev)
+{
+	return (lkpi_facade_drm_info_printer(dev != NULL ?
+	    dev->lkpi_dip : NULL));
+}
 
 extern void __drm_printfn_seq_file(struct drm_printer *p, struct va_format *vaf);
 extern void __drm_puts_seq_file(struct drm_printer *p, const char *str);
