@@ -1,0 +1,257 @@
+.\"
+.\" This Source Code Form is subject to the terms of the Mozilla Public
+.\" License, v. 2.0. If a copy of the MPL was not distributed with this
+.\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
+.\"
+.Dd October 3, 2026
+.Dt DRMADM 8
+.Os
+.Sh NAME
+.Nm drmadm
+.Nd show and select the DRM driver stack
+.Sh SYNOPSIS
+.Nm
+.Op Fl R Ar root
+.Cm status
+.Nm
+.Op Fl R Ar root
+.Cm select
+.Cm legacy | new
+.Sh DESCRIPTION
+Two Direct Rendering Manager (DRM) driver stacks can be installed on the
+same system:
+.Bl -tag -width "legacy"
+.It Cm legacy
+the stack of the package
+.Sy driver/graphics/drm :
+the core module
+.Sy misc/drm
+and the Intel driver
+.Xr i915 7D .
+.It Cm new
+the illumos-drm stack: the core module
+.Sy misc/drm_core
+.Pq package Sy driver/graphics/drm-core
+and the drivers that depend on it, among them
+.Sy virtio_gpu ,
+and the Intel driver, whose name
+.Sy i915n
+is reserved.
+.El
+.Pp
+Both stacks create their device nodes with the node type
+.Dv DDI_NT_DISPLAY_DRM ,
+from which
+.Xr devfsadm 8
+makes the
+.Pa /dev/dri
+links through the link module of
+.Sy driver/graphics/drm-devlink .
+.Pp
+The two stacks must never be loaded at the same time.
+Each core refuses to load, with
+.Er EBUSY
+and a warning on the console, while the other core is loaded, and every
+driver depends on its core, so a driver of one stack cannot load while the
+other stack is loaded.
+.Nm
+decides which stack the system loads at boot and which driver binds an
+Intel GPU.
+.Pp
+Installing a package of either stack selects nothing.
+Without a selection nothing is excluded: the aliases that
+.Sy driver/graphics/drm
+installs for
+.Sy i915
+make the legacy stack drive an Intel GPU, and whichever core loads first
+keeps the other one out.
+The packages of the new stack bind no Intel GPU:
+.Sy i915n
+is delivered without aliases, and
+.Nm
+moves the aliases of the Intel GPUs from
+.Sy i915
+to it.
+.Ss Selecting a stack
+.Nm Cm select Ar stack
+does the following and prints each change:
+.Bl -enum
+.It
+It writes the fragment
+.Pa /etc/system.d/driver:graphics:drmadm ,
+which records the selection and the alias set and excludes the modules of
+the other stack, each as
+.Ar class Ns / Ns Ar module
+and as the bare module name, so that a load by an explicit path is
+refused too
+.Pq see Xr system 5 .
+For the new stack these are
+.Sy misc/drm ,
+.Sy drv/i915
+and
+.Sy drv/radeon ;
+for the legacy stack
+.Sy misc/drm_core ,
+.Sy drv/i915n ,
+.Sy drv/virtio_gpu ,
+.Sy drv/cdrmnull
+and
+.Sy drv/rdrmnull .
+A driver of the new stack that is not in this list is still kept from
+loading by the exclusion of
+.Sy misc/drm_core .
+The fragment is written first, so that a failure in the next step loses
+no alias.
+.It
+It moves the Intel GPU aliases to the driver of the selected stack with
+.Xr update_drv 8
+.Fl n ,
+which edits
+.Pa /etc/driver_aliases
+without attaching a driver, and checks the result; if a move fails, it
+gives the aliases back and restores the previous fragment.
+The aliases are those the installed
+.Sy driver/graphics/drm
+declares for
+.Sy i915 ,
+those bound to
+.Sy i915
+or
+.Sy i915n ,
+and those
+.Nm
+recorded before.
+When the driver of the selected stack is not installed, the aliases stay
+unbound, and an Intel GPU falls back to the generic VGA console driver,
+.Sy vgatext .
+Aliases of these devices bound to any other driver are left alone and
+reported.
+.It
+It runs
+.Nm bootadm Cm update-archive ,
+since the kernel reads both files from the boot archive.
+.El
+.Pp
+The selection takes effect at the next boot.
+After that boot, run
+.Nm devfsadm Fl C
+once: it removes the
+.Pa /dev/dri
+links of the devices of the stack that is no longer loaded.
+.Nm Cm select
+refuses while any module of either stack is loaded: stop what uses them
+(the display manager and Xorg), unload the drivers and then the core with
+.Nm modunload Fl i ,
+or select in another boot environment with
+.Fl R .
+It also refuses while another
+.Nm
+runs.
+Selecting the stack that is already selected changes nothing.
+.Ss Status
+.Nm Cm status
+prints the selected stack and whether it is in effect since the last boot
+or from the next one, the installed packages of both stacks, the loaded
+modules of both stacks, how many Intel GPU aliases are bound to
+.Sy i915
+and to
+.Sy i915n
+and how many are unbound, the number of
+.Pa /dev/dri
+links, and every
+.Sy exclude
+line of
+.Pa /etc/system
+and
+.Pa /etc/system.d
+that names a module of either stack.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl R Ar root
+Operate on the system image at
+.Ar root ,
+such as a boot environment mounted with
+.Nm beadm Cm mount ,
+instead of the running system.
+The check for loaded modules is skipped,
+.Xr update_drv 8
+runs with
+.Fl b Ar root
+and the boot archive of
+.Ar root
+is updated.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/system.d/driver:graphics:drmadm
+The selection and its excludes, written only by
+.Nm .
+.It Pa /etc/driver_aliases
+The alias bindings that
+.Nm
+changes through
+.Xr update_drv 8 .
+.El
+.Sh EXIT STATUS
+.Ex -std
+The exit status is 2 for a usage error.
+.Sh EXAMPLES
+.Ss Example 1 Selecting the new stack for development
+.Bd -literal
+# drmadm status
+# svcadm disable -t lightdm
+# modinfo | egrep ' (drm|i915) '
+# modunload -i <i915 id>; modunload -i <drm id>
+# drmadm select new
+# reboot
+\&...
+# devfsadm -C
+.Ed
+.Ss Example 2 Recovering from a selection that does not boot to a display
+Boot the previous boot environment, or boot single user and remove the
+fragment:
+.Bd -literal
+# rm /etc/system.d/driver:graphics:drmadm
+# bootadm update-archive
+.Ed
+.Pp
+The Intel GPU aliases then still belong to the driver of the removed
+selection; run
+.Nm Cm select Cm legacy
+once the system is up.
+From another boot environment the selection of a broken one can be
+changed directly:
+.Bd -literal
+# beadm mount broken /mnt
+# drmadm -R /mnt select legacy
+# beadm umount broken
+.Ed
+.Sh INTERFACE STABILITY
+.Sy Uncommitted
+.Sh SEE ALSO
+.Xr pkg 1 ,
+.Xr system 5 ,
+.Xr i915 7D ,
+.Xr beadm 8 ,
+.Xr bootadm 8 ,
+.Xr devfsadm 8 ,
+.Xr modinfo 8 ,
+.Xr modunload 8 ,
+.Xr update_drv 8
+.Sh NOTES
+While the new stack is selected,
+.Nm pkg Cm verify Sy driver/graphics/drm
+reports the aliases of
+.Sy i915
+as missing, and
+.Nm pkg Cm fix
+would give them back to
+.Sy i915 ;
+run
+.Nm Cm select Cm new
+again afterwards, and after a
+.Nm pkg Cm update
+of
+.Sy driver/graphics/drm
+that adds aliases to
+.Sy i915 .

@@ -23,8 +23,11 @@
 # core of its legacy drivers (i915, radeon), and libdrm requires that
 # package. Both packages install together, but the two stacks are never
 # loaded at once: misc/drm_core's _init refuses while the legacy misc/drm
-# is loaded. Some facade names are also gfx-drm's (drm_dev_register), so
-# qualify fbt probes with the module: fbt:drm_core:drm_dev_register:entry.
+# is loaded, and gfx-drm's misc/drm refuses while misc/drm_core is loaded.
+# drmadm(8) (driver/graphics/drmadm, which this package requires) selects
+# the stack that binds the GPU and loads at boot. Some facade names are
+# also gfx-drm's (drm_dev_register), so qualify fbt probes with the
+# module: fbt:drm_core:drm_dev_register:entry.
 #
 # The module has no device nodes and no driver action; the kernel loads it
 # with the first driver that needs it and refuses to unload it while a
@@ -41,4 +44,5 @@ dir  path=kernel owner=root group=sys mode=0755
 dir  path=kernel/misc owner=root group=sys mode=0755
 dir  path=kernel/misc/amd64 owner=root group=sys mode=0755
 file path=kernel/misc/amd64/drm_core owner=root group=sys mode=0755 reboot-needed=true
+depend fmri=pkg:/driver/graphics/drmadm@0.0.1 type=require
 license LICENSE license=MPL-2.0
