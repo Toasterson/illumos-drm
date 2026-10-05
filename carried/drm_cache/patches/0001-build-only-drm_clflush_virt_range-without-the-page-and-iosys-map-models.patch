@@ -1,0 +1,89 @@
+drm_cache: build only drm_clflush_virt_range() until R5c's models exist
+
+illumos-drm R5e patch 0001 (carried/drm_cache/patches), on Linux v7.2
+8d3ae59288 drivers/gpu/drm/drm_cache.c (MIT). It only adds conditionals;
+the code is untouched.
+
+Two parts of the file need models of the compatibility layer (R5c) that
+do not exist yet:
+
+- CONFIG_LKPI_STRUCT_PAGE: drm_clflush_pages() and drm_clflush_sg() (and
+  the static drm_clflush_page() they use) flush through kmap_atomic() on
+  a struct page and walk a struct sg_table (linux/highmem.h,
+  linux/scatterlist.h). i915's headless build imports drm_clflush_sg().
+- CONFIG_LKPI_IOSYS_MAP: drm_need_swiotlb() reads the iomem resource
+  tree, Xen and memory-encryption state (linux/ioport.h, xen/xen.h,
+  linux/cc_platform.h); drm_memcpy_from_wc() and drm_memcpy_init_early()
+  use struct iosys_map, memcpy_fromio/toio, static keys,
+  kernel_fpu_begin()/end() and in_interrupt(). i915's headless build
+  imports none of them (TTM and display do).
+
+Nothing defines either macro today, so misc/drm_helpers builds
+drm_clflush_virt_range() alone, the one function that needs neither.
+When R5c's struct page and sg_table exist, its layer defines
+CONFIG_LKPI_STRUCT_PAGE, drm_clflush_sg() compiles unchanged and joins
+carried/drm_helpers/*.mapfile. CONFIG_LKPI_IOSYS_MAP waits for whoever
+needs those functions (TTM or display). When both are defined, the patch
+can be dropped.
+
+--- a/drivers/gpu/drm/drm_cache.c
++++ b/drivers/gpu/drm/drm_cache.c
+@@ -27,12 +27,16 @@
+ /*
+  * Authors: Thomas Hellström <thomas-at-tungstengraphics-dot-com>
+  */
+-#include <linux/cc_platform.h>
+ #include <linux/export.h>
++#ifdef CONFIG_LKPI_STRUCT_PAGE
+ #include <linux/highmem.h>
++#endif
++#ifdef CONFIG_LKPI_IOSYS_MAP
++#include <linux/cc_platform.h>
+ #include <linux/ioport.h>
+ #include <linux/iosys-map.h>
+ #include <xen/xen.h>
++#endif
+ 
+ #include <drm/drm_cache.h>
+ 
+@@ -42,6 +46,7 @@
+ #if defined(CONFIG_X86)
+ #include <asm/smp.h>
+ 
++#ifdef CONFIG_LKPI_STRUCT_PAGE
+ /*
+  * clflushopt is an unordered instruction which needs fencing with mfence or
+  * sfence to avoid ordering issues.  For drm_clflush_page this fencing happens
+@@ -73,8 +78,10 @@
+ 		drm_clflush_page(*pages++);
+ 	mb(); /*Also used after CLFLUSH so that all cache is flushed*/
+ }
++#endif /* CONFIG_LKPI_STRUCT_PAGE */
+ #endif
+ 
++#ifdef CONFIG_LKPI_STRUCT_PAGE
+ /**
+  * drm_clflush_pages - Flush dcache lines of a set of pages.
+  * @pages: List of pages to be flushed.
+@@ -144,6 +151,7 @@
+ #endif
+ }
+ EXPORT_SYMBOL(drm_clflush_sg);
++#endif /* CONFIG_LKPI_STRUCT_PAGE */
+ 
+ /**
+  * drm_clflush_virt_range - Flush dcache lines of a region
+@@ -177,6 +185,8 @@
+ }
+ EXPORT_SYMBOL(drm_clflush_virt_range);
+ 
++#ifdef CONFIG_LKPI_IOSYS_MAP
++
+ bool drm_need_swiotlb(int dma_bits)
+ {
+ 	struct resource *tmp;
+@@ -351,3 +361,4 @@
+ {
+ }
+ #endif /* CONFIG_X86 */
++#endif /* CONFIG_LKPI_IOSYS_MAP */

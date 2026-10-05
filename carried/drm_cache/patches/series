@@ -1,0 +1,3 @@
+# The illumos patch series of drm_cache, applied in this order with
+# patch -p1 in the Linux tree root by ../../fetch-and-patch.
+0001-build-only-drm_clflush_virt_range-without-the-page-and-iosys-map-models.patch

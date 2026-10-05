@@ -1,0 +1,188 @@
+#!/bin/sh
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# fetch-and-patch: prepares the carried Linux helpers for a build.
+#
+#   carried/fetch-and-patch OUT          # verify, copy, patch into OUT/linux
+#   carried/fetch-and-patch -f [OUT]     # also compare with the pinned Linux
+#   carried/fetch-and-patch -u           # refresh the vendored copies
+#
+# Every helper is a directory carried/<helper>/ with
+#   SOURCES          one line per Linux file: path, SHA-256, licence
+#   linux/<path>     the file as it is at the revision of carried/linux.pin
+#   patches/series   the illumos patches, in order (patch -p1, Linux root;
+#                    no fuzz)
+#
+# Only MIT or dual MIT/GPL files are vendored (SOURCES says which); a
+# GPL-only file is never carried (decision D7: reimplement it under MIT
+# instead), and this script refuses a SOURCES line whose licence is not
+# MIT or "GPL-2.0 OR MIT"-style dual.
+#
+# Without -f/-u: checks every vendored file against its SHA-256, copies the
+# helpers' linux/ trees into OUT/linux and applies each helper's series
+# there; the build compiles OUT/linux. With -f: first fetches every file at
+# the pinned revision (from $LINUX_SRC, a checkout at that revision, if
+# set; else with curl from the pin's url) and fails unless it is byte for
+# byte the vendored copy. With -u (after editing carried/linux.pin): fetches
+# every file at the pinned revision into the vendored copy and rewrites the
+# SHA-256 in SOURCES; then rebase the patch series and review the diff.
+#
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+fetch=0
+update=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-f) fetch=1; shift ;;
+	-u) update=1; fetch=1; shift ;;
+	--) shift; break ;;
+	-*) echo "fetch-and-patch: unknown option $1" >&2; exit 2 ;;
+	*) break ;;
+	esac
+done
+OUT=${1:-}
+if [ -z "$OUT" ] && [ "$fetch" -eq 0 ]; then
+	echo "usage: fetch-and-patch [-f] OUT | fetch-and-patch -f | -u" >&2
+	exit 2
+fi
+
+die() {
+	echo "fetch-and-patch: $*" >&2
+	exit 1
+}
+
+# The SHA-256 of a file, whatever the system calls its tool.
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{print $1}'
+	elif command -v digest >/dev/null 2>&1; then
+		digest -a sha256 "$1"
+	else
+		die "no sha256sum, shasum or digest"
+	fi
+}
+
+# patch(1): GNU patch (illumos' gpatch, or patch) or BSD patch (macOS);
+# both take -p1 -N -t -F 0 (strip one level, refuse a reversed or already
+# applied patch, no questions, no fuzz) and fail on a hunk that does not
+# apply.
+patch_tool() {
+	for p in gpatch patch; do
+		if command -v "$p" >/dev/null 2>&1; then
+			echo "$p"
+			return 0
+		fi
+	done
+	die "patch(1) is needed for a non-empty series"
+}
+
+pin() {
+	sed -n "s/^$1=//p" "$HERE/linux.pin"
+}
+REV=$(pin rev)
+URL=$(pin url)
+[ -n "$REV" ] && [ -n "$URL" ] || die "linux.pin lacks rev= or url="
+
+TMPD=$(mktemp -d /tmp/fetch-and-patch.XXXXXX)
+trap 'rm -rf "$TMPD"' EXIT
+trap 'exit 1' INT TERM
+
+# fetch_file PATH DEST: the Linux file PATH at the pinned revision.
+fetch_file() {
+	if [ -n "${LINUX_SRC:-}" ]; then
+		if [ -d "$LINUX_SRC/.git" ] || [ -f "$LINUX_SRC/.git" ]; then
+			head=$(git -C "$LINUX_SRC" rev-parse HEAD)
+			[ "$head" = "$REV" ] ||
+			    die "$LINUX_SRC is at $head, the pin is $REV"
+		fi
+		cp "$LINUX_SRC/$1" "$2" || die "$LINUX_SRC/$1 missing"
+	else
+		curl -fsSL -o "$2" "$URL/plain/$1?id=$REV" ||
+		    die "cannot fetch $1 at $REV from $URL"
+	fi
+}
+
+helpers=0
+for sources in "$HERE"/*/SOURCES; do
+	[ -f "$sources" ] || continue
+	dir=$(dirname "$sources")
+	name=$(basename "$dir")
+	helpers=$((helpers + 1))
+	tab=$(printf '\t')
+	grep -v '^#' "$sources" | grep -v '^[[:space:]]*$' > "$TMPD/$name.sources"
+	while IFS="$tab" read -r path sum licence; do
+		case "$licence" in
+		MIT|*" OR MIT"|"MIT OR "*) ;;
+		*) die "$name: $path has licence '$licence': only MIT or" \
+		    "dual MIT files are vendored" ;;
+		esac
+		vendored="$dir/linux/$path"
+		if [ "$fetch" -eq 1 ]; then
+			fetch_file "$path" "$TMPD/upstream"
+			if [ "$update" -eq 1 ]; then
+				mkdir -p "$(dirname "$vendored")"
+				cp "$TMPD/upstream" "$vendored"
+				new=$(sha256 "$vendored")
+				awk -v p="$path" -v s="$new" 'BEGIN { FS = OFS = "\t" }
+				    $1 == p { $2 = s } { print }' "$sources" \
+				    > "$TMPD/sources.new"
+				cp "$TMPD/sources.new" "$sources"
+				echo "$name: $path updated to $REV ($new)"
+				continue
+			fi
+			cmp -s "$TMPD/upstream" "$vendored" ||
+			    die "$name: $vendored differs from $path at $REV"
+			echo "$name: $path is the file at $REV"
+		fi
+		[ -f "$vendored" ] || die "$name: $vendored missing"
+		got=$(sha256 "$vendored")
+		[ "$got" = "$sum" ] ||
+		    die "$name: $vendored has SHA-256 $got, SOURCES says $sum"
+	done < "$TMPD/$name.sources"
+done
+[ "$helpers" -gt 0 ] || die "no carried/<helper>/SOURCES found"
+[ "$update" -eq 0 ] || exit 0
+[ -n "$OUT" ] || exit 0
+
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+rm -rf "$OUT/linux"
+mkdir -p "$OUT/linux"
+for sources in "$HERE"/*/SOURCES; do
+	dir=$(dirname "$sources")
+	name=$(basename "$dir")
+	# Only the files SOURCES lists (and that were checked above) are
+	# copied; any other file under linux/ is an error.
+	(cd "$dir/linux" && find . -type f | sed 's|^\./||' | sort) \
+	    > "$TMPD/$name.present"
+	cut -f1 "$TMPD/$name.sources" | sort > "$TMPD/$name.listed"
+	extra=$(comm -23 "$TMPD/$name.present" "$TMPD/$name.listed")
+	[ -z "$extra" ] || die "$name: files under linux/ not in SOURCES:" \
+	    "$extra"
+	while read -r path; do
+		mkdir -p "$OUT/linux/$(dirname "$path")"
+		cp "$dir/linux/$path" "$OUT/linux/$path"
+	done < "$TMPD/$name.listed"
+	series="$dir/patches/series"
+	n=0
+	if [ -f "$series" ]; then
+		grep -v '^#' "$series" | grep -v '^[[:space:]]*$' \
+		    > "$TMPD/$name.series" || true
+		while read -r p; do
+			[ -f "$dir/patches/$p" ] || die "$name: patch $p missing"
+			tool=$(patch_tool)
+			(cd "$OUT/linux" &&
+			    "$tool" -p1 -N -t -F 0 < "$dir/patches/$p") ||
+			    die "$name: $p does not apply"
+			n=$((n + 1))
+		done < "$TMPD/$name.series"
+	fi
+	echo "$name: $(wc -l < "$TMPD/$name.sources" | tr -d ' ') files" \
+	    "verified, $n patches applied in $OUT/linux"
+done
