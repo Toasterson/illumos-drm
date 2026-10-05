@@ -17,29 +17,30 @@
 //! does the same for the changed rectangles. The cursor plane goes through
 //! the cursor queue (`UPDATE_CURSOR`, `MOVE_CURSOR`). The device has no
 //! vblank interrupt, so each active CRTC gets a software vblank at its
-//! mode's refresh rate (`drm::kms::soft`), which completes page flips and
-//! delivers their events.
+//! mode's refresh rate (`drm_facade::kms::soft`), which reports to the
+//! core through the device's [`DevHandle`]; the core completes page flips
+//! and delivers their events.
+//!
+//! The facade calls every hook in thread context; the hooks that send
+//! requests take their [`Sleepable`] token from that contract.
 
 use alloc::vec::Vec;
 use core::mem::size_of;
 
 use ddi::prelude::*;
-use drm::gem::GemRef;
-use drm::kms::formats::{ARGB8888, MOD_LINEAR, XRGB8888};
-use drm::kms::modes::{self, ModeLimits};
-use drm::kms::objects::FbRef;
-use drm::kms::soft::SoftVblank;
-use drm::kms::{
-    ConnectorDesc, ConnectorStatus, CrtcDesc, CrtcState, DirtyRect, EncoderDesc, KmsDriver, Layout, PlaneDesc,
-    PlaneState, PlaneType, Probe, StateView, VblankHandle, check_plane_helper,
+use drm_facade::kms::formats::{ARGB8888, MOD_LINEAR, XRGB8888};
+use drm_facade::kms::modes::{self, ModeLimits};
+use drm_facade::kms::soft::SoftVblank;
+use drm_facade::kms::{
+    ConnectorDesc, ConnectorStatus, CrtcDesc, CrtcState, DirtyRect, EncoderDesc, Fb, KmsDriver, Layout, PlaneDesc,
+    PlaneState, PlaneType, Probe, check_plane_helper,
 };
+use drm_facade::{DevHandle, GemRef};
 use drm_uapi as uapi;
 
 use crate::gpu::{Q, dev_warn};
 use crate::object::{DevRef, Kind, VgObject};
 use crate::proto::{self, CtrlHdr, Rect};
-
-type Fb = FbRef<GemRef<VgObject>>;
 
 /// The largest scanout.
 const MAX_SIZE: u32 = 8192;
@@ -71,7 +72,7 @@ struct Scanout {
 pub struct GpuKms {
     dr: DevRef,
     scanouts: usize,
-    vblank: Mutex<Option<VblankHandle>>,
+    vblank: Mutex<Option<DevHandle>>,
     sources: Mutex<Vec<Option<SoftVblank>>>,
     shown: Mutex<Vec<Scanout>>,
     display: Mutex<Option<proto::RespDisplayInfo>>,
@@ -93,8 +94,9 @@ impl GpuKms {
         }
     }
 
-    /// Gives the display the device's vblank handle once it has attached.
-    pub fn set_vblank(&self, h: VblankHandle) {
+    /// Gives the display the device's handle for its vblanks once the
+    /// device has registered.
+    pub fn set_vblank(&self, h: DevHandle) {
         *self.vblank.lock() = Some(h);
     }
 
@@ -142,7 +144,7 @@ impl GpuKms {
     }
 
     fn start_vblank(&self, crtc: usize, frame_ns: u64, ctx: &Sleepable) {
-        let Some(h) = self.vblank.lock().clone() else { return };
+        let Some(h) = *self.vblank.lock() else { return };
         let src = SoftVblank::start(frame_ns, move |t, ctx| h.vblank(crtc, t, ctx), ctx);
         let old = self.sources.lock().get_mut(crtc).and_then(|s| s.replace(src));
         drop(old);
@@ -179,9 +181,15 @@ impl GpuKms {
     }
 }
 
-/// The resource of a framebuffer, with its object.
-fn fb_object(fb: &Fb) -> Option<&VgObject> {
-    fb.objs.first().and_then(Option::as_ref).map(GemRef::object)
+/// The object of a framebuffer, if it is one of this driver's.
+fn fb_object(fb: &Fb) -> Option<GemRef<VgObject>> {
+    fb.object::<VgObject>(0)
+}
+
+/// The token of a mode-setting hook.
+fn ctx() -> Sleepable {
+    // SAFETY: the facade calls KmsDriver's methods in thread context.
+    unsafe { Sleepable::assume() }
 }
 
 /// The byte offset of pixel (`x`, `y`) of a 32-bit framebuffer.
@@ -192,18 +200,19 @@ fn pixel_offset(fb: &Fb, x: u32, y: u32) -> u64 {
 /// Whether a framebuffer on a 2D resource has the layout the device
 /// assumes: the resource's own stride, no offset, no larger than it.
 fn fb_fits(fb: &Fb) -> bool {
-    match fb_object(fb).map(VgObject::kind) {
+    match fb_object(fb).map(|o| o.kind()) {
         Some(Kind::Res2d { width, height }) => {
             fb.pitches[0] == width.saturating_mul(4) && fb.offsets[0] == 0 && fb.width <= width && fb.height <= height
         }
         Some(Kind::Res3d) => true,
         // A blob needs SET_SCANOUT_BLOB, which this driver does not send;
-        // with HOST_VISIBLE 0, Mesa does not scan out blobs.
-        Some(Kind::Blob { .. } | Kind::None) | None => false,
+        // with HOST_VISIBLE 0, Mesa does not scan out blobs. An object of
+        // another driver (an import) has no resource of this device.
+        Some(Kind::Blob { .. }) | None => false,
     }
 }
 
-impl KmsDriver<GemRef<VgObject>> for GpuKms {
+impl KmsDriver for GpuKms {
     fn layout(&self) -> Layout {
         let mut planes = Vec::new();
         let mut crtcs = Vec::new();
@@ -239,7 +248,8 @@ impl KmsDriver<GemRef<VgObject>> for GpuKms {
         }
     }
 
-    fn probe(&self, connector: usize, ctx: &Sleepable) -> Probe {
+    fn probe(&self, connector: usize) -> Probe {
+        let ctx = &ctx();
         let Some(info) = self.display_info(ctx) else { return Probe::default() };
         let Some(one) = info.pmodes.get(connector) else { return Probe::default() };
         if one.enabled == 0 {
@@ -273,12 +283,7 @@ impl KmsDriver<GemRef<VgObject>> for GpuKms {
         Probe { status: ConnectorStatus::Connected, edid, modes, ..Probe::default() }
     }
 
-    fn check_plane(
-        &self,
-        plane: usize,
-        new: &PlaneState<GemRef<VgObject>>,
-        crtc: Option<&CrtcState>,
-    ) -> Result<(), Errno> {
+    fn check_plane(&self, plane: usize, new: &PlaneState, crtc: Option<&CrtcState>) -> Result<(), Errno> {
         if let Some(fb) = &new.fb
             && !fb_fits(fb)
         {
@@ -293,14 +298,15 @@ impl KmsDriver<GemRef<VgObject>> for GpuKms {
         check_plane_helper(new, crtc, false, false)
     }
 
-    fn check_crtc(&self, _crtc: usize, new: &CrtcState, _view: &StateView<'_, GemRef<VgObject>>) -> Result<(), Errno> {
+    fn check_crtc(&self, _crtc: usize, new: &CrtcState) -> Result<(), Errno> {
         match &new.mode {
             Some(m) if !LIMITS.allows(m) || m.vscan > 1 => Err(Errno::EINVAL),
             _ => Ok(()),
         }
     }
 
-    fn commit_crtc(&self, crtc: usize, old: &CrtcState, new: &CrtcState, ctx: &Sleepable) {
+    fn commit_crtc(&self, crtc: usize, old: &CrtcState, new: &CrtcState) {
+        let ctx = &ctx();
         let same_mode = match (&old.mode, &new.mode) {
             (Some(a), Some(b)) => a.same_timings(b),
             _ => false,
@@ -326,13 +332,8 @@ impl KmsDriver<GemRef<VgObject>> for GpuKms {
         }
     }
 
-    fn commit_plane(
-        &self,
-        plane: usize,
-        old: &PlaneState<GemRef<VgObject>>,
-        new: &PlaneState<GemRef<VgObject>>,
-        ctx: &Sleepable,
-    ) {
+    fn commit_plane(&self, plane: usize, old: &PlaneState, new: &PlaneState) {
+        let ctx = &ctx();
         let scanout = plane / 2;
         let instance = self.dr.gpu().instance;
         let cur = self.shown.lock().get(scanout).copied().unwrap_or_default();
@@ -343,8 +344,7 @@ impl KmsDriver<GemRef<VgObject>> for GpuKms {
             let mut next = cur;
             match shown.and_then(|fb| fb_object(fb).map(|o| (fb, o))) {
                 Some((fb, obj)) => {
-                    let changed =
-                        !old.fb.as_ref().is_some_and(|o| alloc::sync::Arc::ptr_eq(o, fb)) || cur.cursor != obj.res();
+                    let changed = !old.fb.as_ref().is_some_and(|o| Fb::ptr_eq(o, fb)) || cur.cursor != obj.res();
                     let mut req = proto::UpdateCursor {
                         hdr: CtrlHdr::new(proto::CMD_MOVE_CURSOR),
                         pos: proto::CursorPos {
@@ -436,7 +436,7 @@ impl KmsDriver<GemRef<VgObject>> for GpuKms {
     /// Linux merges plane damage (`drm_atomic_helper_damage_merged`): one
     /// `RESOURCE_FLUSH` updates every scanout that shows the resource. A
     /// cursor is sent again by its next update.
-    fn dirty_fb(&self, fb: &Fb, planes: &[usize], clips: &[DirtyRect], ctx: &Sleepable) -> Result<(), Errno> {
+    fn dirty_fb(&self, fb: &Fb, planes: &[usize], clips: &[DirtyRect]) -> Result<(), Errno> {
         let Some(obj) = fb_object(fb) else { return Ok(()) };
         if !planes.iter().any(|p| p % 2 == 0) {
             return Ok(());
@@ -444,7 +444,7 @@ impl KmsDriver<GemRef<VgObject>> for GpuKms {
         let Some(b) = merge_clips(clips, fb.width, fb.height) else { return Ok(()) };
         let r = Rect { x: b.x1, y: b.y1, width: b.x2 - b.x1, height: b.y2 - b.y1 };
         let offset = matches!(obj.kind(), Kind::Res2d { .. }).then(|| pixel_offset(fb, b.x1, b.y1));
-        self.flush(obj.res(), r, offset, ctx)
+        self.flush(obj.res(), r, offset, &ctx())
     }
 }
 

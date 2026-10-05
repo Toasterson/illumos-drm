@@ -142,6 +142,20 @@ fn eval(expr: &str) -> Option<u64> {
     Some(total)
 }
 
+/// The expected value of an assertion, after `size_of::<T>()` or
+/// `offset_of!(T, f)`: `== EXPR)` as the hand-written crates write it, or
+/// `- Nusize]` as bindgen writes its layout tests (drm-facade-sys). The
+/// members of bindgen's anonymous unions (`__bindgen_anon_N`) have no C
+/// name and are skipped by the caller.
+fn assertion_rhs(rest: &str) -> Option<&str> {
+    let r = rest.trim_start();
+    if let Some(r) = r.strip_prefix("==") {
+        r.split(')').next()
+    } else {
+        r.strip_prefix('-').and_then(|r| r.split("usize").next())
+    }
+}
+
 fn scan_source(text: &str, c: &mut Crate) {
     let mut in_extern = false;
     for line in text.lines() {
@@ -156,12 +170,13 @@ fn scan_source(text: &str, c: &mut Crate) {
                 if let Some(rest) = t.strip_prefix(kw) {
                     let end = rest.find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')).unwrap_or(rest.len());
                     c.symbols.insert(rest[..end].to_string());
+                    break;
                 }
             }
         }
         if let Some(i) = t.find("size_of::<")
             && let Some((ty, rest)) = t[i + 10..].split_once(">()")
-            && let Some(expr) = rest.trim_start().strip_prefix("==").and_then(|r| r.split(')').next())
+            && let Some(expr) = assertion_rhs(rest)
             && let Some(v) = eval(expr)
         {
             c.sizes.insert(ty.to_string(), v);
@@ -169,7 +184,8 @@ fn scan_source(text: &str, c: &mut Crate) {
         if let Some(i) = t.find("offset_of!(")
             && let Some((args, rest)) = t[i + 11..].split_once(')')
             && let Some((ty, field)) = args.split_once(',')
-            && let Some(expr) = rest.trim_start().strip_prefix("==").and_then(|r| r.split(')').next())
+            && !field.trim().starts_with("__bindgen_anon")
+            && let Some(expr) = assertion_rhs(rest)
             && let Some(v) = eval(expr)
         {
             c.offsets.insert((ty.trim().to_string(), field.trim().to_string(), v));

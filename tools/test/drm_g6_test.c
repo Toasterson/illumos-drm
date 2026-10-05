@@ -7,7 +7,7 @@
 /*
  * The argument size rule of the core (G6): core and mode-setting commands
  * are served whatever size the caller's structure has, as Linux's
- * drm_ioctl() serves them (crates/drm/src/ioctl.rs). Run on any device
+ * drm_ioctl() serves them (crates/drm-core/src/ioctl.rs). Run on any device
  * built on the core (rdrmnull, virtio_gpu):
  *
  *   drm_g6_test [card [render]]       (default $DRM_CARD, $DRM_RENDER,

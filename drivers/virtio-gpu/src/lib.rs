@@ -5,6 +5,12 @@
 //! A DRM driver for the virtio GPU device (virtio 1.2, section 5.7; PCI
 //! `1af4:1050`), the milestone R4 of the illumos DRM core.
 //!
+//! Since milestone R5a the DRM core is the kernel module `misc/drm_core`, and
+//! the driver uses it only through the facade (`drm-facade`): it
+//! registers a [`drm_facade::Device`] with its DMA attributes, mode
+//! configuration and bus ID, points its `cb_ops` at the core, and makes
+//! its buffer objects, fences and display through the facade's types.
+//!
 //! The device is driven through the gate's virtio framework, wrapped by
 //! illumos-ddi's `ddi::private::virtio` (the private tier, gate
 //! `cda5b9a49f`): features `VIRTIO_GPU_F_VIRGL`, `F_EDID`,
@@ -50,24 +56,22 @@ pub mod proto;
 #[cfg(test)]
 mod tests;
 
+use alloc::ffi::CString;
 use core::ffi::CStr;
-use core::fmt;
 use core::num::NonZeroU32;
 
 use ddi::DmaAttr;
 use ddi::prelude::*;
 use ddi::private::virtio::{Features as VirtioFeatures, Virtio, VirtioError, VirtioSetup};
-use drm::dumb::{DumbLayout, DumbRequest};
-use drm::gem::{GemRef, SysMem};
-use drm::ioctl::DriverIoctl;
-use drm::minor::CloneId;
-use drm::state::Perm;
-use drm::{BusId, Features, ModeConfig};
+use drm_facade::device::DumbCreated;
+use drm_facade::dumb::{self, DumbRequest};
+use drm_facade::sys as fsys;
+use drm_facade::{Dev, Device, File, Ioctl, Settings};
 use drm_uapi as uapi;
 
 use crate::gpu::{Caps, CmdRef, Gpu, MAX_SEGS, dev_note, dev_warn};
 use crate::kms::GpuKms;
-use crate::object::{Create, DevRef, VgObject};
+use crate::object::{Create, DevRef};
 
 // The module linkage and its _init, _fini and _info entry points. Not in
 // host unit tests: a test binary is a host executable whose C runtime
@@ -75,7 +79,7 @@ use crate::object::{Create, DevRef, VgObject};
 #[cfg(not(test))]
 ddi::module! {
     driver: VirtioGpuModule,
-    ops: [char, devmap],
+    cb_ops: unsafe drm_facade::CB_OPS.get(),
 }
 
 /// The kernel module.
@@ -92,14 +96,13 @@ const OBJECT_DMA: DmaAttr = DmaAttr::bits64().unlimited_cookies();
 
 /// All of the virtio-gpu ioctls: render nodes allowed, no authentication,
 /// as Linux declares them.
-const RENDER: Perm = Perm { auth: false, master: false, root_only: false, render_allow: true };
+const RENDER: u32 = fsys::DRM_RENDER_ALLOW;
 
 /// The DRM driver of one device.
 pub struct VirtioGpu {
     /// The display; dropped first, it stops its vblank sources.
     kms: GpuKms,
     dr: DevRef,
-    pci: Option<(u8, u8, u8)>,
     instance: u32,
     /// The device; dropped last (after every object, which the core
     /// guarantees), it resets the device and frees the queues.
@@ -178,49 +181,7 @@ impl VirtioGpu {
             ),
         );
         let kms = GpuKms::new(dr, scanouts as usize);
-        let pci = pci_location(node, ctx);
-        Ok(VirtioGpu { kms, dr, pci, instance, virtio })
-    }
-
-    fn dispatch(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        cmd: u32,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        match cmd {
-            uapi::DRM_IOCTL_VIRTGPU_GETPARAM => self.getparam(arg),
-            uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE => self.resource_create(dev, file, arg, ctx),
-            uapi::DRM_IOCTL_VIRTGPU_RESOURCE_INFO => self.resource_info(dev, file, arg, ctx),
-            uapi::DRM_IOCTL_VIRTGPU_MAP => self.map(dev, file, arg, ctx),
-            uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST | uapi::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST => {
-                let t = *drm::uaccess::UserArg::<uapi::drm_virtgpu_3d_transfer_to_host>::read(arg)?.get();
-                self.transfer(dev, file, cmd == uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, t, ctx)
-            }
-            uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST_V1 | uapi::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST_V1 => {
-                let t = *drm::uaccess::UserArg::<uapi::drm_virtgpu_3d_transfer_to_host_v1>::read(arg)?.get();
-                self.transfer(
-                    dev,
-                    file,
-                    cmd == uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST_V1,
-                    ioctl::widen_transfer(&t),
-                    ctx,
-                )
-            }
-            uapi::DRM_IOCTL_VIRTGPU_WAIT => self.wait(dev, file, arg, ctx),
-            uapi::DRM_IOCTL_VIRTGPU_GET_CAPS => self.get_caps(arg, ctx),
-            uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB => self.create_blob(dev, file, arg, ctx),
-            uapi::DRM_IOCTL_VIRTGPU_CONTEXT_INIT => self.context_init(dev, file, arg, ctx),
-            uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER
-            | uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V1
-            | uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V2 => {
-                let x = ioctl::read_execbuffer(cmd, arg)?;
-                self.execbuffer(dev, file, x, arg, ctx)
-            }
-            _ => Err(Errno::ENOTTY),
-        }
+        Ok(VirtioGpu { kms, dr, instance, virtio })
     }
 }
 
@@ -233,7 +194,24 @@ fn pci_location(node: &OwnNode, ctx: &Sleepable) -> Option<(u8, u8, u8)> {
     Some(((hi >> 16) as u8, ((hi >> 11) & 0x1f) as u8, ((hi >> 8) & 7) as u8))
 }
 
-impl drm::Driver for VirtioGpu {
+/// The bus ID `DRM_IOCTL_GET_UNIQUE` reports: `pci:0000:BB:DD.F`, which
+/// Xorg's modesetting driver matches, or `virtio_gpu@<instance>` for a node
+/// without a PCI `reg` property.
+fn bus_id(node: &OwnNode, ctx: &Sleepable) -> Option<CString> {
+    let s = match pci_location(node, ctx) {
+        Some((b, d, f)) => alloc::format!("pci:0000:{b:02x}:{d:02x}.{f}"),
+        None => alloc::format!("virtio_gpu@{}", node.instance().0),
+    };
+    CString::new(s).ok()
+}
+
+/// The token of a facade hook.
+fn ctx() -> Sleepable {
+    // SAFETY: the facade calls the driver's hooks in thread context.
+    unsafe { Sleepable::assume() }
+}
+
+impl drm_facade::Driver for VirtioGpu {
     const NAME: &'static CStr = c"virtio_gpu";
     const DATE: &'static CStr = c"0";
     const DESC: &'static CStr = c"virtio GPU";
@@ -242,99 +220,77 @@ impl drm::Driver for VirtioGpu {
     const MAJOR: i32 = 0;
     const MINOR: i32 = 1;
     const PATCHLEVEL: i32 = 0;
-    const FEATURES: Features = Features::MODESET
-        .union(Features::ATOMIC)
-        .union(Features::RENDER)
-        .union(Features::GEM)
-        .union(Features::DUMB)
-        .union(Features::SYNCOBJ)
-        .union(Features::SYNCOBJ_TIMELINE);
-    const MODE_CONFIG: ModeConfig = ModeConfig {
-        cursor_width: kms::CURSOR_MAX as u64,
-        cursor_height: kms::CURSOR_MAX as u64,
-        preferred_depth: 24,
-        prefer_shadow: false,
-        fb_modifiers: false,
-    };
-    const DMA_ATTR: Option<DmaAttr> = Some(OBJECT_DMA);
-    const MAX_OBJECT_SIZE: usize = MAX_OBJECT;
-    const IOCTLS: &'static [DriverIoctl] = &[
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_MAP, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V1, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V2, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_GETPARAM, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_RESOURCE_INFO, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST_V1, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST_V1, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_WAIT, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_GET_CAPS, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, perm: RENDER },
-        DriverIoctl { cmd: uapi::DRM_IOCTL_VIRTGPU_CONTEXT_INIT, perm: RENDER },
+    const FEATURES: u32 = fsys::DRIVER_MODESET
+        | fsys::DRIVER_ATOMIC
+        | fsys::DRIVER_RENDER
+        | fsys::DRIVER_GEM
+        | fsys::DRIVER_SYNCOBJ
+        | fsys::DRIVER_SYNCOBJ_TIMELINE;
+    const DUMB: bool = true;
+    const KMS: bool = true;
+    const MAX_OBJECT_SIZE: u64 = MAX_OBJECT as u64;
+    // One entry per command value, in the order of R4's table, so that an
+    // argument of another size matches the same entry as before; the
+    // handler dispatches on the matched entry's command.
+    const IOCTLS: &'static [Ioctl<Self>] = &[
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_MAP, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V1, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_EXECBUFFER_V2, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_GETPARAM, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_RESOURCE_INFO, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST_V1, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST_V1, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_WAIT, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_GET_CAPS, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB, flags: RENDER, func: ioctl::ioctl },
+        Ioctl { cmd: uapi::DRM_IOCTL_VIRTGPU_CONTEXT_INIT, flags: RENDER, func: ioctl::ioctl },
     ];
-    type Object = VgObject;
 
-    fn bus_id(&self, dev: &DevInfo, out: &mut BusId) -> fmt::Result {
-        match self.pci {
-            Some((b, d, f)) => fmt::Write::write_fmt(out, format_args!("pci:0000:{b:02x}:{d:02x}.{f}")),
-            None => fmt::Write::write_fmt(out, format_args!("virtio_gpu@{}", dev.instance().0)),
-        }
+    /// Gives the file its rendering context id; the context itself is
+    /// created on first use.
+    fn file_open(&self, _dev: &Dev<Self>, file: &File) -> Result<(), Errno> {
+        self.virtio.state().file_open(file.id())
+    }
+
+    /// Destroys the file's rendering context.
+    fn file_close(&self, _dev: &Dev<Self>, file: &File) {
+        self.virtio.state().file_close(&self.virtio, file.id(), &ctx());
     }
 
     /// Only 32 bits per pixel, and rows exactly `width` pixels long: the
-    /// device copies 2D resources with their own stride.
-    fn dumb_layout(&self, req: &DumbRequest) -> Result<DumbLayout, Errno> {
+    /// device copies 2D resources with their own stride. A dumb buffer is
+    /// a 2D resource in XRGB8888.
+    fn dumb_create(&self, dev: &Dev<Self>, file: &File, req: &DumbRequest) -> Result<DumbCreated, Errno> {
         if req.bpp != 32 {
             return Err(Errno::EINVAL);
         }
-        drm::dumb::layout(req, 4, 1)
-    }
-
-    /// A dumb buffer is a 2D resource in XRGB8888.
-    fn dumb_object(
-        &self,
-        _dev: &drm::Device<Self>,
-        mem: SysMem,
-        req: &DumbRequest,
-        _layout: &DumbLayout,
-        ctx: &Sleepable,
-    ) -> Result<VgObject, Errno> {
+        let layout = dumb::layout(req, 4, 1)?;
+        let size = usize::try_from(layout.size).map_err(|_| Errno::EINVAL)?;
         let how = Create::Res2d { format: proto::FORMAT_B8G8R8X8_UNORM, width: req.width, height: req.height };
-        object::with_resource(self.dr, mem, how, ctx)
+        let obj = object::create(dev, self.dr, size, how, &ctx())?;
+        let handle = obj.handle_create(file)?;
+        Ok(DumbCreated { handle, pitch: layout.pitch, size: obj.size() as u64 })
     }
 
-    fn ioctl(
-        &self,
-        dev: &drm::Device<Self>,
-        file: CloneId,
-        cmd: u32,
-        arg: &IoctlArg<'_>,
-        ctx: &Sleepable,
-    ) -> Result<(), Errno> {
-        self.dispatch(dev, file, cmd, arg, ctx)
-    }
-
-    fn kms(&self) -> Option<&dyn drm::kms::KmsDriver<GemRef<VgObject>>> {
+    fn kms(&self) -> Option<&dyn drm_facade::kms::KmsDriver> {
         Some(&self.kms)
     }
 
-    fn file_close(&self, _dev: &drm::Device<Self>, file: CloneId, ctx: &Sleepable) {
-        self.virtio.state().file_close(&self.virtio, file, ctx);
-    }
-
-    fn before_detach(&self, ctx: &Sleepable) {
+    fn before_detach(&self, _dev: &Dev<Self>) {
         // Complete whatever the device has returned, so that the objects
         // those requests held are released before the core counts them.
+        let ctx = ctx();
         let gpu = self.virtio.state();
-        gpu.drain(&self.virtio, gpu::Q::Ctrl, ctx);
-        gpu.drain(&self.virtio, gpu::Q::Cursor, ctx);
+        gpu.drain(&self.virtio, gpu::Q::Ctrl, &ctx);
+        gpu.drain(&self.virtio, gpu::Q::Cursor, &ctx);
     }
 
-    fn before_teardown(&self, ctx: &Sleepable) {
-        self.kms.shutdown(ctx);
+    fn before_teardown(&self, _dev: &Dev<Self>) {
+        self.kms.shutdown(&ctx());
         let s = &self.virtio.state().stats;
         use core::sync::atomic::Ordering::Relaxed;
         dev_note(
@@ -354,21 +310,40 @@ impl drm::Driver for VirtioGpu {
 }
 
 impl Driver for VirtioGpuModule {
-    type Instance = drm::Device<VirtioGpu>;
-    const LINKINFO: &'static CStr = c"virtio-gpu DRM driver (illumos-drm R4)";
+    type Instance = Device<VirtioGpu>;
+    const LINKINFO: &'static CStr = c"virtio-gpu DRM driver (illumos-drm R5a)";
+
+    /// Refuses to load on a `misc/drm_core` with another facade version or
+    /// other structure sizes than this driver was built against.
+    fn load(_ctx: &Sleepable) -> Result<(), Errno> {
+        drm_facade::check_facade("virtio_gpu")
+    }
 
     fn attach(node: OwnNode, ctx: &Sleepable) -> Result<Self::Instance, DdiError> {
         let gpu = VirtioGpu::probe(&node, ctx)?;
-        let dev = drm::Device::attach(node, gpu, ctx)?;
-        dev.driver().virtio.state().set_fence_context(dev.sync().domain());
-        if let Some(k) = dev.kms() {
-            dev.driver().kms.set_vblank(k.vblank_handle());
-        }
+        let unique = bus_id(&node, ctx);
+        let settings = Settings {
+            dma: Some(OBJECT_DMA),
+            // Completions run in thread context (the virtio framework's task
+            // queue), so no fence is signalled at an interrupt priority.
+            fence_priority: None,
+            mode_config: Some(fsys::drm_illumos_mode_config {
+                cursor_width: u64::from(kms::CURSOR_MAX),
+                cursor_height: u64::from(kms::CURSOR_MAX),
+                preferred_depth: 24,
+                prefer_shadow: false,
+                fb_modifiers: false,
+            }),
+            unique: unique.as_deref(),
+        };
+        let dev = Device::register(&node, gpu, &settings, ctx)?;
+        dev.driver().virtio.state().set_fence_context(&dev);
+        dev.driver().kms.set_vblank(dev.handle());
         Ok(dev)
     }
 
     fn detach(inst: Self::Instance, _dev: DevInfo, ctx: &Sleepable) -> Result<(), (Self::Instance, DdiError)> {
-        inst.detach(ctx)
+        inst.unregister(ctx)
     }
 
     fn quiesce(inst: &Self::Instance, _dev: DevInfo) -> Result<(), DdiError> {
@@ -377,7 +352,7 @@ impl Driver for VirtioGpuModule {
     }
 
     fn instance_of_minor(minor: Minor) -> Option<Instance> {
-        drm::minor::instance_of_minor(minor)
+        drm_facade::instance_of_minor(minor)
     }
 }
 

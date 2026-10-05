@@ -15,11 +15,55 @@ virtio-gpu driver on top of it. Existing vendor drivers stay in C and would
 be carried later through a C interface of the core. The milestones are R0
 (uAPI, device registration, per-file state, core ioctls), R1 (GEM and dumb
 buffers), R2 (fences, syncobj, PRIME), R3 (KMS and atomic), R4
-(virtio-gpu), all five done, and R5 (C interface).
+(virtio-gpu), all five done, and R5 (C interface), whose first step R5a
+(the `misc/drm_core` kernel module with a versioned C facade, and the C test
+driver `cdrmnull`) is done.
 
 ## Where things stand
 
-Milestones R0, R1, R2, R3 and R4 work.
+Milestones R0, R1, R2, R3 and R4 work, and so does R5a.
+
+R5a (`misc/drm_core` and the C facade): since 1 October 2026 the core is one
+kernel module, `misc/drm_core`, that exports a C interface (the headers in
+`include/drm`), and every driver is linked against it with
+`-N misc/drm_core`: `rdrmnull` and `virtio_gpu` through the safe Rust crate
+`drm-facade`, and `cdrmnull`, a C port of `rdrmnull`, directly. See
+*R5a* under *Decisions* for the design. On 3 October 2026, at commit
+`b040324` (illumos-ddi `10bdfba`), `tools/test/run-r5a-test.sh` passed on a
+fresh guest of `golden-20260930` (illumos `7e802e88a3`, libdrm 2.4.134)
+with 167 checks and no failure. `misc/drm_core` exports exactly the 102
+symbols of `drm_core.mapfile` and loads and unloads alone; gcc's view of
+the facade (38 sizes, 233 offsets) matches the Rust bindings; drivers
+built for another facade major version or another size of
+`struct drm_device` refuse to load with the check's warning; with
+gfx-drm's `misc/drm` loaded, `misc/drm_core` refuses to load with its
+warning, and loads once the legacy module is gone. `cdrmnull`,
+`rdrmnull` and `virtio_gpu` attached together on `misc/drm_core`
+(neither Rust driver carries a symbol of the core's stateful modules;
+the pattern finds 122 in the core's archive): R0 and R1 passed on both
+null drivers with their 32-bit probes, R2 on both (200 checks each), R3
+on `rdrmnull`, R4 on `virtio_gpu` (63 checks), and `drm_r5a_test`
+(81 checks: PRIME between every pair of the three drivers, one handle
+per object per file, cross-driver fences, `cdrmnull`'s
+`PRIME_SELFTEST` and `FENCE_SELFTEST`), four times: once, and after
+unloading the drivers in three orders and attaching them again, while
+`misc/drm_core` refused to unload as long as any driver depended on it.
+Each of `cdrmnull`'s four detaches raced 330,000 to 600,000 facade calls
+from a task queue thread and a soft interrupt, 5,900 to 73,000 of them
+while `drm_dev_unregister()` ran, without a failure. `mdb -k` printed the
+facade structures from the module's CTF and `cdrmnull`'s live
+`drm_device`. `run-g6-test.sh` and `run-r1-test.sh` with two `cdrmnull`
+devices passed inside the run, and `/etc` and `/devices` were as before.
+At `08ca41e`, whose kernel code differs from `b040324` only in message
+prefixes and in leaving finished callbacks' `node` empty, the same suite
+passed (167 checks), and with `misc/drm_core` loaded `cargo xtask
+kernel-check` verified
+`drm-facade-sys` against the module's CTF (38 sizes, 233 offsets, 99
+symbols) and the private tier's new `modctl` layout and symbols. The
+packages `driver/graphics/drm-core` and `driver/graphics/cdrmnull`,
+published from the run's build, installed beside `driver/graphics/drm`
+and libdrm 2.4.134 into a new boot environment. Logs:
+`logs/hephaistos/illumos-drm/20261003-r5a-*` in the workspace.
 
 R0 (uAPI, device registration, per-file state, core ioctls): on 28
 September 2026 the test driver `rdrmnull` was built for the kernel target,
@@ -193,7 +237,7 @@ the kernel code (the GEM registry entry is recorded as the last step of
 attach, and the anonymous-file id space is named after the instance)
 were tested on the host and linked on illumos, and wait for the next
 guest run, as does `cargo xtask kernel-check` with `misc/drm_minor`
-loaded.
+loaded (R5a's guest runs covered both, on `misc/drm_core`).
 
 ## What is in the repository
 
@@ -203,11 +247,16 @@ loaded.
 `DRM_IOCTL_*` numbers in the illumos `_IOWR` encoding. It has no
 dependencies and can serve userland programs as well as the kernel.
 
-`crates/drm` is the core, a `no_std` library on top of the `ddi` crate. A
-driver implements the `drm::Driver` trait (name, date, description,
+`crates/drm-core` (named `crates/drm` until R5a) is the core, a `no_std`
+library on top of the `ddi` crate. Since R5a only `misc/drm_core` compiles it
+with its `kernel` feature, which holds the stateful kernel layer; the
+drivers use the facade and take only value helpers from it (display
+modes, dumb-buffer layouts). The description below is of the core's own
+interface, which `misc/drm_core` implements for every driver. A
+driver implements the `drm_core::Driver` trait (name, date, description,
 version, feature flags, mode-setting properties, bus ID, buffer-object
 type, dumb-buffer rules, DMA attributes, memory limits, private ioctls)
-and uses `drm::Device<D>` as the instance type of its `ddi::Driver`. The
+and uses `drm_core::Device<D>` as the instance type of its `ddi::Driver`. The
 device creates the minor nodes `card<N>` and `renderD<128+N>`, keeps
 per-file state through clone opens, answers the core and GEM ioctls, and
 maps objects through `devmap(9E)`. The decision logic (`state`, `caps`,
@@ -242,16 +291,25 @@ the tests can check that a refused detach leaves the device working.
 check. `tools/test` holds the libdrm test programs of R0 to R3 and the
 scripts that link, load, test and unload `rdrmnull` on an illumos machine
 (`run-r1-test.sh` runs the R0, R1 and R2 tests, `run-r3-test.sh` runs the
-R0, R1 and R3 tests and `modetest`). `crates/drm/tests/edid` holds the
+R0, R1 and R3 tests and `modetest`). `crates/drm-core/tests/edid` holds the
 EDID test blobs and `gen_edid.py`, which synthesizes them.
 `docs/anon-fd.md` records how file descriptors are made for dma-bufs,
 sync objects and sync files.
 `packaging/devlink.tab` is the `/dev/dri` link rule for packages.
 
-`modules/drm-minor` is the kernel module `misc/drm_minor`, the table of
-DRM device numbers every driver shares (see *Device numbers across
-drivers*), and `crates/drm-minor-sys` declares its two C functions for
-the core; `packaging/drm-minor.p5m` packages the module.
+`modules/drm_core` is the kernel module `misc/drm_core` (crate `drm-module`): the core
+monomorphised once, behind the C facade, plus the table of DRM device
+numbers every driver shares (`misc/drm_minor` until R5a; see *Device
+numbers across drivers*). `include/drm` holds the facade's C headers (MIT;
+Linux's names), `include/drm/drm_facade.mapfile` the facade's symbols for
+a driver's `-z defs` link and `modules/drm_core/drm_core.mapfile` the module's
+symbol scope. `crates/drm-facade-sys` is the facade as Rust declarations
+(bindgen), `crates/drm-facade` the safe layer the Rust drivers use, and
+`drivers/cdrmnull` the C test driver. `tools/facade` regenerates the
+bindings, both mapfiles and the layout tables, and holds the C half of the
+layout check; `modules/drm_core/ctf` the CTF shadow of the facade structures.
+`packaging/drm-core.p5m` packages the module, `packaging/cdrmnull.p5m` the C
+driver.
 `tools/test/run-g6-test.sh` attaches two `rdrmnull` devices and
 `virtio_gpu` together and runs everything on each, `drm_g6_test.c`
 checks the argument size rule, and `drm-test-lib.sh` holds the shell
@@ -287,7 +345,7 @@ changes belong in the framework glue rather than in a copy of it. Anything
 else the safe `ddi` crate does not wrap yet (copying ioctl structures that
 contain pointers, the `devmap_callback_ctl(9S)` callbacks, `ddi_umem`,
 `vmem` and `id_space`) is done with `ddi-sys` inside the core
-(`drm::uaccess`, `drm::gem`).
+(`drm_core::uaccess`, `drm_core::gem`).
 
 **The private tier (R2).** File descriptors for dma-bufs, sync objects and
 sync files need kernel interfaces without a manual page (`falloc`, `setf`,
@@ -348,7 +406,8 @@ that ABI is exactly the R5 C-facade work. With one Rust driver planned
 before R5, static linking costs nothing. The one exception since G6 is
 the table of device numbers, `misc/drm_minor`, which every driver module
 depends on (see *Device numbers across drivers*); it is the first piece
-of that C interface.
+of that C interface. R5a made `misc/drm_core` the core's one module; see
+*R5a*.
 
 **Node type (deviation from the plan).** The minor nodes have the node type
 `ddi_display:drm` (`DDI_NT_DISPLAY_DRM`), not plain `ddi_display`. The
@@ -383,8 +442,8 @@ linked with `-N misc/drm_minor` (the `[package.metadata.kmod]` table of
 device while it is attached, whatever else attaches and detaches; a
 driver that unloads and loads again gets the lowest free numbers, its old
 ones if nobody took them. Each driver module records which of its
-instances holds which number (`drm::minor::bind`), and
-`drm::minor::instance_of_minor` reads that record, so the instance
+instances holds which number (`drm_core::minor::bind`), and
+`drm_core::minor::instance_of_minor` reads that record, so the instance
 number is free (no longer limited to 63). The table is 64 atomic words
 holding the owner (the device's `dev_info_t`) or 0: both calls are
 lock-free and never block or allocate, and a free by the wrong owner, of
@@ -396,7 +455,9 @@ functions (checked by CI and the test scripts). The kernel keeps a
 module loaded while a module that depends on it is loaded, so the table
 outlives every number in it for any order of loads and unloads;
 `_fini` also refuses while a number is taken, which only a driver that
-leaked one could cause.
+leaked one could cause. Since R5a the table is part of `misc/drm_core`
+(`drm_core::slots`); `drm_dev_register()` takes the number, the two C
+functions are gone, and the behaviour is the same.
 
 Alternatives: a registry that the first driver module creates and
 publishes through a well-known symbol does not work, because a module
@@ -438,10 +499,10 @@ bind as well; a stable name for a particular device is its
 Whether the drivers should keep their devices attached is open.
 
 **GEM objects and references (R1).** A driver's buffer type implements
-`drm::gem::GemObject` (size, the `ddi_umem` cookie its mappings show,
+`drm_core::gem::GemObject` (size, the `ddi_umem` cookie its mappings show,
 optional hooks for movable objects); the core wraps it in a counted
 `GemInner` with its handle count, FLINK name and mmap offset, and hands out
-`GemRef`s. The count is `drm::karc::KArc`, not `alloc::sync::Arc`: its
+`GemRef`s. The count is `drm_core::karc::KArc`, not `alloc::sync::Arc`: its
 construction is fallible with the context token, and `KArc::release`
 returns the last reference's value in place instead of dropping it, which
 is what makes the interrupt-context rule possible without allocating:
@@ -496,7 +557,7 @@ refusal came from `devmap_map(9E)`, which `devmap_setup(9F)` reports as
 `ENXIO` and which leaves the segment in the process until it exits.)
 Mappings are cached; write-combining needs the private tier.
 
-**System memory and DMA (R1).** `drm::gem::SysMem` is locked kernel memory
+**System memory and DMA (R1).** `drm_core::gem::SysMem` is locked kernel memory
 from `ddi_umem_alloc(9F)` with `DDI_UMEM_SLEEP` (there is no
 `DDI_UMEM_PAGELOCK`; non-pageable is the default), which the function
 zero-fills itself (`vm/seg_dev.c` `bzero`s every non-pageable allocation).
@@ -519,7 +580,7 @@ dump device).
 
 Since illumos-ddi's own-node rule (its `docs/DESIGN.md` section 5.12), a
 DMA handle can only be allocated from the `ddi::OwnNode` that
-`ddi::Driver::attach` receives. `drm::Device::attach` takes that node and
+`ddi::Driver::attach` receives. `drm_core::Device::attach` takes that node and
 hands it to the GEM state, and `SysMem::new` takes `&OwnNode`; a `DevInfo`
 no longer allocates DMA handles, and illumos-ddi refuses the root node and
 nodes of other drivers with `DmaError::NotOwnNode` (`ENXIO`). The
@@ -534,7 +595,7 @@ The minor nodes are created from the same `OwnNode`, which illumos-ddi
 requires for them too.
 
 A failed DMA allocation or binding makes the creating ioctl fail with the
-errno Linux's DRM gives a failed object allocation (`drm::dmaerr`):
+errno Linux's DRM gives a failed object allocation (`drm_core::dmaerr`):
 `ENOMEM` when DMA resources are short or the memory cannot be mapped for
 the device (`DDI_DMA_NORESOURCES`, `DDI_DMA_TOOBIG`, `DDI_DMA_NOMAPPING`),
 `EINVAL` for attributes that can never be satisfied, `ENXIO` for a node
@@ -588,7 +649,7 @@ fails with `EINVAL` for GEM offsets; a piece split off by a partial
 remaps it. The test covers a head and a middle `munmap(2)` of a movable
 mapping with per-page patterns, before and after the pieces settle.
 
-**Fences (R2).** `drm::fence` is Linux's `dma_fence`: a fence on a
+**Fences (R2).** `drm_core::fence` is Linux's `dma_fence`: a fence on a
 context with a sequence number, compared wraparound-safe per context,
 signalled once with an optional error and a timestamp. Signalling never
 allocates and runs the callbacks, which are allocated ahead of time
@@ -617,9 +678,9 @@ before anything is torn down, so a refused device keeps its display and
 its fence timeline.
 
 **Reservations and wound/wait mutexes (R2).** Every GEM object has a
-reservation (`drm::resv`, Linux's `dma_resv`) holding fences with the
+reservation (`drm_core::resv`, Linux's `dma_resv`) holding fences with the
 usages kernel, write, read and bookkeep. Adding a fence needs the
-reservation's wound/wait mutex (`drm::wwmutex`), and readers iterate
+reservation's wound/wait mutex (`drm_core::wwmutex`), and readers iterate
 under a short internal mutex (no RCU). The wound/wait mutex follows the
 wait-die rule of Linux's reservation class: a transaction waits for
 younger holders and backs off with `EDEADLK` from older ones while it
@@ -628,14 +689,14 @@ holds other mutexes of the class, then sleeps on the contended one with
 test has two threads lock two mutexes in opposite orders at the same
 moment.
 
-**Sync objects (R2).** `drm::syncobj` is Linux's `drm_syncobj`: a binary
+**Sync objects (R2).** `drm_core::syncobj` is Linux's `drm_syncobj`: a binary
 fence slot or a timeline of chain points, with Linux's point lookup and
 query. `SYNCOBJ_WAIT` and `SYNCOBJ_TIMELINE_WAIT` wait for all or any of
 several objects, for submissions (`WAIT_FOR_SUBMIT`) or only for them
 (`WAIT_AVAILABLE`), with fence callbacks and submission waiters pointing
 at one waiter on the waiting thread's stack that the cleanup removes
 before it goes. The ioctls check their arguments and answer with the
-errnos Linux does (`drm::syncobj_ioctl` lists the rules: which `pad`
+errnos Linux does (`drm_core::syncobj_ioctl` lists the rules: which `pad`
 fields are checked, which unknown handles are `ENOENT` and which
 `EINVAL`). Deviations from Linux in R2, all refusals of input Linux
 ignores or cannot allocate for: `TRANSFER` refuses flags other than
@@ -696,7 +757,7 @@ R2 needs it, and a compositor using implicit synchronisation will.
 | mode setting (R3) | see *Mode setting (R3)* | `SETCRTC`, `CURSOR`, `CURSOR2`, `SETGAMMA`, `SETPROPERTY`, `OBJ_SETPROPERTY`, `PAGE_FLIP`, `DIRTYFB`, `SETPLANE`, `ATOMIC`, `ATTACHMODE`, `DETACHMODE` need the master; the others (getters, `ADDFB`, `ADDFB2`, `RMFB`, blobs, `WAIT_VBLANK`, CRTC sequences, `MODESET_CTL`) any primary file; none is allowed on render nodes (`EACCES`), as in Linux's `drm_ioctls[]`; `EOPNOTSUPP` for a device without `Driver::kms` |
 | `PRIME_HANDLE_TO_FD` | all files, render too | see *File descriptors, PRIME and sync files*; flags other than `DRM_CLOEXEC`, `DRM_RDWR` `EINVAL`; unknown handle `ENOENT`; `ENOSYS` without `GEM` |
 | `PRIME_FD_TO_HANDLE` | all files, render too | same device only; `flags` must be 0 |
-| `SYNCOBJ_CREATE`, `DESTROY`, `HANDLE_TO_FD`, `FD_TO_HANDLE`, `WAIT`, `RESET`, `SIGNAL` | all files, render too | `EOPNOTSUPP` without `Features::SYNCOBJ`; Linux's argument checks and errnos (`drm::syncobj_ioctl`) |
+| `SYNCOBJ_CREATE`, `DESTROY`, `HANDLE_TO_FD`, `FD_TO_HANDLE`, `WAIT`, `RESET`, `SIGNAL` | all files, render too | `EOPNOTSUPP` without `Features::SYNCOBJ`; Linux's argument checks and errnos (`drm_core::syncobj_ioctl`) |
 | `SYNCOBJ_TIMELINE_WAIT`, `QUERY`, `TRANSFER`, `TIMELINE_SIGNAL` | all files, render too | also `EOPNOTSUPP` without `Features::SYNCOBJ_TIMELINE` |
 | driver range `0x40`-`0x9f` | per `Driver::IOCTLS` | matched on the whole command value; the core checks the flags, then calls `Driver::ioctl` |
 
@@ -724,8 +785,8 @@ they are copied in (an unreadable byte is `EFAULT`) and copied back out
 unchanged by an `_IOWR` command, come back as zeros from an `_IOR`
 command, and are ignored by an `_IOW` command. Since G6 the core does
 exactly this for the core and mode-setting ioctls
-(`drm::ioctl::SizePlan`, checked against a restatement of Linux's code
-for every table entry, direction and size; `drm::uaccess::CoreArg` applies
+(`drm_core::ioctl::SizePlan`, checked against a restatement of Linux's code
+for every table entry, direction and size; `drm_core::uaccess::CoreArg` applies
 it), where it used to match the complete command value and answer any
 other size with `ENOTTY`. The size field of an illumos command has eight
 bits, so a size is known exactly below 256 bytes; every core and
@@ -752,15 +813,15 @@ retry never runs.
 **Concurrency.** All mutable device state of R0 is one `DeviceState` behind one
 `ddi::Mutex`. Each entry point performs its permission check and its state
 change in one critical section; copies from and to user memory happen
-outside it. `crates/drm/src/device.rs` gives the full argument. The state
+outside it. `crates/drm-core/src/device.rs` gives the full argument. The state
 machine is tested on the host from eight threads with an invariant check
 after every step, and the kernel side by `tools/test/drm_r0_test.c`, whose
 eight unprivileged threads open, authenticate and close files while the
 root master drops and retakes master in another process. The GEM state of
 R1 has its own locks (name table, then a file's handle table, then an
 object's mapping list; the offset, file and pending tables as leaves) and
-never drops a reference with one held; `crates/drm/src/gem.rs` and
-`crates/drm/src/objects.rs` give the argument, the host tests drive the
+never drops a reference with one held; `crates/drm-core/src/gem.rs` and
+`crates/drm-core/src/objects.rs` give the argument, the host tests drive the
 handle and name rules and the reference counting from eight threads, and
 `tools/test/drm_r1_test.c` runs eight threads of GEM ioctls and mappings
 against the kernel. R2's state has its own locks, taken inside, never
@@ -779,7 +840,7 @@ file and PRIME round trips against the kernel.
 Mode setting has two more locks, the mode-setting lock and the event
 lock, described below.
 
-**Mode setting (R3): structure.** KMS lives in `crates/drm/src/kms/`:
+**Mode setting (R3): structure.** KMS lives in `crates/drm-core/src/kms/`:
 `modes` (the mode type, its uAPI conversion and validation, the VESA DMT
 and CTA-861 tables, CVT, the mode list order), `edid` (base block and
 CTA-861 extensions to a mode list), `formats` (fourcc codes, legacy
@@ -883,6 +944,202 @@ driver's `before_detach` has dropped what it holds for itself); a refused
 device keeps its mode-setting state and its vblank source and works on.
 Only when every check has passed does the driver stop its sources
 (`before_teardown`) and the core release the KMS and GEM state. The refusal of `ATOMIC` to Xorg by process name stays open.
+
+**R5a: module layout.** `misc/drm_core` (`modules/drm_core`) is the only module
+that compiles `drm-core` with its `kernel` feature. It instantiates the
+core's generic device once, over a facade driver (`CDriver`) that forwards
+every hook of the core's `Driver` trait to a driver's C table
+(`struct drm_driver`), with a facade object type (`FObj`) for GEM objects
+and a facade KMS driver (`CKms`). A driver module registers its devices
+with `drm_dev_alloc()` and `drm_dev_register()` and points its `cb_ops`
+at the module's entry points (`drm_open` to `drm_segmap`, `DRM_CB_OPS`),
+which find the device by its device number in the module's device table
+and run illumos-ddi's character glue on it (`ddi::module::CharTable` and
+`table_glue`, added on illumos-ddi's `r5a-char-table` branch). Everything
+else a driver does is a call of a facade function. The module also owns
+the DRM device numbers, the fence domain of fences that belong to no
+device (`dma_fence_init()` on a driver's own structure; kstat
+`drm:0:sync`), and a per-thread record of the ioctl in progress, through
+which `drm_copy_from_user()`, `drm_copy_to_user()` and the
+file-descriptor functions find the caller's argument. `_fini` refuses
+while a device number is taken or a fence of the module's domain lives,
+and the kernel keeps the module while a driver that depends on it is
+loaded.
+
+**R5a: the module's name, and never beside gfx-drm.** The module is
+`misc/drm_core`, not `misc/drm`: OpenIndiana's gfx-drm delivers
+`/kernel/misc/amd64/drm`, the C core of its legacy drivers, in the
+package `driver/graphics/drm`, which libdrm requires. The two packages
+(`driver/graphics/drm` and `driver/graphics/drm-core`) install together,
+but the two stacks must never be loaded at the same time, and loading
+both by accident must be impossible: `misc/drm_core`'s `_init` refuses
+(`EBUSY`, with the warning "drm_core: the legacy DRM core misc/drm
+(gfx-drm) is loaded; ...") while the legacy `misc/drm` is loaded. The
+DDI has no way to ask whether a module is loaded without loading it
+(`ddi_modopen(9F)` loads it), so the check walks the module list under
+`mod_lock` (`modctl.h`, private, bound in illumos-ddi's private tier at
+the pinned gate commit) and matches the module name `drm`, which is how
+the framework itself identifies a module (a module's file name is
+whatever path its latest load used, `misc/drm` or
+`/kernel/misc/amd64/drm`); the wrapper is
+`ddi::private::module_loaded(name, &Sleepable)` and takes no hold, so a
+symmetric guard cannot deadlock against it. Its answer is a snapshot, so
+the opposite guard belongs in gfx-drm's `misc/drm`, which must refuse
+while `misc/drm_core` is loaded (a separate gfx-drm item).
+The guest test loads the legacy module from the installed
+`driver/graphics/drm`, checks that `misc/drm_core` refuses with the
+warning, unloads the legacy module and loads `misc/drm_core`. The facade
+keeps Linux's symbol names (`drm_dev_register` and so on), some of which
+gfx-drm's core exports too, so an unqualified fbt probe such as
+`fbt::drm_dev_register:entry` names functions of both modules; name the
+module (`fbt:drm_core:drm_dev_register:entry`). The fence domain's
+kstat keeps the name `drm:0:sync` of R2. The name follows G6's
+`misc/drm_minor`, whose table the module absorbed.
+
+**R5a: one code path.** The Rust drivers use the same C interface as
+`cdrmnull`: `drm-facade` turns a driver's `Driver` implementation into a
+static `struct drm_driver` (generic associated constants, promoted to
+`'static`), its ioctl table into `struct drm_ioctl_desc` entries with
+one dispatch thunk, its `GemObject` type into `struct drm_gem_object_funcs`
+and its KMS driver into the `drm_rkms_funcs` table, and wraps devices,
+files, objects, fences, sync objects and sync files in owning handles
+whose drops are the facade's put functions. There is no second path
+into the core. A `GemRef` or `GemAny` drop never assumes that it may
+block (a `timeout(9F)` handler looks like a thread to the kernel), so a
+last reference is released by the core's task queue; `put(&Sleepable)`
+releases it at once where the token proves that blocking is allowed. A
+`Syncobj` handle is neither `Send` nor `Sync`, so its drop stays in the
+thread that found it. An object's type is checked by a `TypeId` stored
+after the C structure, behind the one non-generic `free` callback of the
+driver module (generic functions may share addresses, so their
+addresses do not tell types apart).
+
+**R5a: concurrency.** A registered device is published for facade calls
+from any context through `drm_core::published::Published`: a call counts
+itself, then loads the pointer; `drm_dev_unregister()` first runs every
+refusal check on the published device (open files, framebuffers, GEM
+objects, fences, sync objects), so a refused device neither moves nor
+stops working, and only when the detach is certain takes the device out
+of the device table, then out of the facade, waiting for every call that
+still uses it, and then tears it down and frees it. `getinfo(9E)`, which
+the DDI does not serialise with `detach(9E)`, reads the node from the
+table and never touches the device. The counting is sequentially
+consistent and host-tested from eight threads; on the guest, `cdrmnull`'s
+detach keeps calling the facade from a thread-level and a soft-interrupt
+periodic handler while it unregisters (counts under *Where things stand*). The
+callbacks added through one `struct dma_fence` form an intrusive list
+through the driver's `struct dma_fence_cb` under a spin lock held with
+interrupts blocked on its processor (`ddi_enter_critical(9F)`; the
+critical sections only move pointers), so `dma_fence_add_callback()`
+works up to low-level interrupts. A callback may drop the last reference
+to its own structure while the fence signals; the release then skips
+waiting for that callback, and callbacks queued behind it never run
+(`cdrmnull`'s `FENCE_SELFTEST` checks these cases on the guest).
+
+**R5a: how generic code stays inside the module.** The facade consists of
+non-generic C functions over `#[repr(C)]` structures, so the core's
+generics are instantiated only inside `misc/drm_core`, over its facade types,
+and no Rust type, trait object or mangled symbol crosses the module
+boundary. `drm-facade`'s own generics (`Gem<T>`, `Device<D>`) are
+instantiated in each driver and only call C functions. A driver compiles
+`drm-core` without the `kernel` feature, for value helpers only; the
+test scripts and CI check that no driver module defines a symbol of the
+core's stateful modules. The link of `misc/drm_core` reduces every symbol but
+`_init`, `_fini`, `_info`, the 98 facade functions and `drm_debug` to
+local scope (`ld -B reduce -M modules/drm_core/drm_core.mapfile`; 102 global
+symbols), and CI and the test scripts compare the module's global
+symbols with the mapfile. `tools/facade/gen_facade.py` generates
+`drm_core.mapfile` and the drivers' `include/drm/drm_facade.mapfile` from the
+headers, so neither can miss a function. Alternatives: exporting the
+core's Rust interface would export mangled names of one compiler build,
+and generic code cannot be shared across modules at all; trait objects
+across modules depend on a vtable layout Rust does not fix; keeping a
+static core in each Rust driver beside a C facade for C drivers would
+have meant two code paths and no shared state, which is what made PRIME
+between devices of different drivers fail with `ENOTSUP` in R2.
+
+**R5a: facade version.** `drm_facade_version(struct drm_facade_version
+*out)` reports the facade's major and minor version and the sizes of
+its 28 public structures, in the order of the `DRM_FACADE_STRUCTS` list
+of `include/drm/drm_facade_version.h` (append only). The major version
+changes whenever a structure's size, a field's offset or meaning or a
+function's meaning changes, or a function is removed; the minor version
+changes when functions or callbacks are added without changing a size.
+A driver loads only on a core with the same major version, the same or a
+later minor version and the same size of every structure it was
+compiled with: C drivers call the inline `drm_facade_check()` in
+`_init(9E)`, the Rust drivers call `drm_facade::check_facade()` from
+`ddi::Driver::load` (a hook added to illumos-ddi for this), and either
+refuses to load with a warning naming the first difference.
+`drm_dev_alloc()` checks the version recorded in the driver's
+`struct drm_driver` again. Version 0 (now 0.1) is unstable: expect a new
+major version with each facade milestone (R5b, R5c, R5i).
+
+**R5a: the facade structures.** The headers are MIT-licensed
+reimplementations of the interfaces of Linux v7.2's headers, written from
+the documented interface rather than copied (decision D7): the
+structures and functions have Linux's names, and the public fields have
+Linux's names and order, followed by an opaque tail (`__core`) that the
+core owns. Each header records its origin. The public fields:
+`struct drm_device` 22 (`if_version` to `debugfs_root`, without
+`mode_config`, which waits for R5i; 296 bytes), `struct drm_minor` 4,
+`struct drm_file` 6, `struct drm_gem_object` 15 (`refcount` to `lru`,
+with Linux's `gpuva` and `lru` members; 256 bytes),
+`struct drm_gem_object_funcs` 8 (`free`, `open`, `close` and five
+illumos callbacks for memory and mappings), `struct dma_fence` 8
+(Linux's two unions counted once; 96 bytes), `struct dma_fence_ops` 7,
+`struct dma_fence_cb` 2, `struct dma_resv` 2, `struct dma_buf` 8,
+`struct dma_buf_attachment` 4 and `struct drm_driver` 22 (Linux's hooks
+the core calls, plus `illumos_*` limits and hooks), together with the
+`drm_rkms_*` structures of the KMS interface for Rust drivers. What a
+field holds is documented in the header; fields such as
+`dma_fence.flags` are copies the core refreshes, not the state itself.
+`xtask facade-check` compares the sizes and offsets of `drm-facade-sys`
+with what gcc computes on illumos (`tools/facade/facade_layout.c`,
+38 sizes and 233 offsets; the members of anonymous unions are checked
+through their parents, not one by one), and `kernel-check` compares them
+with the loaded module's CTF. `tools/facade/check-generated.sh` (CI)
+checks that the bindings, both mapfiles, the layout program and xtask's
+table are what the generators make of the headers.
+
+**R5a: CTF.** `ctfconvert` does not read Rust's DWARF, so `misc/drm_core`
+carries the CTF of a C shadow: `modules/drm_core/ctf/drm_facade_ctf.c`
+includes every facade header and names every facade structure, and
+`build-ctf.sh` compiles it with DWARF, converts it with the gate's
+`ctfconvert -l drm`, drops the DWARF and leaves a 57 KB object that is
+linked into the module beside the Rust archive. Its CTF is a standalone
+container (2664 types, with the kernel types the facade uses), so
+`mdb -k` prints `::print -t struct drm_device`, `::sizeof struct
+dma_fence` and live structures such as a driver's `drm_device`. The
+module's own Rust types stay without CTF. The shadow's variables are
+local after the link, so the CTF's object section does not describe the
+module's symbols; only its types matter.
+
+**R5a: deviations from Linux.** `struct drm_device` has no `mode_config`
+(R5i); the Rust drivers' KMS goes through the illumos `drm_rkms_*`
+interface, and `cdrmnull` has no display yet (its port of `rdrmnull`'s
+virtual display is deferred to R5i). `struct mutex` is
+`struct lx_mutex`, because illumos has a `struct mutex` of its own.
+`dma_fence_wait_timeout()` counts clock ticks; fence callbacks other than
+`release` are not called yet (fences are signalled explicitly), the
+fence lock is unused and `cb_list` is not a list. `dma_resv` functions
+take only a NULL acquire context; the lock belongs to the thread that
+took it (only it adds fences and unlocks; a relock by the holder fails
+with `-EDEADLK` where Linux would deadlock), and a `dma_resv_usage`
+outside Linux's four is refused. `drm_dev_unregister()` returns
+`-EBUSY` when the core refuses (a file or an object is still in use)
+instead of nothing. GEM memory and user mappings use illumos backings
+and the devmap framework (`drm_illumos_*` in `include/drm/drm_illumos.h`),
+and a reference dropped from a `timeout(9F)` handler goes through
+`drm_illumos_gem_object_put_deferred()`, because the core cannot tell
+that context from thread context; `dma_fence_init()`,
+`drm_illumos_fence_create()` and `dma_fence_signal()` never block, in
+any context. `dma_buf_fd()` takes over the caller's reference, as on
+Linux. PRIME import between devices of
+different drivers is supported and returns the exporter's object (one
+handle per object per file), which R2 refused with `ENOTSUP`; a C
+driver's import of another device's buffer exports that buffer again,
+as on Linux.
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
@@ -990,32 +1247,50 @@ rustup target add x86_64-unknown-illumos
 cargo check --workspace --target x86_64-unknown-illumos
 cargo clippy --workspace --target x86_64-unknown-illumos -- -D warnings
 cargo fmt --all -- --check
-cargo test -p drm -p drm-uapi -p drm_minor   # host target
+cargo test -p drm-core -p drm-uapi -p drm-facade   # host target
 ```
 
-The kernel module needs the pinned nightly with `rust-src`, because `core`
+The kernel modules need the pinned nightly with `rust-src`, because `core`
 and `alloc` are rebuilt without SSE for `targets/x86_64-illumos-kmod.json`.
 Compiling works on any host; linking needs the illumos linker:
 
 ```sh
-cargo xtask build drm_minor          # target/x86_64-illumos-kmod/release/drm_minor.a
+cargo xtask build drm-module         # target/x86_64-illumos-kmod/release/drm_module.a
 cargo xtask build rdrmnull           # target/x86_64-illumos-kmod/release/rdrmnull.a
-# on illumos, or: cargo xtask link drm_minor; cargo xtask link rdrmnull
-ld -ztype=kmod -B reduce -M modules/drm-minor/exports.mapfile -z allextract drm_minor.a -o drm_minor
-ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract rdrmnull.a -o rdrmnull
+# on illumos (or: cargo xtask link drm-module; cargo xtask link rdrmnull)
+modules/drm_core/ctf/build-ctf.sh    # drm_facade_ctf.o, needs the gate's ctfconvert
+ld -ztype=kmod -N fs/specfs -B reduce -M modules/drm_core/drm_core.mapfile \
+    -z allextract drm_module.a -z defaultextract drm_facade_ctf.o -o drm_core
+ld -ztype=kmod -N fs/specfs -N misc/drm_core -z allextract rdrmnull.a -o rdrmnull
+cargo xtask symbols drm_core modules/drm_core/drm_core.mapfile   # its globals are the mapfile's
 ```
 
-`misc/drm_minor` must be installed (`/kernel/misc/amd64/drm_minor`, or
-the package `driver/graphics/drm-minor` of `packaging/drm-minor.p5m`)
-before any driver loads; the test scripts install it from `drm_minor.a`
-and `drm_minor.mapfile` (a copy of `modules/drm-minor/exports.mapfile`)
-when it is missing and remove it again.
+A C driver includes `<drm/drm_facade.h>` (the repository's `include`
+directory before the system headers, which provide `sys/*.h` and libdrm's
+`drm/drm.h`), calls `drm_facade_check()` in `_init(9E)` and is linked
+with `-N misc/drm_core`; with `-z defs`, the gate's `ddi.mapfile` and
+`include/drm/drm_facade.mapfile` declare what it may call.
+`drivers/cdrmnull/build.sh` does this with the gate's kernel compiler
+flags:
+
+```sh
+DDI_MAPFILE=<gate>/usr/src/uts/common/mapfiles/ddi.mapfile drivers/cdrmnull/build.sh
+# ld -ztype=kmod -N misc/drm_core -z defs -M ddi.mapfile \
+#     -M include/drm/drm_facade.mapfile -M drivers/cdrmnull/private.mapfile ...
+```
+
+`misc/drm_core` must be installed (`/kernel/misc/amd64/drm_core`, or the package
+`driver/graphics/drm-core` of `packaging/drm-core.p5m`) before any driver
+loads; the test scripts link it from `drm_module.a` and `drm_core.mapfile`
+(and `drm_facade_ctf.o` if present) when it is not installed, and remove
+it again. It is installed beside OpenIndiana's gfx-drm but never loaded
+beside it (see *R5a: the module's name, and never beside gfx-drm*).
 
 `tools/test/run-r1-test.sh` does the rest on a disposable illumos VM, as
 root, in a directory with `rdrmnull.a`, `rdrmnull.conf`,
 `tools/test/drm_r0_test.c`, `tools/test/drm_r1_test.c`,
-`tools/test/drm_r2_test.c`, `tools/test/drm-test-lib.sh`, `drm_minor.a`
-and `drm_minor.mapfile` and the patched headers as `drm/`: it records
+`tools/test/drm_r2_test.c`, `tools/test/drm-test-lib.sh`, `drm_module.a`
+and `drm_core.mapfile` and the patched headers as `drm/`: it records
 the driver files in `/etc` and the `/devices` tree, links the module,
 checks that the running kernel exports every symbol the module imports,
 builds the test programs (64-bit with libdrm and libkstat, and 32-bit
@@ -1035,13 +1310,15 @@ virtio framework too:
 
 ```sh
 cargo xtask build virtio_gpu
-ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_minor -z allextract virtio_gpu.a -o virtio_gpu   # on illumos
+ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_core -z allextract virtio_gpu.a -o virtio_gpu   # on illumos
 ```
 
 `tools/test/run-r4-test.sh` links, installs (`add_drv -i
 '"pci1af4,1050"'`), tests and removes it on a guest with a virtio-gpu
 device. `tools/test/run-g6-test.sh` runs `virtio_gpu` and two `rdrmnull`
-devices together (see its header for the files it needs).
+devices together (see its header for the files it needs), and
+`tools/test/run-r5a-test.sh` runs `cdrmnull`, `rdrmnull` and
+`virtio_gpu` together on `misc/drm_core` (see its header).
 
 ## Checks
 
@@ -1054,23 +1331,33 @@ gcc -m64 -DV1 -I<libdrm 2.4.109 include/drm> -o c1 tools/uapi/virtgpu_compat_lay
 gcc -m64 -DV2 -I<mesa include/drm-uapi> -I<include/drm> -o c2 tools/uapi/virtgpu_compat_layout.c && ./c2 >> out
 cargo xtask uapi-check out
 
+# the facade's layouts against gcc on illumos
+gcc -m64 -D_KERNEL -std=gnu99 -I include -S -o - tools/facade/facade_layout.c |
+    sed -n 's/^.*@@ //p' | tr -d '"' > out     # on illumos
+cargo xtask facade-check out            # committed: tools/facade/facade_layout.illumos.out
+ILLUMOS_GATE=~/illumos-gate tools/facade/generate.sh   # regenerate bindings, mapfiles, tables
+
 # DDI layouts and symbols of the pinned ddi-sys and the private crates,
-# and the two functions of drm-minor-sys, against a running kernel
-# (misc/drm_minor must be loaded: modload -p misc/drm_minor)
+# and drm-facade-sys's layouts (through misc/drm_core's CTF) and functions,
+# against a running kernel (misc/drm_core must be loaded: modload -p misc/drm_core)
 cargo xtask kernel-check --emit | ssh root@host 'mdb -k 2>&1' | cargo xtask kernel-check --verify -
 ```
 
 ## Continuous integration
 
 `.forgejo/workflows/ci.yml` follows illumos-ddi's Solstice CI setup: one
-job type-checks, lints, checks formatting, builds the documentation and
-runs the host tests against the hosted illumos target; a second job builds
-`drm_minor`, `rdrmnull` and `virtio_gpu` for the kernel target natively on
-illumos and links them with `ld -ztype=kmod` (`drm_minor` with its exports
-mapfile, whose global symbols it checks; the drivers with
-`-N misc/drm_minor`). Neither loads the module, which needs root on a kernel
-that may panic (an R1 trial did panic the test machine, see *System memory
-and DMA*).
+job type-checks, lints, checks formatting, builds the documentation, runs
+the host tests against the hosted illumos target and compares the uAPI
+and facade layouts with the committed gcc output; a second job builds
+`drm`, `rdrmnull` and `virtio_gpu` for the kernel target natively on
+illumos and links them with `ld -ztype=kmod` (`misc/drm_core` with
+`-B reduce` and `drm_core.mapfile`, whose global symbols it compares with the
+mapfile, and with the facade's CTF where `ctfconvert` is installed; the
+drivers with `-N misc/drm_core`, checking that neither carries a symbol of the
+core's stateful modules), and builds `cdrmnull` with `-z defs` against
+the gate's `ddi.mapfile`. Neither loads a module, which needs root on a
+kernel that may panic (an R1 trial did panic the test machine, see
+*System memory and DMA*).
 
 ## Licence
 

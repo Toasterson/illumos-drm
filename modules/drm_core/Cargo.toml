@@ -1,0 +1,35 @@
+[package]
+name = "drm-module"
+description = "misc/drm_core: the DRM core of illumos-drm as one kernel module, with the C facade (include/drm) that every DRM driver links against"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# The archive drm_module.a, linked as the module drm_core.
+crate-type = ["staticlib"]
+
+[dependencies]
+# global-alloc-sleep: the core keeps its handle and name tables in
+# alloc::collections::BTreeMap and inserts only with the Sleepable token.
+# unstable-gate-cda5b9a49f: the private tier for dma-bufs, sync objects and
+# sync files (and the devmap guard of the char glue).
+ddi = { workspace = true, features = ["panic-handler", "global-alloc-sleep", "unstable-gate-cda5b9a49f"] }
+drm-core = { workspace = true, features = ["kernel"] }
+drm-uapi.workspace = true
+# The facade's types; its functions are defined here.
+drm-facade-sys.workspace = true
+
+[package.metadata.kmod]
+# Install class: /kernel/misc/amd64/drm_core (or /usr/kernel/misc/amd64).
+class = "misc"
+# Linked and installed as misc/drm_core (not misc/drm, which is the C core of
+# OpenIndiana's gfx-drm, installed beside it).
+module = "drm_core"
+depends = []
+# Linked with -B reduce -M drm_core.mapfile (generated from include/drm by
+# tools/facade/gen_facade.py): only _init, _fini, _info and the facade stay
+# global.
+exports = "drm_core.mapfile"

@@ -45,7 +45,7 @@
 
 /*
  * The nodes under test. Device numbers are shared by every DRM driver
- * (misc/drm_minor), so rdrmnull's devices are card<N> and renderD<128+N>
+ * (misc/drm_core), so rdrmnull's devices are card<N> and renderD<128+N>
  * for whatever N they were given; the run scripts pass them in DRM_CARD
  * and DRM_RENDER, and the driver instance (for the kstats) in
  * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.
@@ -53,6 +53,12 @@
 static const char *card_path __attribute__((unused)) = "/dev/dri/card0";
 static const char *render_path __attribute__((unused)) = "/dev/dri/renderD128";
 static int drm_instance __attribute__((unused));
+
+/*
+ * The driver under test (DRM_DRIVER): rdrmnull, or cdrmnull, its C port on
+ * the facade (milestone R5a). Its name is also its kstat module.
+ */
+static const char *drv_name = "rdrmnull";
 
 static void nodes_from_env(void) __attribute__((constructor));
 static void
@@ -66,6 +72,8 @@ nodes_from_env(void)
 		render_path = s;
 	if ((s = getenv("DRM_INSTANCE")) != NULL && *s != '\0')
 		drm_instance = atoi(s);
+	if ((s = getenv("DRM_DRIVER")) != NULL && *s != '\0')
+		drv_name = s;
 }
 
 #define	CARD	card_path
@@ -177,7 +185,7 @@ gem_stats(struct gem *g)
 	(void) memset(g, 0xff, sizeof (*g));
 	if ((kc = kstat_open()) == NULL)
 		return (0);
-	ksp = kstat_lookup(kc, "rdrmnull", drm_instance, "gem");
+	ksp = kstat_lookup(kc, (char *)drv_name, drm_instance, "gem");
 	if (ksp != NULL && kstat_read(kc, ksp, NULL) != -1) {
 		ok = 1;
 		for (i = 0; i < (int)(sizeof (names) / sizeof (names[0])); i++) {

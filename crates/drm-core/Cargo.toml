@@ -1,0 +1,37 @@
+[package]
+name = "drm-core"
+description = "The DRM core for illumos: device registration, card and render nodes, per-file state, core ioctls, GEM objects, dumb buffers and kernel mode setting"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["kernel"]
+# The core proper: devices, files, GEM, fences, PRIME, sync objects and mode
+# setting, for the kernel module misc/drm_core (modules/drm_core), the only crate that
+# enables it. Without it the crate is only its value helpers (dumb-buffer
+# layouts, display modes and formats, EDID, KArc/KVec/ksync, the software
+# vblank), which drivers may compile in: they hold no state of the core.
+kernel = []
+# Test aid, off by default: lets GemDma::against name a device node other
+# than the driver's own, bypassing illumos-ddi's own-node rule with raw
+# ddi_dma_alloc_handle(9F) calls. It exists only so that the rdrmnull DMA
+# drill can reproduce the 2026-09-28 root-node panic on a disposable VM.
+# A production build must not enable it.
+panic-drill = []
+
+[dependencies]
+# unstable-gate-cda5b9a49f: ddi::private::fd, the anonymous file
+# descriptors of dma-bufs, sync object files and sync files, over the
+# private tier of illumos-ddi pinned to gate cda5b9a49f (see
+# docs/anon-fd.md).
+ddi = { workspace = true, features = ["unstable-gate-cda5b9a49f"] }
+drm-uapi.workspace = true
+
+[package.metadata.kmod]
+# The core is the library of the kernel module misc/drm_core (modules/drm_core), the
+# only crate that links it; its own symbols need nothing beyond genunix,
+# unix and (from the private tier) fs/specfs.
+depends = []

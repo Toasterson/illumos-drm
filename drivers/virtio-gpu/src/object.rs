@@ -4,32 +4,35 @@
 
 //! GEM objects: a host resource with guest memory behind it.
 //!
-//! Every object is system memory from the core's R1 backend
-//! ([`SysMem`]), bound for DMA against the device's own node, whose
-//! scatter/gather cookies become the resource's memory entries
-//! (`RESOURCE_ATTACH_BACKING`, or the entries of `RESOURCE_CREATE_BLOB`).
-//! The host resource is 2D (`RESOURCE_CREATE_2D`: dumb buffers, and
-//! `RESOURCE_CREATE` without virgl), 3D (`RESOURCE_CREATE_3D`) or a blob
-//! with guest memory (`BLOB_MEM_GUEST`, `BLOB_MEM_HOST3D_GUEST`).
+//! Every object is a [`Gem<VgObject>`]: system memory of the DRM core
+//! (backing 0 of `drm_gem_object_init`), bound for DMA against the
+//! device's own node because the device registers with the driver's DMA
+//! attributes. The backing's scatter/gather cookies become the resource's
+//! memory entries (`RESOURCE_ATTACH_BACKING`, or the entries of
+//! `RESOURCE_CREATE_BLOB`). The host resource is 2D (`RESOURCE_CREATE_2D`:
+//! dumb buffers, and `RESOURCE_CREATE` without virgl), 3D
+//! (`RESOURCE_CREATE_3D`) or a blob with guest memory (`BLOB_MEM_GUEST`,
+//! `BLOB_MEM_HOST3D_GUEST`).
 //!
 //! With virgl, a handle to an object attaches its resource to the file's
 //! rendering context and removing the handle detaches it
 //! (`CTX_ATTACH_RESOURCE`, `CTX_DETACH_RESOURCE`, Linux's GEM open and
 //! close callbacks). When the object is destroyed, `RESOURCE_UNREF` tells
-//! the host to drop the resource and its backing, and the memory is freed
-//! only once the device has answered; if it never does, the memory is
-//! leaked rather than freed under the device.
+//! the host to drop the resource and its backing, and the driver waits for
+//! the device's answer before the core frees the memory. If the device
+//! does not answer, the warning says so; the core frees the memory anyway,
+//! because the facade has no way to keep an object's memory after its
+//! release.
 
 use core::mem::size_of;
 use core::ptr::NonNull;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use ddi::prelude::*;
-use drm::gem::{GemCore, GemObject, GemRef, SysMem, UmemCookie};
-use drm::karc::KArc;
-use drm::minor::CloneId;
+use drm_facade::karc::KArc;
+use drm_facade::{File, Gem, GemObject, GemRef};
 
-use crate::gpu::{Cmd, Dev, Gpu, Q, dev_warn};
+use crate::gpu::{Cmd, Dev, DrmDev, Gpu, Q, dev_warn};
 use crate::proto::{self, CtrlHdr, MemEntry};
 
 /// A pointer to the device, which outlives every object (the DRM core
@@ -64,10 +67,7 @@ impl DevRef {
 /// What kind of host resource an object has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// No resource (memory converted by the core; never used by this
-    /// driver).
-    None,
-    /// A 2D resource: its size and virtio format, for scanout transfers.
+    /// A 2D resource: its size, for scanout transfers.
     Res2d {
         /// Width in pixels.
         width: u32,
@@ -83,42 +83,16 @@ pub enum Kind {
     },
 }
 
-/// A buffer object of `virtio_gpu`.
+/// The data of a buffer object of `virtio_gpu`, after the core's
+/// `drm_gem_object` in a [`Gem<VgObject>`].
 pub struct VgObject {
-    mem: Option<SysMem>,
-    cookie: UmemCookie,
-    size: usize,
-    segments: usize,
-    /// The host resource id, 0 for none.
+    /// The host resource id (never 0).
     res: u32,
-    /// The host resource exists.
-    created: bool,
+    /// The host resource exists: set once its creation was queued, taken
+    /// by the destruction.
+    created: AtomicBool,
     kind: Kind,
-    dev: Option<DevRef>,
-}
-
-// SAFETY: the memory is SysMem (Send and Sync) and its cookie, a handle the
-// kernel accepts from any thread; the rest is plain data and DevRef.
-unsafe impl Send for VgObject {}
-// SAFETY: as above; `&VgObject` only reads fixed fields.
-unsafe impl Sync for VgObject {}
-
-impl From<SysMem> for VgObject {
-    /// Memory without a host resource. The core converts dumb buffer memory
-    /// this way by default; this driver creates dumb buffers with
-    /// `Driver::dumb_object` instead, so no such object is ever made.
-    fn from(m: SysMem) -> VgObject {
-        VgObject {
-            cookie: m.umem_cookie(),
-            size: m.size(),
-            segments: m.sg_len(),
-            mem: Some(m),
-            res: 0,
-            created: false,
-            kind: Kind::None,
-            dev: None,
-        }
-    }
+    dev: DevRef,
 }
 
 impl VgObject {
@@ -138,23 +112,21 @@ impl VgObject {
             _ => 0,
         }
     }
-    /// The memory entries of the backing: its DMA cookies, `None` for a
-    /// cookie longer than an entry can say (4 GiB).
-    fn entries(&self) -> impl Iterator<Item = Option<MemEntry>> + '_ {
-        self.mem
-            .iter()
-            .flat_map(|m| m.sg_iter())
-            .map(|c| u32::try_from(c.size).ok().map(|length| MemEntry { addr: c.address, length, padding: 0 }))
-    }
-    fn nr_entries(&self) -> usize {
-        self.segments
+    fn created(&self) -> bool {
+        self.created.load(Ordering::Acquire)
     }
 }
 
-/// Writes the memory entries of `obj` into the data buffer of `c`.
-fn write_entries(c: &Cmd, obj: &VgObject) -> Result<(), Errno> {
+/// The memory entries of an object's backing: its DMA cookies, `None` for
+/// a cookie longer than an entry can say (4 GiB).
+fn entries(gem: &Gem<VgObject>) -> impl Iterator<Item = Option<MemEntry>> + '_ {
+    gem.sg_iter(0).map(|c| u32::try_from(c.size).ok().map(|length| MemEntry { addr: c.address, length, padding: 0 }))
+}
+
+/// Writes the memory entries of `gem` into the data buffer of `c`.
+fn write_entries(c: &Cmd, gem: &Gem<VgObject>) -> Result<(), Errno> {
     let d = c.data().ok_or(Errno::EINVAL)?;
-    for (i, e) in obj.entries().enumerate() {
+    for (i, e) in entries(gem).enumerate() {
         let e = e.ok_or(Errno::EINVAL)?;
         d.write(i * size_of::<MemEntry>(), proto::bytes_of(&e))?;
     }
@@ -187,79 +159,50 @@ pub enum Create {
     },
 }
 
-/// Makes a GEM object of `size` bytes (rounded up to pages) with a host
-/// resource created as `how`. The memory is charged to the device's budget
-/// first; everything is undone on failure.
-pub fn create(
-    gem: &KArc<GemCore<VgObject>>,
-    dr: DevRef,
-    size: usize,
-    how: Create,
-    ctx: &Sleepable,
-) -> Result<GemRef<VgObject>, Errno> {
-    let size = size.checked_next_multiple_of(drm::offsets::PAGE_SIZE as usize).ok_or(Errno::EINVAL)?;
+/// Makes a GEM object of `size` bytes (rounded up to pages) of DRM device
+/// `drm` with a host resource created as `how`: the facade checks the
+/// device's limits and allocates the memory, then the resource is created
+/// and its backing attached, waiting for both. On failure the object is
+/// dropped, and its release unrefs whatever the device may have created.
+pub fn create(drm: &DrmDev, dr: DevRef, size: usize, how: Create, ctx: &Sleepable) -> Result<GemRef<VgObject>, Errno> {
+    let size = size.checked_next_multiple_of(drm_facade::offsets::PAGE_SIZE as usize).ok_or(Errno::EINVAL)?;
     if size == 0 || size > crate::MAX_OBJECT {
         return Err(if size == 0 { Errno::EINVAL } else { Errno::ENOMEM });
     }
-    let reservation = gem.reserve(size, ctx)?;
-    let mem = gem.sys_mem(size, ctx)?;
-    let obj = with_resource(dr, mem, how, ctx)?;
-    GemCore::create_reserved(gem, obj, reservation, ctx)
-}
-
-/// Wraps `mem` in an object and creates its host resource: sends the
-/// creation and the backing, and waits for both.
-pub fn with_resource(dr: DevRef, mem: SysMem, how: Create, ctx: &Sleepable) -> Result<VgObject, Errno> {
     let gpu = dr.gpu();
-    let dev = dr.dev();
     let res = gpu.resource_id()?;
     let kind = match &how {
         Create::Res2d { width, height, .. } => Kind::Res2d { width: *width, height: *height },
         Create::Res3d(_) => Kind::Res3d,
         Create::Blob { mem, .. } => Kind::Blob { mem: *mem },
     };
-    let mut obj = VgObject {
-        cookie: mem.umem_cookie(),
-        size: mem.size(),
-        segments: mem.sg_len(),
-        mem: Some(mem),
-        res,
-        created: false,
-        kind,
-        dev: Some(dr),
-    };
-    let entries = obj.nr_entries();
+    let obj = VgObject { res, created: AtomicBool::new(false), kind, dev: dr };
+    let gem = GemRef::new(drm, size, obj, true)?;
+    let entries = gem.sg_count(0);
     if entries == 0 {
-        // The memory must be bound for DMA (Driver::DMA_ATTR).
+        // The memory must be bound for DMA (Settings::dma).
         return Err(Errno::EIO);
     }
     let data_len = entries.checked_mul(size_of::<MemEntry>()).ok_or(Errno::ENOMEM)?;
     if data_len > crate::gpu::MAX_DATA {
         return Err(Errno::ENOMEM);
     }
-    match send_create(gpu, dev, &mut obj, how, data_len, ctx) {
-        Ok(()) => Ok(obj),
-        Err(e) => {
-            // Not a GEM object yet, so the core will not call release();
-            // unref whatever the device may have created.
-            obj.destroy(ctx);
-            Err(e)
-        }
-    }
+    send_create(gpu, dr.dev(), &gem, how, data_len, ctx)?;
+    Ok(gem)
 }
 
-/// Sends the creation of `obj`'s resource and its backing and waits for
+/// Sends the creation of `gem`'s resource and its backing and waits for
 /// both; marks the object created once the first request is queued.
 fn send_create(
     gpu: &Gpu,
     dev: &Dev,
-    obj: &mut VgObject,
+    gem: &Gem<VgObject>,
     how: Create,
     data_len: usize,
     ctx: &Sleepable,
 ) -> Result<(), Errno> {
     let hdr_len = size_of::<CtrlHdr>();
-    let res = obj.res;
+    let res = gem.res;
     let first = match how {
         Create::Res2d { format, width, height } => {
             let req = proto::ResourceCreate2d {
@@ -282,23 +225,23 @@ fn send_create(
                 resource_id: res,
                 blob_mem: mem,
                 blob_flags: flags,
-                nr_entries: obj.nr_entries() as u32,
+                nr_entries: gem.sg_count(0) as u32,
                 blob_id,
-                size: obj.size as u64,
+                size: gem.size() as u64,
             };
             let c = gpu.cmd(dev, &req, hdr_len, data_len, Q::Ctrl, ctx)?;
-            write_entries(&c, obj)?;
+            write_entries(&c, gem)?;
             c
         }
     };
-    let blob = matches!(obj.kind, Kind::Blob { .. });
+    let blob = matches!(gem.kind, Kind::Blob { .. });
     gpu.submit(dev, &first, None, ctx)?;
-    obj.created = true;
+    gem.created.store(true, Ordering::Release);
     gpu.stats.resources.fetch_add(1, Ordering::Relaxed);
     gpu.stats.live_resources.fetch_add(1, Ordering::Relaxed);
     // A blob gets its memory entries with the creation; the others attach
     // their backing next. The device processes the control queue in order.
-    let second = if blob { None } else { Some(attach_backing(gpu, dev, obj, data_len, ctx)?) };
+    let second = if blob { None } else { Some(attach_backing(gpu, dev, gem, data_len, ctx)?) };
     let t1 = gpu.wait(dev, &first, ctx)?;
     crate::gpu::check(t1, proto::RESP_OK_NODATA)?;
     if let Some(c) = second {
@@ -307,96 +250,101 @@ fn send_create(
     Ok(())
 }
 
-fn attach_backing(gpu: &Gpu, dev: &Dev, obj: &VgObject, data_len: usize, ctx: &Sleepable) -> Result<KArc<Cmd>, Errno> {
+fn attach_backing(
+    gpu: &Gpu,
+    dev: &Dev,
+    gem: &Gem<VgObject>,
+    data_len: usize,
+    ctx: &Sleepable,
+) -> Result<KArc<Cmd>, Errno> {
     let req = proto::AttachBacking {
         hdr: CtrlHdr::new(proto::CMD_RESOURCE_ATTACH_BACKING),
-        resource_id: obj.res,
-        nr_entries: obj.nr_entries() as u32,
+        resource_id: gem.res,
+        nr_entries: gem.sg_count(0) as u32,
     };
     let c = gpu.cmd(dev, &req, size_of::<CtrlHdr>(), data_len, Q::Ctrl, ctx)?;
-    write_entries(&c, obj)?;
+    write_entries(&c, gem)?;
     gpu.submit(dev, &c, None, ctx)?;
     Ok(c)
 }
 
-impl GemObject for VgObject {
-    fn size(&self) -> usize {
-        self.size
-    }
-    fn dma_segments(&self) -> usize {
-        self.segments
-    }
-    fn umem(&self) -> UmemCookie {
-        self.cookie
-    }
-    fn handle_opened(&self, file: CloneId, ctx: &Sleepable) -> Result<(), Errno> {
-        let Some(dr) = self.dev else { return Ok(()) };
-        let gpu = dr.gpu();
-        if !gpu.virgl() || !self.created {
-            return Ok(());
-        }
-        // As Linux: the context may not exist yet when the first ioctl of a
-        // file is MODE_CREATE_DUMB or PRIME_FD_TO_HANDLE.
-        let id = gpu.ensure_context(dr.dev(), file, ctx)?;
-        let req = proto::ResourceOnly {
-            hdr: CtrlHdr::ctx(proto::CMD_CTX_ATTACH_RESOURCE, id),
-            resource_id: self.res,
-            padding: 0,
-        };
-        gpu.fire(dr.dev(), &req, ctx).map(drop)
-    }
-    fn handle_closed(&self, file: CloneId, ctx: &Sleepable) {
-        let Some(dr) = self.dev else { return };
-        let gpu = dr.gpu();
-        if !gpu.virgl() || !self.created || !gpu.has_context(file) {
-            return;
-        }
-        let req = proto::ResourceOnly {
-            hdr: CtrlHdr::ctx(proto::CMD_CTX_DETACH_RESOURCE, Gpu::ctx_id(file)),
-            resource_id: self.res,
-            padding: 0,
-        };
-        if let Err(e) = gpu.fire(dr.dev(), &req, ctx) {
-            dev_warn(gpu.instance, format_args!("CTX_DETACH_RESOURCE of resource {}: {e:?}", self.res));
-        }
-    }
-    fn release(&mut self, ctx: &Sleepable) {
-        self.destroy(ctx);
-    }
+/// The facade calls the object's hooks in thread context.
+fn ctx() -> Sleepable {
+    // SAFETY: GEM open, close and release run in thread context (the
+    // facade's contract for drm_gem_object_funcs).
+    unsafe { Sleepable::assume() }
 }
 
-impl VgObject {
-    /// Drops the host resource (`RESOURCE_UNREF`, which also detaches the
-    /// backing) and waits for the device's answer, after which the memory
-    /// may be freed. If the device does not answer, the memory is leaked.
-    fn destroy(&mut self, ctx: &Sleepable) {
-        let Some(dr) = self.dev else { return };
-        if !core::mem::take(&mut self.created) {
+impl GemObject for VgObject {
+    fn open(gem: &Gem<Self>, file: &File) -> Result<(), Errno> {
+        let dr = gem.dev;
+        let gpu = dr.gpu();
+        if !gpu.virgl() || !gem.created() {
+            return Ok(());
+        }
+        let ctx = ctx();
+        // As Linux: the context may not exist yet when the first ioctl of a
+        // file is MODE_CREATE_DUMB or PRIME_FD_TO_HANDLE.
+        let id = gpu.ensure_context(dr.dev(), file.id(), &ctx)?;
+        let req = proto::ResourceOnly {
+            hdr: CtrlHdr::ctx(proto::CMD_CTX_ATTACH_RESOURCE, id),
+            resource_id: gem.res,
+            padding: 0,
+        };
+        gpu.fire(dr.dev(), &req, &ctx).map(drop)
+    }
+
+    fn close(gem: &Gem<Self>, file: &File) {
+        let dr = gem.dev;
+        let gpu = dr.gpu();
+        if !gpu.virgl() || !gem.created() {
             return;
         }
+        let Some(id) = gpu.context(file.id()) else { return };
+        let req = proto::ResourceOnly {
+            hdr: CtrlHdr::ctx(proto::CMD_CTX_DETACH_RESOURCE, id),
+            resource_id: gem.res,
+            padding: 0,
+        };
+        if let Err(e) = gpu.fire(dr.dev(), &req, &ctx()) {
+            dev_warn(gpu.instance, format_args!("CTX_DETACH_RESOURCE of resource {}: {e:?}", gem.res));
+        }
+    }
+
+    /// Drops the host resource (`RESOURCE_UNREF`, which also detaches the
+    /// backing) and waits for the device's answer, after which the core
+    /// frees the memory. Also the end of an object whose resource was never
+    /// created, or whose creation failed half-way. Without an answer the
+    /// device may still use the memory, so the core is told to leak it.
+    fn release(gem: &mut Gem<Self>) -> bool {
+        if !gem.created.swap(false, Ordering::AcqRel) {
+            return true;
+        }
+        let dr = gem.dev;
         let gpu = dr.gpu();
+        let ctx = ctx();
         let req =
-            proto::ResourceOnly { hdr: CtrlHdr::new(proto::CMD_RESOURCE_UNREF), resource_id: self.res, padding: 0 };
+            proto::ResourceOnly { hdr: CtrlHdr::new(proto::CMD_RESOURCE_UNREF), resource_id: gem.res, padding: 0 };
         let r = gpu
-            .cmd(dr.dev(), &req, size_of::<CtrlHdr>(), 0, Q::Ctrl, ctx)
-            .and_then(|c| gpu.submit(dr.dev(), &c, None, ctx).and_then(|_| gpu.wait(dr.dev(), &c, ctx)));
+            .cmd(dr.dev(), &req, size_of::<CtrlHdr>(), 0, Q::Ctrl, &ctx)
+            .and_then(|c| gpu.submit(dr.dev(), &c, None, &ctx).and_then(|_| gpu.wait(dr.dev(), &c, &ctx)));
         match r {
             // Any answer means the device is done with the memory; an error
             // answer (a resource the host never created) was logged.
             Ok(_) => {
                 gpu.stats.live_resources.fetch_sub(1, Ordering::Relaxed);
+                true
             }
             Err(e) => {
                 dev_warn(
                     gpu.instance,
                     format_args!(
                         "RESOURCE_UNREF of resource {} failed ({e:?}); leaking its {} bytes",
-                        self.res, self.size
+                        gem.res,
+                        gem.size()
                     ),
                 );
-                if let Some(m) = self.mem.take() {
-                    core::mem::forget(m);
-                }
+                false
             }
         }
     }

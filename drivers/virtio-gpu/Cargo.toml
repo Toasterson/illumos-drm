@@ -18,13 +18,15 @@ default = ["kernel"]
 kernel = ["ddi/panic-handler", "ddi/global-alloc-sleep"]
 
 [dependencies]
-# global-alloc-sleep: the DRM core's tables and this driver's context and
-# capability-set tables use alloc; every allocation happens in thread
-# context (ioctls, attach, the virtio task queue).
+# global-alloc-sleep: this driver's context and capability-set tables and
+# its display layout use alloc; every allocation happens in thread context
+# (ioctls, attach, the virtio task queue, the facade's hooks).
 # unstable-gate-cda5b9a49f-virtio: the virtio framework (misc/virtio), a
 # private interface checked against illumos cda5b9a49f.
 ddi = { workspace = true, features = ["unstable-gate-cda5b9a49f-virtio"] }
-drm.workspace = true
+# The DRM core is the module misc/drm_core; the driver uses it through the
+# facade (drm-facade-sys brings -N misc/drm_core).
+drm-facade.workspace = true
 drm-uapi.workspace = true
 
 [package.metadata.kmod]

@@ -1,0 +1,33 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The symbols cdrmnull uses that neither the gate's ddi.mapfile
+# (usr/src/uts/common/mapfiles/ddi.mapfile) nor the facade's
+# include/drm/drm_facade.mapfile declares, for the link with -z defs
+# (build.sh). Like the gate's mapfiles this only declares symbols that
+# other modules provide (EXTERN); it hides nothing. A symbol that a newer
+# ddi.mapfile declares as well is no conflict: ld accepts the same EXTERN
+# declaration twice.
+#
+$mapfile_version 2
+
+SYMBOL_SCOPE {
+	global:
+		#
+		# The one symbol outside the DDI: devmap_umem_remap, prototyped
+		# in sys/sunddi.h and exported by genunix, but without a manual
+		# page. cdrmnull's movable test objects remap their mappings
+		# with it, as rdrmnull's do (see cdrmnull.c).
+		#
+		devmap_umem_remap		{ FLAGS = EXTERN };
+		#
+		# Documented DDI functions (ddi_intr_add_softint(9F) and its
+		# family) that the gate's ddi.mapfile does not list.
+		#
+		ddi_intr_add_softint		{ FLAGS = EXTERN };
+		ddi_intr_get_softint_pri	{ FLAGS = EXTERN };
+		ddi_intr_remove_softint		{ FLAGS = EXTERN };
+		ddi_intr_trigger_softint	{ FLAGS = EXTERN };
+};

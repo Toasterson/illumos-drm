@@ -23,13 +23,17 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy --target x86_64-unknown-illumos
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo check --workspace --target x86_64-unknown-illumos
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo clippy --workspace --target x86_64-unknown-illumos -- -D warnings
-      # The test-only DMA drill (rdrmnull dma-mode "root-node") must keep
-      # compiling although it is off by default.
-      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo clippy --workspace --target x86_64-unknown-illumos --features rdrmnull/panic-drill -- -D warnings
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo fmt --all -- --check
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude xtask --no-deps --target x86_64-unknown-illumos
-      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo test -p drm -p drm-uapi -p drm_minor && cargo test -p virtio_gpu --no-default-features
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo test -p drm-core -p drm-uapi -p drm-facade && cargo test -p virtio_gpu --no-default-features
       - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo xtask uapi-check tools/uapi/drm_layout.oibldofgate.out
+      # The facade's layouts in Rust (drm-facade-sys) against gcc's on
+      # illumos (tools/facade/facade_layout.c compiled with gcc -S).
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && cargo xtask facade-check tools/facade/facade_layout.illumos.out
+      # The files generated from the facade headers (both mapfiles, the
+      # layout program, xtask's table) match bindings.rs; with bindgen and
+      # ILLUMOS_GATE the script regenerates bindings.rs from the headers too.
+      - run: export RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" PATH="$HOME/.cargo/bin:$PATH" SCCACHE_STARTUP_TIMEOUT=60 && sh tools/facade/check-generated.sh
 
   kmod-illumos:
     # Native illumos: install the pinned nightly (the only nightly-only step
@@ -40,37 +44,63 @@ jobs:
       - run: >
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           --default-toolchain nightly-2026-04-16 --component rust-src --no-modify-path
-      # misc/drm_minor, the DRM device numbers every driver shares: linked
-      # with its exports mapfile, which must leave exactly its entry points
-      # and its two functions global.
+      # The facade's layouts as this machine's gcc compiles the headers,
+      # against drm-facade-sys.
+      - run: >
+          export PATH="$HOME/.cargo/bin:$PATH" && mkdir -p target &&
+          gcc -m64 -D_KERNEL -std=gnu99 -I include -S -o - tools/facade/facade_layout.c |
+          sed -n 's/^.*@@ //p' | tr -d '"' > target/facade-gcc.out &&
+          cargo +nightly-2026-04-16 xtask facade-check target/facade-gcc.out
+      # misc/drm_core, the DRM core and the C facade: linked with drm_core.mapfile,
+      # which must leave exactly _init, _fini, _info and the facade's
+      # functions global (-B reduce), with the facade's CTF where the
+      # gate's ctfconvert is installed (developer/build/onbld).
       - run: >
           export PATH="$HOME/.cargo/bin:$PATH" && export SCCACHE_STARTUP_TIMEOUT=60 &&
-          cargo +nightly-2026-04-16 build --locked -p drm_minor --release
+          cargo +nightly-2026-04-16 build --locked -p drm-module --release
           --target targets/x86_64-illumos-kmod.json
           -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
       - run: >
-          ld -ztype=kmod -B reduce -M modules/drm-minor/exports.mapfile -z allextract
-          target/x86_64-illumos-kmod/release/drm_minor.a -o target/drm_minor &&
-          elfdump -d target/drm_minor | grep SUNW_KMOD && nm -u target/drm_minor &&
-          test "$(nm target/drm_minor | awk -F'|' '$5 ~ /GLOB/ && $7 !~ /UNDEF/ {gsub(/ /, "", $8); print $8}' | sort | tr '\n' ' ')"
-          = "_fini _info _init drm_minor_alloc drm_minor_free "
+          ctf= &&
+          if [ -x /opt/onbld/bin/i386/ctfconvert ]; then
+          OUT=target modules/drm_core/ctf/build-ctf.sh && ctf="-z defaultextract target/drm_facade_ctf.o";
+          else echo "no ctfconvert: misc/drm_core without CTF"; fi &&
+          ld -ztype=kmod -N fs/specfs -B reduce -M modules/drm_core/drm_core.mapfile -z allextract
+          target/x86_64-illumos-kmod/release/drm_module.a $ctf -o target/drm_core &&
+          elfdump -d target/drm_core | grep SUNW_KMOD && nm -u target/drm_core &&
+          nm target/drm_core | awk -F'|' '$5 ~ /GLOB/ && $7 !~ /UNDEF/ {gsub(/ /, "", $8); print $8}' | sort > target/drm_core.globals &&
+          awk '/global:/ {g=1; next} /local:/ {g=0} g && /;/ {gsub(/[;\t ]/, ""); print}' modules/drm_core/drm_core.mapfile | sort > target/drm_core.want &&
+          diff target/drm_core.want target/drm_core.globals && echo "misc/drm_core: $(wc -l < target/drm_core.globals) global symbols, as drm_core.mapfile"
+      # The Rust drivers, linked against misc/drm_core (-N misc/drm_core). Neither may
+      # carry a symbol of drm-core's stateful modules, which only misc/drm_core
+      # builds (feature "kernel"): the core runs once, in misc/drm_core.
       - run: >
           export PATH="$HOME/.cargo/bin:$PATH" && export SCCACHE_STARTUP_TIMEOUT=60 &&
-          cargo +nightly-2026-04-16 build -p rdrmnull --release
+          cargo +nightly-2026-04-16 build --locked -p rdrmnull --release
           --target targets/x86_64-illumos-kmod.json
-          -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
-      - run: >
-          ld -ztype=kmod -N fs/specfs -N misc/drm_minor -z allextract
-          target/x86_64-illumos-kmod/release/rdrmnull.a -o target/rdrmnull &&
-          elfdump -d target/rdrmnull | grep SUNW_KMOD && nm -u target/rdrmnull
-      # The virtio-gpu driver: built and linked as a kernel module against
-      # the virtio framework (misc/virtio), specfs and misc/drm_minor.
-      - run: >
-          export PATH="$HOME/.cargo/bin:$PATH" && export SCCACHE_STARTUP_TIMEOUT=60 &&
+          -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem &&
           cargo +nightly-2026-04-16 build --locked -p virtio_gpu --release
           --target targets/x86_64-illumos-kmod.json
           -Zjson-target-spec -Zbuild-std=core,alloc -Zbuild-std-features=compiler-builtins-mem
       - run: >
-          ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_minor -z allextract
+          ld -ztype=kmod -N fs/specfs -N misc/drm_core -z allextract
+          target/x86_64-illumos-kmod/release/rdrmnull.a -o target/rdrmnull &&
+          ld -ztype=kmod -N misc/virtio -N fs/specfs -N misc/drm_core -z allextract
           target/x86_64-illumos-kmod/release/virtio_gpu.a -o target/virtio_gpu &&
-          elfdump -d target/virtio_gpu | grep SUNW_KMOD && nm -u target/virtio_gpu
+          . tools/test/drm-test-lib.sh &&
+          n=$(core_symbols target/x86_64-illumos-kmod/release/drm_module.a | wc -l) &&
+          echo "drm_module.a: $n stateful core symbols (the pattern's control)" && test "$n" -gt 0 &&
+          for m in rdrmnull virtio_gpu; do
+          elfdump -d target/$m | grep SUNW_KMOD && nm -u target/$m &&
+          core_symbols target/$m > target/$m.core &&
+          echo "$m: $(wc -l < target/$m.core) stateful core symbols" && head target/$m.core &&
+          test ! -s target/$m.core || exit 1; done
+      # cdrmnull, the C driver: gcc with the gate's kernel flags, linked
+      # with -N misc/drm_core -z defs against the gate's ddi.mapfile (of the
+      # gate commit ddi-sys is pinned to), the facade's mapfile and its
+      # private.mapfile.
+      - run: >
+          curl -sSf -o target/ddi.mapfile
+          https://raw.githubusercontent.com/illumos/illumos-gate/cda5b9a49f77a86a151a20cdde0e948a49b37160/usr/src/uts/common/mapfiles/ddi.mapfile &&
+          DDI_MAPFILE=target/ddi.mapfile OUT=target/cdrmnull drivers/cdrmnull/build.sh &&
+          elfdump -d target/cdrmnull/cdrmnull | grep SUNW_KMOD

@@ -61,7 +61,7 @@
 
 /*
  * The nodes under test. Device numbers are shared by every DRM driver
- * (misc/drm_minor), so rdrmnull's devices are card<N> and renderD<128+N>
+ * (misc/drm_core), so rdrmnull's devices are card<N> and renderD<128+N>
  * for whatever N they were given; the run scripts pass them in DRM_CARD
  * and DRM_RENDER (DRM_CARD1 for the second device), and the driver instance (for the kstats) in
  * DRM_INSTANCE. The defaults are those of a machine with rdrmnull alone.
@@ -70,6 +70,12 @@ static const char *card_path __attribute__((unused)) = "/dev/dri/card0";
 static const char *render_path __attribute__((unused)) = "/dev/dri/renderD128";
 static const char *card1_path __attribute__((unused)) = "/dev/dri/card1";
 static int drm_instance __attribute__((unused));
+
+/*
+ * The driver under test (DRM_DRIVER): rdrmnull, or cdrmnull, its C port on
+ * the facade (milestone R5a). Its name is also its kstat module.
+ */
+static const char *drv_name = "rdrmnull";
 
 static void nodes_from_env(void) __attribute__((constructor));
 static void
@@ -85,6 +91,8 @@ nodes_from_env(void)
 		card1_path = s;
 	if ((s = getenv("DRM_INSTANCE")) != NULL && *s != '\0')
 		drm_instance = atoi(s);
+	if ((s = getenv("DRM_DRIVER")) != NULL && *s != '\0')
+		drv_name = s;
 }
 
 #define	CARD	card_path
@@ -237,7 +245,7 @@ kstat_values(const char *name, const char *const *keys, uint64_t *out, int n)
 
 	if (kc == NULL)
 		return (-1);
-	ks = kstat_lookup(kc, "rdrmnull", drm_instance, (char *)name);
+	ks = kstat_lookup(kc, (char *)drv_name, drm_instance, (char *)name);
 	if (ks == NULL || kstat_read(kc, ks, NULL) == -1) {
 		(void) kstat_close(kc);
 		return (-1);
@@ -245,6 +253,28 @@ kstat_values(const char *name, const char *const *keys, uint64_t *out, int n)
 	for (i = 0; i < n; i++) {
 		kstat_named_t *kn = kstat_data_lookup(ks, (char *)keys[i]);
 		out[i] = kn == NULL ? UINT64_MAX : kn->value.ui64;
+	}
+	/*
+	 * A C driver's fences (dma_fence_init on its own structures, as
+	 * cdrmnull's) belong to no device: misc/drm_core counts them in its own
+	 * domain, drm:0:sync, which always holds one fence of its own (the
+	 * signalled stub). Their fences, callbacks and signals are added.
+	 */
+	ks = strcmp(name, "sync") == 0 ? kstat_lookup(kc, "drm", 0, "sync") : NULL;
+	if (ks != NULL && kstat_read(kc, ks, NULL) != -1) {
+		for (i = 0; i < n; i++) {
+			kstat_named_t *kn = kstat_data_lookup(ks, (char *)keys[i]);
+			uint64_t v;
+
+			if (kn == NULL || out[i] == UINT64_MAX)
+				continue;
+			v = kn->value.ui64;
+			if (strcmp(keys[i], "fences") == 0)
+				out[i] += v > 0 ? v - 1 : 0;
+			else if (strcmp(keys[i], "callbacks") == 0 ||
+			    strcmp(keys[i], "signaled") == 0)
+				out[i] += v;
+		}
 	}
 	(void) kstat_close(kc);
 	return (0);
@@ -1051,7 +1081,7 @@ test_sync_file(int fd)
 	info.sync_fence_info = (uintptr_t)fi;
 	check(xioctl_err(md.fence, SYNC_IOC_FILE_INFO, &info) == 0 &&
 	    info.num_fences == 2 && info.status == 0 &&
-	    strcmp(fi[0].driver_name, "rdrmnull") == 0 && fi[0].status == 0,
+	    strcmp(fi[0].driver_name, drv_name) == 0 && fi[0].status == 0,
 	    "FILE_INFO: two active fences, the driver name");
 	info.num_fences = 1;
 	check(xioctl_err(md.fence, SYNC_IOC_FILE_INFO, &info) == EINVAL,
@@ -1469,10 +1499,29 @@ test_two_devices(int card)
 	h = dumb(card, 64, 64, NULL);
 	check(h != 0 && drmPrimeHandleToFD(card, h, DRM_CLOEXEC, &pfd) == 0,
 	    "TWO: a dma-buf of card0");
+	/*
+	 * Since R5a one core module serves both devices: card1 imports card0's
+	 * buffer as an object of its own (it was ENOTSUP while each driver had
+	 * its own copy of the core), and importing it again gives the same
+	 * handle.
+	 */
 	(void) memset(&ph, 0, sizeof (ph));
 	ph.fd = pfd;
-	check(xioctl_err(c1, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ph) == ENOTSUP,
-	    "TWO: card1 refuses card0's dma-buf with ENOTSUP");
+	check(xioctl_err(c1, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ph) == 0 && ph.handle != 0,
+	    "TWO: card1 imports card0's dma-buf");
+	{
+		struct drm_prime_handle ph2;
+		struct drm_gem_close gc;
+
+		(void) memset(&ph2, 0, sizeof (ph2));
+		ph2.fd = pfd;
+		check(xioctl_err(c1, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ph2) == 0 &&
+		    ph2.handle == ph.handle, "TWO: importing it again gives the same handle");
+		(void) memset(&gc, 0, sizeof (gc));
+		gc.handle = ph.handle;
+		check(xioctl_err(c1, DRM_IOCTL_GEM_CLOSE, &gc) == 0,
+		    "TWO: card1 closes its import");
+	}
 	check(drmSyncobjCreate(card, 0, &so0) == 0 &&
 	    drmSyncobjHandleToFD(card, so0, &ofd) == 0,
 	    "TWO: a sync object of card0 as a file");

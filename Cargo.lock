@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "ddi"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=be7845567053f61a635f9d47176676e6f0cd05ff#be7845567053f61a635f9d47176676e6f0cd05ff"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=10bdfba866260ef4f1876e29c07131378d0733df#10bdfba866260ef4f1876e29c07131378d0733df"
 dependencies = [
  "ddi-sys",
  "illumos-kernel-private-sys",
@@ -16,36 +16,48 @@ dependencies = [
 [[package]]
 name = "ddi-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=be7845567053f61a635f9d47176676e6f0cd05ff#be7845567053f61a635f9d47176676e6f0cd05ff"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=10bdfba866260ef4f1876e29c07131378d0733df#10bdfba866260ef4f1876e29c07131378d0733df"
 
 [[package]]
-name = "drm"
+name = "drm-core"
 version = "0.0.1"
 dependencies = [
  "ddi",
- "drm-minor-sys",
  "drm-uapi",
 ]
 
 [[package]]
-name = "drm-minor-sys"
+name = "drm-facade"
 version = "0.0.1"
+dependencies = [
+ "ddi",
+ "drm-core",
+ "drm-facade-sys",
+ "drm-uapi",
+]
+
+[[package]]
+name = "drm-facade-sys"
+version = "0.0.1"
+
+[[package]]
+name = "drm-module"
+version = "0.0.1"
+dependencies = [
+ "ddi",
+ "drm-core",
+ "drm-facade-sys",
+ "drm-uapi",
+]
 
 [[package]]
 name = "drm-uapi"
 version = "0.0.1"
 
 [[package]]
-name = "drm_minor"
-version = "0.0.1"
-dependencies = [
- "ddi-sys",
-]
-
-[[package]]
 name = "illumos-kernel-private-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=be7845567053f61a635f9d47176676e6f0cd05ff#be7845567053f61a635f9d47176676e6f0cd05ff"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=10bdfba866260ef4f1876e29c07131378d0733df#10bdfba866260ef4f1876e29c07131378d0733df"
 dependencies = [
  "ddi-sys",
 ]
@@ -53,7 +65,7 @@ dependencies = [
 [[package]]
 name = "illumos-kernel-private-virtio-sys"
 version = "0.0.1"
-source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=be7845567053f61a635f9d47176676e6f0cd05ff#be7845567053f61a635f9d47176676e6f0cd05ff"
+source = "git+https://code.aopc.cloud/illumos/illumos-ddi.git?rev=10bdfba866260ef4f1876e29c07131378d0733df#10bdfba866260ef4f1876e29c07131378d0733df"
 dependencies = [
  "ddi-sys",
 ]
@@ -93,7 +105,7 @@ name = "rdrmnull"
 version = "0.0.1"
 dependencies = [
  "ddi",
- "drm",
+ "drm-facade",
  "drm-uapi",
 ]
 
@@ -172,7 +184,7 @@ name = "virtio_gpu"
 version = "0.0.1"
 dependencies = [
  "ddi",
- "drm",
+ "drm-facade",
  "drm-uapi",
 ]
 
@@ -180,6 +192,7 @@ dependencies = [
 name = "xtask"
 version = "0.0.1"
 dependencies = [
+ "drm-facade-sys",
  "drm-uapi",
  "serde_json",
 ]

@@ -3,57 +3,86 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Shell functions shared by the run-*-test.sh scripts; sourced after they
-# define step(). Every driver built on the core depends on misc/drm_minor,
-# the table of DRM device numbers of the whole system, and a device's
-# nodes are card<N> and renderD<128+N> for the N it was given when it
-# attached, so the scripts find their nodes through the /dev/dri links
-# instead of assuming card0.
+# define step(). Every DRM driver depends on misc/drm_core, the DRM core (since
+# R5a; it holds the table of DRM device numbers of the whole system, which
+# was misc/drm_minor before), and a device's nodes are card<N> and
+# renderD<128+N> for the N it was given when it registered, so the scripts
+# find their nodes through the /dev/dri links instead of assuming card0.
 #
-# The directory must hold drm_minor.a (`cargo xtask build drm_minor`) and
-# drm_minor.mapfile (modules/drm-minor/exports.mapfile) unless the module
-# is installed already.
+# The directory must hold drm_module.a (`cargo xtask build drm-module`) and
+# drm_core.mapfile (modules/drm_core/drm_core.mapfile) unless the module is
+# installed already.
+#
+# misc/drm_core is not misc/drm: OpenIndiana's driver/graphics/drm package
+# (gfx-drm) delivers /kernel/misc/amd64/drm, the C core of its legacy
+# drivers, and stays installed and untouched beside it.
 
-DRM_MINOR_DIR=/kernel/misc/amd64
-DRM_MINOR_OURS=no
+DRM_CORE_DIR=/kernel/misc/amd64
+DRM_CORE_OURS=no
 
-# drm_minor_install: links misc/drm_minor, checks that it exports only its
-# entry points and its two functions, installs it and loads it, unless it
-# is installed already (by the package or an enclosing test script).
-drm_minor_install() {
-	if [ -f "$DRM_MINOR_DIR/drm_minor" ] || [ -f /usr/kernel/misc/amd64/drm_minor ]; then
-		echo "misc/drm_minor is installed already"
-		step modload -p misc/drm_minor
+# drm_core_install: links misc/drm_core, checks that it exports exactly the
+# symbols of its mapfile (_init, _fini, _info and the facade), installs it
+# and loads it, unless it is installed already (by a package or by the
+# script that runs this one), which it then leaves to its owner.
+drm_core_install() {
+	if [ -f /usr/kernel/misc/amd64/drm_core ] || [ -f "$DRM_CORE_DIR/drm_core" ]; then
+		echo "misc/drm_core is installed already"
+		step modload -p misc/drm_core
 		return 0
 	fi
-	step digest -a sha256 drm_minor.a
-	step ld -ztype=kmod -B reduce -M drm_minor.mapfile -z allextract drm_minor.a -o drm_minor || return 1
-	step digest -a sha256 drm_minor
+	step digest -a sha256 drm_module.a
+	# drm_facade_ctf.o (modules/drm_core/ctf/build-ctf.sh, built where the
+	# gate's ctfconvert is) gives the module the facade's CTF.
+	ctf=
+	[ -f drm_facade_ctf.o ] && ctf="-z defaultextract drm_facade_ctf.o"
+	# shellcheck disable=SC2086 # $ctf is empty or two words
+	step ld -ztype=kmod -N fs/specfs -B reduce -M drm_core.mapfile -z allextract drm_module.a $ctf -o drm_core || return 1
+	step digest -a sha256 drm_core
 	echo
-	echo "\$ nm drm_minor: the global symbols it defines"
-	globals=$(nm drm_minor | awk -F'|' '$5 ~ /GLOB/ && $7 !~ /UNDEF/ {gsub(/ /, "", $8); print $8}' | sort | tr '\n' ' ')
-	echo "$globals"
-	if [ "$globals" = "_fini _info _init drm_minor_alloc drm_minor_free " ]; then
-		echo "PASS drm_minor exports only _init, _fini, _info, drm_minor_alloc and drm_minor_free"
+	echo "\$ nm drm_core: the global symbols it defines, against drm_core.mapfile"
+	globals=$(nm drm_core | awk -F'|' '$5 ~ /GLOB/ && $7 !~ /UNDEF/ {gsub(/ /, "", $8); print $8}' | sort | tr '\n' ' ')
+	want=$(awk '/global:/ {g=1; next} /local:/ {g=0} g && /;/ {gsub(/[;\t ]/, ""); print}' drm_core.mapfile | sort | tr '\n' ' ')
+	echo "$(echo "$globals" | wc -w | tr -d ' ') global symbols"
+	if [ "$globals" = "$want" ]; then
+		echo "PASS misc/drm_core exports exactly the symbols of drm_core.mapfile"
 	else
-		echo "FAIL drm_minor exports other symbols"
+		echo "FAIL misc/drm_core exports other symbols than drm_core.mapfile names"
+		echo "have: $globals"
+		echo "want: $want"
 		return 1
 	fi
-	step cp drm_minor "$DRM_MINOR_DIR/drm_minor" || return 1
-	DRM_MINOR_OURS=yes
-	step modload -p misc/drm_minor
+	step cp drm_core "$DRM_CORE_DIR/drm_core" || return 1
+	DRM_CORE_OURS=yes
+	step modload -p misc/drm_core
 }
 
-# drm_minor_remove: unloads and removes misc/drm_minor if drm_minor_install
-# installed it. It stays when a driver still depends on it.
-drm_minor_remove() {
-	[ "$DRM_MINOR_OURS" = yes ] || return 0
-	id=$(modinfo | awk '$6 == "drm_minor" {print $1}')
+# drm_core_remove: unloads and removes misc/drm_core if drm_core_install
+# of this script installed it. It stays when a driver still depends on it.
+drm_core_remove() {
+	[ "$DRM_CORE_OURS" = yes ] || return 0
+	id=$(modinfo | awk '$6 == "drm_core" {print $1}')
 	if [ -n "$id" ] && ! step modunload -i "$id"; then
-		echo "misc/drm_minor stays: a driver still depends on it"
+		echo "misc/drm_core stays: a driver still depends on it"
 		return 1
 	fi
-	step rm -f "$DRM_MINOR_DIR/drm_minor"
-	DRM_MINOR_OURS=no
+	step rm -f "$DRM_CORE_DIR/drm_core"
+	DRM_CORE_OURS=no
+}
+
+# core_symbols MODULE: prints the global symbols MODULE defines that belong
+# to drm-core's stateful modules, which only misc/drm_core compiles
+# (feature "kernel"); a driver may carry drm-core's value helpers (modes,
+# dumb layouts, kmem) but none of these. Rust's v0 mangling writes a
+# name's length before it: the pattern is built from the names.
+CORE_STATEFUL="gem fence fence_dev resv slots syncobj syncobj_ioctl prime ioctl device state anon_fd minor objects idmap dmaerr caps sync_file uaccess wwmutex driver"
+core_symbols() {
+	# Its own variable names: callers loop over $m.
+	_cs_re=
+	for _cs_m in $CORE_STATEFUL; do
+		_cs_re="$_cs_re${_cs_re:+|}${#_cs_m}$_cs_m"
+	done
+	nm "$1" | awk -F'|' -v re="8drm_core($_cs_re)" \
+	    '$5 ~ /GLOB/ && $7 !~ /UNDEF/ && $8 ~ re {gsub(/ /, "", $8); print $8}'
 }
 
 # dri_link DEVICE KIND: prints the /dev/dri link of kind KIND (card or
@@ -76,11 +105,12 @@ dri_link() {
 }
 
 # rdrmnull_nodes: exports DRM_CARD, DRM_RENDER and DRM_INSTANCE for
-# rdrmnull@0 and, if it exists, DRM_CARD1 for rdrmnull@1. Fails unless the
+# the driver DRM_DRIVER (default rdrmnull) instance 0 and, if it exists,
+# DRM_CARD1 for its instance 1. Fails unless the
 # card and render numbers agree (card<N>, renderD<128+N>).
 rdrmnull_nodes() {
-	DRM_CARD=$(dri_link rdrmnull@0 card) || return 1
-	DRM_RENDER=$(dri_link rdrmnull@0 renderD) || return 1
+	DRM_CARD=$(dri_link "${DRM_DRIVER:-rdrmnull}@0" card) || return 1
+	DRM_RENDER=$(dri_link "${DRM_DRIVER:-rdrmnull}@0" renderD) || return 1
 	DRM_INSTANCE=0
 	n=${DRM_CARD##*card}
 	if [ "${DRM_RENDER##*renderD}" != $((128 + n)) ]; then
@@ -88,8 +118,8 @@ rdrmnull_nodes() {
 		return 1
 	fi
 	export DRM_CARD DRM_RENDER DRM_INSTANCE
-	if [ -d /devices/pseudo ] && ls /devices/pseudo | grep -q '^rdrmnull@1:card'; then
-		DRM_CARD1=$(dri_link rdrmnull@1 card) || return 1
+	if [ -d /devices/pseudo ] && ls /devices/pseudo | grep -q "^${DRM_DRIVER:-rdrmnull}@1:card"; then
+		DRM_CARD1=$(dri_link "${DRM_DRIVER:-rdrmnull}@1" card) || return 1
 		export DRM_CARD1
 	fi
 	echo "rdrmnull nodes: DRM_CARD=$DRM_CARD DRM_RENDER=$DRM_RENDER DRM_CARD1=${DRM_CARD1:-none}"

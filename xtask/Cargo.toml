@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 serde_json.workspace = true
 drm-uapi.workspace = true
+drm-facade-sys.workspace = true

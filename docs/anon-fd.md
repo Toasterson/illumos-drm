@@ -1,7 +1,7 @@
 # Anonymous file descriptors for dma-bufs, sync objects and sync files
 
 Decided and implemented for milestone R2 (29 September 2026, work item
-WI-454). Code: `crates/drm/src/anon_fd.rs` in this repository and
+WI-454). Code: `crates/drm-core/src/anon_fd.rs` in this repository and
 `ddi::private::fd` over `illumos-kernel-private-sys` in
 [illumos-ddi](https://code.aopc.cloud/illumos/illumos-ddi).
 
@@ -87,7 +87,7 @@ specfs.
 ## Details of A
 
 **Minor numbers.** Bit 30 set, the device index (instance) in bits 24 to
-29, an object number from 1 to 2^24 - 1 below (`crates/drm/src/anon_fd.rs`).
+29, an object number from 1 to 2^24 - 1 below (`crates/drm-core/src/anon_fd.rs`).
 DRM file minors use the low 18 bits, so the ranges are disjoint;
 `drm::minor::instance_of_minor` maps both to the instance, which
 `getinfo(9E)` and `spec_open()` need. The numbers exceed `L_MAXMIN32`, so a
@@ -98,7 +98,7 @@ DRM file minors use the low 18 bits, so the ranges are disjoint;
 table entry counts booked opens, and `open(9E)` succeeds only while one
 is booked. `close(9E)` keeps an entry, and its number, while an open is
 booked, so that an export racing with the last close of the same dma-buf
-opens the object it booked (`AnonTable` in `crates/drm/src/anon_fd.rs`,
+opens the object it booked (`AnonTable` in `crates/drm-core/src/anon_fd.rs`,
 with a host stress test of exports against last closes). A device node made with `mknod(2)` for the number cannot be
 opened. The export first creates the entry, then opens, then copies the
 descriptor number out to the ioctl argument, and only then installs the
@@ -128,7 +128,7 @@ shows the path of the DRM node it was exported from in `pfiles(1)`.
 **Mappings.** A dma-buf maps from offset 0 (Linux's
 `dma_buf_mmap_internal`), shared only, within the object; `PROT_WRITE`
 needs `DRM_RDWR`, which the kernel's `mmap(2)` checks against the file's
-mode. The mapping machinery is the one of DRM files (`crates/drm/src/gem.rs`),
+mode. The mapping machinery is the one of DRM files (`crates/drm-core/src/gem.rs`),
 with the object's base offset 0 instead of its fake offset. Refusals
 happen in `segmap(9E)` (illumos-ddi's `CharDevice::segmap_check`), because
 a mapping that `devmap_map(9E)` refuses stays in the process until it
