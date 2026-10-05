@@ -134,6 +134,7 @@ else
 	# WARNs inside the self-test are its own (it provokes some on
 	# purpose); the run's no-WARN check leaves its window out.
 	warn_st0=$(echo 'lkpi_warnings/E' | mdb -k 2>/dev/null | awk 'NF == 2 { print $2 }')
+	find /devices -name '*:card*' 2>/dev/null | sort > /tmp/r5c-cards.before
 	if step add_drv -i '"pci1b36,5"' linuxkpi_selftest; then
 		pass "add_drv linuxkpi_selftest"
 	else
@@ -166,7 +167,10 @@ else
 	# node is open, and succeeds once it is closed, running the driver's
 	# release (which frees a GEM object made before drm_dev_register())
 	# before the core unregisters.
-	node=$(ls -d /devices/pci@*/pci1b36,5@*:card* 2>/dev/null | head -1)
+	# The node the self-test's device added (QEMU names the test device's
+	# node after its subsystem IDs).
+	node=$(find /devices -name '*:card*' 2>/dev/null | sort |
+	    comm -13 /tmp/r5c-cards.before - | head -1)
 	echo "DRM node: ${node:-none}"
 	if [ -n "$node" ] && exec 3<"$node"; then
 		id=$(modid linuxkpi_selftest)
