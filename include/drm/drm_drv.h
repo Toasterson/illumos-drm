@@ -88,8 +88,10 @@ enum drm_driver_feature {
  *		called once drm_dev_unregister() is sure to succeed, before
  *		the mode-setting and GEM state go: stop vblank and fence
  *		sources. Optional.
- * illumos_rkms	mode setting with the core's R3 implementation (drm_rkms.h);
- *		for the Rust drivers until the C mode-setting core (R5i).
+ * illumos_rkms	mode setting with the core's R3 implementation (drm_rkms.h).
+ * illumos_lkms	facade 2.0: mode setting with Linux's KMS code carried in C
+ *		(drm_lkms.h, misc/drm_kms). At most one of illumos_rkms and
+ *		illumos_lkms; drm_dev_alloc() refuses a table with both.
  */
 struct drm_driver {
 	int (*open)(struct drm_device *dev, struct drm_file *file);
@@ -118,6 +120,7 @@ struct drm_driver {
 	void (*illumos_before_detach)(struct drm_device *dev);
 	void (*illumos_before_teardown)(struct drm_device *dev);
 	const struct drm_rkms_funcs *illumos_rkms;
+	const struct drm_illumos_lkms_funcs *illumos_lkms;
 };
 
 #define	DRM_FACADE_DRIVER_VERSION \
@@ -149,6 +152,7 @@ struct drm_illumos_mode_config {
 	uint64_t preferred_depth;
 	bool prefer_shadow;
 	bool fb_modifiers;
+	bool async_page_flip;		/* facade 2.0: DRM_CAP_ASYNC_PAGE_FLIP */
 };
 
 extern int drm_dev_illumos_set_dma_attr(struct drm_device *dev,

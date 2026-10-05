@@ -227,6 +227,7 @@ struct dma_buf;
 struct dma_buf_attachment;
 struct ww_acquire_ctx;
 struct drm_rkms_funcs;
+struct drm_illumos_lkms_funcs;
 
 #ifdef	__cplusplus
 }
