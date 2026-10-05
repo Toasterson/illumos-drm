@@ -16,6 +16,7 @@ struct ref_tracker_dir {
 #define	ref_tracker_dir_init(d, q, n)	((void)(d))
 #define	ref_tracker_dir_exit(d)		((void)(d))
 #define	ref_tracker_dir_print(d, n)	((void)(d))
+#define	ref_tracker_dir_snprint(d, b, s)	((void)(d), 0)
 #define	ref_tracker_alloc(d, t, g)	((void)(t), 0)
 #define	ref_tracker_free(d, t)		((void)(t), 0)
 #endif

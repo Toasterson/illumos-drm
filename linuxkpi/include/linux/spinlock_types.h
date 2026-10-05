@@ -13,7 +13,11 @@
 #include <linux/types.h>
 #include <linux/lockdep_types.h>
 
-typedef spinlock_t raw_spinlock_t;
+/* Linux's raw spinlock: the same kmutex_t, its own tag. */
+struct raw_spinlock {
+	kmutex_t rlock;
+};
+typedef struct raw_spinlock raw_spinlock_t;
 
 typedef struct {
 	krwlock_t rw;

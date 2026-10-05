@@ -10,6 +10,7 @@
 
 #include <linux/types.h>
 #include <linux/compiler.h>
+#include <linux/const.h>
 
 #define	__round_mask(x, y)	((__typeof__(x))((y) - 1))
 #define	round_up(x, y)		((((x) - 1) | __round_mask(x, y)) + 1)
@@ -23,16 +24,6 @@
 	(void)do_div(_tmp, d); _tmp; })
 #define	DIV_ROUND_UP_ULL(ll, d)	DIV_ROUND_DOWN_ULL((unsigned long long)(ll) + (d) - 1, (d))
 #define	DIV_ROUND_UP_SECTOR_T(ll, d)	DIV_ROUND_UP_ULL(ll, d)
-#define	DIV_ROUND_CLOSEST(x, divisor) ({ \
-	typeof (x) __x = (x); typeof (divisor) __d = (divisor); \
-	(((typeof (x))-1) > 0 || ((typeof (divisor))-1) > 0 || \
-	(((__x) > 0) == ((__d) > 0))) ? \
-	(((__x) + ((__d) / 2)) / (__d)) : \
-	(((__x) - ((__d) / 2)) / (__d)); })
-#define	DIV_ROUND_CLOSEST_ULL(x, divisor) ({ \
-	typeof (divisor) __d = divisor; \
-	unsigned long long _tmp = (x) + (__d) / 2; \
-	(void)do_div(_tmp, __d); _tmp; })
 #define	mult_frac(x, n, d) ({ \
 	typeof (x) __x = (x); typeof (n) __n = (n); typeof (d) __d = (d); \
 	typeof (x) __q = __x / __d; typeof (x) __r = __x % __d; \

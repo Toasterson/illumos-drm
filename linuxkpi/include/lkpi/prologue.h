@@ -92,6 +92,10 @@
 #define	file	lx_file
 #define	module	lx_module
 #define	kstat	lx_kstat
+/* struct kmem_cache: illumos' kmem_cache_t tag; Linux code means the layer's. */
+#define	kmem_cache	lkpi_kmem_cache
+/* sys/disp.h declares resume(); i915 has a static function of that name. */
+#define	resume	lx_resume
 
 #include <lkpi/config.h>
 
@@ -106,5 +110,6 @@ extern dev_info_t *lkpi_dev_dip(const struct device *dev);
 #define	DRM_FACADE_DEVICE_T		struct device
 #define	DRM_FACADE_DEVICE_DIP(d)	lkpi_dev_dip(d)
 #define	DRM_FACADE_FILE_T		struct lx_file
+#define	DRM_FACADE_INODE_T		struct inode
 
 #endif	/* _LKPI_PROLOGUE_H */

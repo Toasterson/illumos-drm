@@ -97,6 +97,7 @@ dev_set_drvdata(struct device *dev, void *data)
 #define	device_link_del(l)		((void)(l))
 #define	device_property_read_u32(dev, n, v)	(-EINVAL)
 #define	device_property_present(dev, n)	false
+#define	device_iommu_mapped(dev)	false
 #define	device_set_pm_not_required(dev)	((void)(dev))
 
 extern void lkpi_dev_printk(const char *level, const struct device *dev,
@@ -134,6 +135,30 @@ extern void lkpi_dev_printk(const char *level, const struct device *dev,
 	if (__e != -EPROBE_DEFER) \
 		dev_err(dev, "error %d: " fmt, __e, ##__VA_ARGS__); \
 	__e; })
+
+struct device_attribute {
+	struct attribute attr;
+	ssize_t (*show)(struct device *dev, struct device_attribute *attr,
+	    char *buf);
+	ssize_t (*store)(struct device *dev, struct device_attribute *attr,
+	    const char *buf, size_t count);
+};
+
+#define	DEVICE_ATTR(_name, _mode, _show, _store) \
+	struct device_attribute dev_attr_##_name = __ATTR(_name, _mode, _show, _store)
+#define	DEVICE_ATTR_RO(_name) \
+	struct device_attribute dev_attr_##_name = __ATTR_RO(_name)
+#define	DEVICE_ATTR_RW(_name) \
+	struct device_attribute dev_attr_##_name = __ATTR_RW(_name)
+#define	DEVICE_ATTR_WO(_name) \
+	struct device_attribute dev_attr_##_name = __ATTR_WO(_name)
+#define	DEVICE_ATTR_ADMIN_RW(_name) \
+	struct device_attribute dev_attr_##_name = __ATTR_RW_MODE(_name, 0600)
+#define	device_create_file(dev, attr)		((void)(dev), (void)(attr), 0)
+#define	device_remove_file(dev, attr)		((void)(dev), (void)(attr))
+#define	device_create_bin_file(dev, attr)	((void)(dev), (void)(attr), 0)
+#define	device_remove_bin_file(dev, attr)	((void)(dev), (void)(attr))
+#define	kobj_to_dev(k)				container_of((k), struct device, kobj)
 
 extern const struct bus_type pci_bus_type;
 

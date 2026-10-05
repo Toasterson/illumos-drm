@@ -33,6 +33,16 @@
 #include <linux/static_call_types.h>
 #include <linux/hex.h>
 #include <linux/string.h>
+#include <linux/jump_label.h>
+#include <linux/error-injection.h>
+#include <linux/dynamic_debug.h>
+#include <linux/ratelimit.h>
+#include <linux/sysctl.h>
+
+/* drm_util.h has the same definition; i915 headers use it without it. */
+#ifndef for_each_if
+#define	for_each_if(condition)	if (!(condition)) {} else
+#endif
 
 #define	might_sleep()		ASSERT(!servicing_interrupt())
 #define	might_sleep_if(c)	do { if (c) might_sleep(); } while (0)

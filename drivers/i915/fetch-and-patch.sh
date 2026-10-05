@@ -59,8 +59,8 @@ rm -rf "$mit"
 mkdir -p "$mit"
 grep -v '^#' "$HERE/mit-headers.txt" | grep . | while read -r f; do
 	src=$dest/$f
-	if ! head -40 "$src" | grep -q -E 'SPDX-License-Identifier:.*\bMIT\b|Permission is hereby granted, free of charge'; then
-		echo "fetch-and-patch: $f is not MIT-licensed; refusing it" >&2
+	if ! head -40 "$src" | grep -q -i -E 'SPDX-License-Identifier:.*\bMIT\b|Permission is hereby granted, free of charge|Permission to use, copy, modify, distribute, and sell this software'; then
+		echo "fetch-and-patch: $f is not MIT-licensed (or HPND); refusing it" >&2
 		exit 1
 	fi
 	d=$mit/${f#include/}

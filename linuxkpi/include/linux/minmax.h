@@ -13,9 +13,11 @@
 #include <linux/compiler.h>
 
 #define	__lkpi_cmp(op, x, y)	((x) op (y) ? (x) : (y))
-#define	__lkpi_cmp_once(op, x, y) ({ \
-	__auto_type __x = (x); __auto_type __y = (y); \
-	__lkpi_cmp(op, __x, __y); })
+#define	__lkpi_cmp_once(op, x, y) \
+	__lkpi_cmp_once_u(op, x, y, __UNIQUE_ID(x_), __UNIQUE_ID(y_))
+#define	__lkpi_cmp_once_u(op, x, y, ux, uy) ({ \
+	__auto_type ux = (x); __auto_type uy = (y); \
+	__lkpi_cmp(op, ux, uy); })
 
 #define	min(x, y)		__lkpi_cmp_once(<, x, y)
 #define	max(x, y)		__lkpi_cmp_once(>, x, y)

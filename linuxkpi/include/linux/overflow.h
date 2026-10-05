@@ -22,8 +22,21 @@
 	    (_s >= 0 && _s < 8 * sizeof (*d)) ? _s : 0; \
 	*_d = (_a_full << _to_shift); \
 	(_to_shift != _s || *_d < 0 || _a < 0 || (*_d >> _to_shift) != _a); })
-#define	overflows_type(n, T) ({ typeof (T) __t; \
-	__builtin_add_overflow((n), 0, &__t); })
+#define	__type_half_max(T) \
+	((typeof (T))1 << (8 * sizeof (typeof (T)) - 1 - is_signed_type(typeof (T))))
+#define	type_max(T)	((typeof (T))((__type_half_max(T) - 1) + __type_half_max(T)))
+#define	type_min(T)	((typeof (T))((typeof (T))-type_max(T) - (typeof (T))1))
+#define	__overflows_type_constexpr(x, T) ( \
+	is_unsigned_type(typeof (x)) ? (x) > type_max(T) : \
+	is_unsigned_type(typeof (T)) ? (x) < 0 || (x) > type_max(T) : \
+	(x) < type_min(T) || (x) > type_max(T))
+#define	__overflows_type(x, T) ({ typeof (T) v = 0; check_add_overflow((x), v, &v); })
+#define	overflows_type(n, T) \
+	__builtin_choose_expr(__is_constexpr(n), \
+	    __overflows_type_constexpr(n, T), __overflows_type(n, T))
+#define	castable_to_type(n, T) \
+	__builtin_choose_expr(__is_constexpr(n), \
+	    !__overflows_type_constexpr(n, T), __same_type(n, T))
 #define	range_overflows(start, size, max) ({ \
 	typeof (start) start__ = (start); typeof (size) size__ = (size); \
 	typeof (max) max__ = (max); \

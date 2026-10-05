@@ -10,7 +10,15 @@
 #define	_LINUX_RELAY_H
 #include <linux/types.h>
 #include <linux/fs.h>
-struct rchan;
+struct rchan_buf;
+struct rchan {
+	size_t subbuf_size;
+	size_t n_subbufs;
+	size_t alloc_size;
+	const struct rchan_callbacks *cb;
+	struct rchan_buf **buf;
+	int is_global;
+};
 struct rchan_buf {
 	void *start;
 	void *data;
@@ -19,12 +27,13 @@ struct rchan_buf {
 	struct rchan *chan;
 };
 struct rchan_callbacks {
-	int (*subbuf_start)(struct rchan_buf *buf, void *subbuf, void *prev_subbuf, size_t prev_padding);
+	int (*subbuf_start)(struct rchan_buf *buf, void *subbuf, void *prev_subbuf);
 	struct dentry *(*create_buf_file)(const char *filename, struct dentry *parent, umode_t mode, struct rchan_buf *buf, int *is_global);
 	int (*remove_buf_file)(struct dentry *dentry);
 };
 #define	relay_open(b, p, s, n, cb, d)	((struct rchan *)NULL)
 #define	relay_close(c)			((void)(c))
+#define	relay_buf_full(b)		((void)(b), 1)
 #define	relay_flush(c)			((void)(c))
 #define	relay_reserve(c, l)		((void *)NULL)
 #define	relay_subbufs_consumed(c, cpu, n)	((void)(c))

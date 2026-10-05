@@ -63,6 +63,11 @@ struct dev_pm_info {
 	int autosuspend_delay;
 };
 
+#define	DPM_FLAG_NO_DIRECT_COMPLETE	(1U << 0)
+#define	DPM_FLAG_SMART_PREPARE		(1U << 1)
+#define	DPM_FLAG_SMART_SUSPEND		(1U << 2)
+#define	DPM_FLAG_MAY_SKIP_RESUME	(1U << 3)
+#define	dev_pm_set_driver_flags(dev, f)	((void)(dev), (void)(f))
 #define	SET_SYSTEM_SLEEP_PM_OPS(s, r)
 #define	SET_RUNTIME_PM_OPS(s, r, i)
 #define	SYSTEM_SLEEP_PM_OPS(s, r)

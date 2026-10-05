@@ -101,6 +101,15 @@ hlist_del_init_rcu(struct hlist_node *n)
 #define	list_for_each_entry_from_rcu(pos, head, member) \
 	for (; &(pos)->member != (head); \
 	    (pos) = list_entry_rcu((pos)->member.next, typeof (*(pos)), member))
+#define	list_entry_lockless(ptr, type, member) \
+	container_of((typeof (ptr))READ_ONCE(ptr), type, member)
+#define	list_for_each_entry_lockless(pos, head, member) \
+	for ((pos) = list_entry_lockless((head)->next, typeof (*(pos)), member); \
+	    &(pos)->member != (head); \
+	    (pos) = list_entry_lockless((pos)->member.next, typeof (*(pos)), member))
+#define	list_for_each_rcu(pos, head) \
+	for ((pos) = READ_ONCE((head)->next); (pos) != (head); \
+	    (pos) = READ_ONCE((pos)->next))
 #define	list_tail_rcu(head)	(*((struct list_head **)(&(head)->prev)))
 #define	hlist_first_rcu(head)	(*((struct hlist_node **)(&(head)->first)))
 #define	hlist_next_rcu(node)	(*((struct hlist_node **)(&(node)->next)))

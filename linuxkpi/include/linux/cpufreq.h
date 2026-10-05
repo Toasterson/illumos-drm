@@ -13,5 +13,16 @@
 #define	cpufreq_quick_get_max(cpu)	0U
 #define	cpufreq_get_hw_max_freq(cpu)	0U
 #define	cpufreq_quick_get(cpu)		0U
-struct cpufreq_policy;
+struct cpufreq_cpuinfo {
+	unsigned int max_freq;
+	unsigned int min_freq;
+	unsigned int transition_latency;
+};
+struct cpufreq_policy {
+	struct cpufreq_cpuinfo cpuinfo;
+	unsigned int min, max, cur;
+};
+/* No cpufreq driver on illumos: no policy. */
+#define	cpufreq_cpu_get(cpu)	((struct cpufreq_policy *)NULL)
+#define	cpufreq_cpu_put(p)	((void)(p))
 #endif

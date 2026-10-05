@@ -42,6 +42,8 @@ extern void seq_putc(struct seq_file *m, char c);
 extern void seq_write(struct seq_file *m, const void *data, size_t len);
 extern int single_open(struct lx_file *file,
     int (*show)(struct seq_file *, void *), void *data);
+extern int single_open_size(struct lx_file *file,
+    int (*show)(struct seq_file *, void *), void *data, size_t size);
 extern int single_release(struct inode *inode, struct lx_file *file);
 extern ssize_t seq_read(struct lx_file *file, char __user *buf, size_t size,
     loff_t *ppos);

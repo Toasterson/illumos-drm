@@ -20,6 +20,7 @@
 #include <linux/dma-resv.h>
 #include <linux/dma-fence.h>
 #include <linux/fs.h>
+#include <linux/module.h>
 #include <drm/dma_buf.h>
 
 struct dma_buf_attachment_ops {

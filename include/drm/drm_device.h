@@ -95,7 +95,7 @@ struct drm_device {
 	bool registered;
 	uint32_t driver_features;
 	bool unplugged;
-	void *anon_inode;
+	DRM_FACADE_INODE_T *anon_inode;
 	char *unique;
 	atomic_t open_count;
 	struct lx_mutex filelist_mutex;

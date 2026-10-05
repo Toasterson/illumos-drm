@@ -21,9 +21,9 @@
 #define	VM_NORESERVE_SHMEM	0x00200000
 
 extern struct lx_file *shmem_file_setup(const char *name, loff_t size,
-    unsigned long flags);
+    vma_flags_t flags);
 extern struct lx_file *shmem_file_setup_with_mnt(struct vfsmount *mnt,
-    const char *name, loff_t size, unsigned long flags);
+    const char *name, loff_t size, vma_flags_t flags);
 extern struct folio *shmem_read_folio_gfp(struct address_space *mapping,
     pgoff_t index, gfp_t gfp);
 extern struct lx_page *shmem_read_mapping_page_gfp(

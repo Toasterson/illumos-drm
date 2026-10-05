@@ -12,5 +12,7 @@ ratelimit_state_init(struct ratelimit_state *rs, int interval, int burst)
 #define	ratelimit_set_flags(rs, f)	((void)(rs), (void)(f))
 #define	__ratelimit(rs)			((void)(rs), 1)
 #define	ratelimit_state_exit(rs)	((void)(rs))
+#define	ratelimit_state_get_miss(rs)	((void)(rs), 0)
+#define	ratelimit_state_reset_miss(rs)	((void)(rs), 0)
 #define	RATELIMIT_MSG_ON_RELEASE	1
 #endif

@@ -14,15 +14,20 @@
  *	DEFINE_LOCK_GUARD_0/1(name, [type,] lock-expr, unlock-expr, extra...)
  *	guard(name)(args);  scoped_guard(name, args) { ... }
  *	no_free_ptr(p), return_ptr(p), retain_and_null_ptr(p)
+ *
+ * Every public macro expands its name argument before pasting (through an
+ * inner __ macro), so names the prologue renames (mutex) stay consistent.
  */
 #ifndef _LINUX_CLEANUP_H
 #define	_LINUX_CLEANUP_H
 
 #include <linux/compiler.h>
 
-#define	DEFINE_FREE(_name, _type, _free) \
+#define	DEFINE_FREE(_name, _type, _free)	__DEFINE_FREE(_name, _type, _free)
+#define	__DEFINE_FREE(_name, _type, _free) \
 	static inline void __free_##_name(void *p) { _type _T = *(_type *)p; _free; }
-#define	__free(_name)	__cleanup(__free_##_name)
+#define	__free(_name)	__lkpi_free(_name)
+#define	__lkpi_free(_name)	__cleanup(__free_##_name)
 #define	__get_and_null(p, nullvalue) ({ \
 	__auto_type __pp = &(p); __auto_type __v = *__pp; \
 	*__pp = nullvalue; __v; })
@@ -32,29 +37,40 @@
 #define	take_fd(fd)		__get_and_null(fd, -EBADF)
 
 #define	DEFINE_CLASS(_name, _type, _exit, _init, _init_args...) \
+	__DEFINE_CLASS(_name, _type, _exit, _init, _init_args)
+#define	__DEFINE_CLASS(_name, _type, _exit, _init, _init_args...) \
 typedef _type class_##_name##_t; \
 static inline void class_##_name##_destructor(_type *p) \
 	{ _type _T = *p; _exit; } \
 static inline _type class_##_name##_constructor(_init_args) \
 	{ _type t = _init; return (t); }
 #define	EXTEND_CLASS(_name, ext, _init, _init_args...) \
+	__EXTEND_CLASS(_name, ext, _init, _init_args)
+#define	__EXTEND_CLASS(_name, ext, _init, _init_args...) \
 typedef class_##_name##_t class_##_name##ext##_t; \
 static inline void class_##_name##ext##_destructor(class_##_name##_t *p) \
 	{ class_##_name##_destructor(p); } \
 static inline class_##_name##_t class_##_name##ext##_constructor(_init_args) \
 	{ class_##_name##_t t = _init; return (t); }
-#define	CLASS(_name, var) \
+#define	CLASS(_name, var)	__CLASS(_name, var)
+#define	__CLASS(_name, var) \
 	class_##_name##_t var __cleanup(class_##_name##_destructor) = \
 	    class_##_name##_constructor
 
-#define	__guard_ptr(_name)	class_##_name##_lock_ptr
-#define	DEFINE_CLASS_IS_GUARD(_name) \
+#define	__guard_ptr(_name)	__lkpi_guard_ptr(_name)
+#define	__lkpi_guard_ptr(_name)	class_##_name##_lock_ptr
+#define	DEFINE_CLASS_IS_GUARD(_name)	__DEFINE_CLASS_IS_GUARD(_name)
+#define	__DEFINE_CLASS_IS_GUARD(_name) \
 static inline void *class_##_name##_lock_ptr(class_##_name##_t *_T) \
 	{ return ((void *)(uintptr_t)*_T); }
 #define	DEFINE_GUARD(_name, _type, _lock, _unlock) \
+	__DEFINE_GUARD(_name, _type, _lock, _unlock)
+#define	__DEFINE_GUARD(_name, _type, _lock, _unlock) \
 	DEFINE_CLASS(_name, _type, if (_T) { _unlock; }, ({ _lock; _T; }), _type _T); \
 	DEFINE_CLASS_IS_GUARD(_name)
 #define	DEFINE_GUARD_COND(_name, _ext, _condlock, ...) \
+	__DEFINE_GUARD_COND(_name, _ext, _condlock)
+#define	__DEFINE_GUARD_COND(_name, _ext, _condlock, ...) \
 	EXTEND_CLASS(_name, _ext, ({ void *_t = _T; if (_T && !(_condlock)) _t = NULL; _t; }), \
 	    class_##_name##_t _T) \
 	static inline void *class_##_name##_ext##_lock_ptr(class_##_name##_t *_T) \
@@ -77,6 +93,8 @@ static inline void class_##_name##_destructor(class_##_name##_t *_T) \
 static inline void *class_##_name##_lock_ptr(class_##_name##_t *_T) \
 	{ return ((void *)_T->lock); }
 #define	DEFINE_LOCK_GUARD_1(_name, _type, _lock, _unlock, extra...) \
+	__DEFINE_LOCK_GUARD_1(_name, _type, _lock, _unlock, extra)
+#define	__DEFINE_LOCK_GUARD_1(_name, _type, _lock, _unlock, extra...) \
 typedef struct { _type *lock; extra; } class_##_name##_t; \
 static inline void class_##_name##_destructor(class_##_name##_t *_T) \
 	{ if (_T->lock) { _unlock; } } \
@@ -85,6 +103,8 @@ static inline void *class_##_name##_lock_ptr(class_##_name##_t *_T) \
 static inline class_##_name##_t class_##_name##_constructor(_type *l) \
 	{ class_##_name##_t _t = { .lock = l }, *_T = &_t; _lock; return (_t); }
 #define	DEFINE_LOCK_GUARD_0(_name, _lock, _unlock, extra...) \
+	__DEFINE_LOCK_GUARD_0(_name, _lock, _unlock, extra)
+#define	__DEFINE_LOCK_GUARD_0(_name, _lock, _unlock, extra...) \
 typedef struct { void *lock; extra; } class_##_name##_t; \
 static inline void class_##_name##_destructor(class_##_name##_t *_T) \
 	{ if (_T->lock) { _unlock; } } \
@@ -94,6 +114,8 @@ static inline class_##_name##_t class_##_name##_constructor(void) \
 	{ class_##_name##_t _t = { .lock = (void *)1 }, *_T = &_t; \
 	(void)_T; _lock; return (_t); }
 #define	DEFINE_LOCK_GUARD_1_COND(_name, _ext, _condlock, ...) \
+	__DEFINE_LOCK_GUARD_1_COND(_name, _ext, _condlock)
+#define	__DEFINE_LOCK_GUARD_1_COND(_name, _ext, _condlock, ...) \
 typedef class_##_name##_t class_##_name##_ext##_t; \
 static inline void class_##_name##_ext##_destructor(class_##_name##_t *_T) \
 	{ class_##_name##_destructor(_T); } \

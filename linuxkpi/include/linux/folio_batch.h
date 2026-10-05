@@ -72,5 +72,6 @@ folio_batch_release(struct folio_batch *fbatch)
 }
 
 #define	folios_put(fb)	folio_batch_release(fb)
+#define	__folio_batch_release(fb)	folio_batch_release(fb)
 
 #endif

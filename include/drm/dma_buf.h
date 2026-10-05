@@ -51,7 +51,7 @@ struct dma_buf {
  */
 struct dma_buf_attachment {
 	struct dma_buf *dmabuf;
-	dev_info_t *dev;
+	DRM_FACADE_DEVICE_T *dev;
 	struct list_head node;
 	void *priv;
 };

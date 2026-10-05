@@ -10,6 +10,7 @@
 
 #include <linux/types.h>
 #include <linux/bitops.h>
+#include <linux/bitmap.h>
 
 struct cpumask {
 	unsigned long bits[NR_CPUS / BITS_PER_LONG];

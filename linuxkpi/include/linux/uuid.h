@@ -5,6 +5,7 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #define	UUID_SIZE	16
+#define	UUID_STRING_LEN	36
 typedef struct { __u8 b[UUID_SIZE]; } guid_t;
 typedef struct { __u8 b[UUID_SIZE]; } lkpi_uuid_t;
 #define	uuid_t	lkpi_uuid_t
@@ -12,6 +13,7 @@ typedef struct { __u8 b[UUID_SIZE]; } lkpi_uuid_t;
 	{{ (a) & 0xff, ((a) >> 8) & 0xff, ((a) >> 16) & 0xff, ((a) >> 24) & 0xff, \
 	(b) & 0xff, ((b) >> 8) & 0xff, (c) & 0xff, ((c) >> 8) & 0xff, \
 	(d0), (d1), (d2), (d3), (d4), (d5), (d6), (d7) }})
+extern bool uuid_is_valid(const char *uuid);
 #define	guid_equal(a, b)	(memcmp((a), (b), sizeof (guid_t)) == 0)
 #define	uuid_equal(a, b)	(memcmp((a), (b), sizeof (uuid_t)) == 0)
 #define	guid_copy(d, s)		memcpy((d), (s), sizeof (guid_t))

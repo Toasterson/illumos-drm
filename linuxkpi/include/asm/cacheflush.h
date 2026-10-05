@@ -12,24 +12,7 @@
 
 #include <linux/types.h>
 #include <asm/barrier.h>
-
-static inline void
-clflush(volatile void *p)
-{
-	__asm__ __volatile__("clflush %0" : "+m" (*(volatile char *)p));
-}
-
-static inline void
-clflushopt(volatile void *p)
-{
-	clflush(p);
-}
-
-static inline void
-wbinvd(void)
-{
-	__asm__ __volatile__("wbinvd" ::: "memory");
-}
+#include <asm/special_insns.h>
 
 static inline void
 clflush_cache_range(void *vaddr, unsigned int size)

@@ -11,8 +11,13 @@
 #define	_LINUX_IRQ_WORK_H
 
 #include <linux/workqueue.h>
+#include <linux/llist.h>
 
 struct irq_work {
+	struct {
+		struct llist_node llist;
+		unsigned int u_flags;
+	} node;
 	struct work_struct work;
 	void (*func)(struct irq_work *);
 	unsigned int flags;

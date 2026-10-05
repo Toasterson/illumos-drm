@@ -1,0 +1,58 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 03] i915: GEM handle lookups through the illumos DRM core
+
+i915 looks handles up locklessly in drm_file.object_idr under RCU. On
+illumos the handle table is the DRM core's and has no lockless lookup
+(the facade replaces object_idr walks with drm_illumos_gem_for_each_handle()
+and lookups with drm_gem_object_lookup()). i915_gem_object_lookup_rcu()
+becomes an out-of-line function of the illumos glue that takes a reference
+and drops it after an RCU grace period, which keeps the callers' RCU read
+sections (busy, get_tiling, get_caching) valid unchanged; execbuffer's
+"does the handle still name this object" check uses a glue helper.
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+index 1f303d4ea..81be0a25f 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+@@ -863,7 +863,11 @@ static int __eb_add_lut(struct i915_execbuffer *eb,
+ 			struct drm_i915_gem_object *obj = vma->obj;
+ 
+ 			spin_lock(&obj->lut_lock);
++#ifdef __illumos__
++			if (i915_illumos_handle_is(eb->file, handle, obj)) {
++#else
+ 			if (idr_find(&eb->file->object_idr, handle) == obj) {
++#endif
+ 				list_add(&lut->obj_link, &obj->lut_list);
+ 			} else {
+ 				radix_tree_delete(&ctx->handles_vma, handle);
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_object.h b/drivers/gpu/drm/i915/gem/i915_gem_object.h
+index 8878539c1..17e273b4e 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_object.h
++++ b/drivers/gpu/drm/i915/gem/i915_gem_object.h
+@@ -94,6 +94,17 @@ __i915_gem_object_unset_pages(struct drm_i915_gem_object *obj);
+  * otherwise. This object is only valid whilst under the RCU read lock, and
+  * note carefully the object may be in the process of being destroyed.
+  */
++#ifdef __illumos__
++/*
++ * The illumos DRM core's handle table has no lockless lookup: this takes
++ * a reference and drops it after an RCU grace period (i915_illumos.c), so
++ * the object stays valid until the caller's rcu_read_unlock().
++ */
++struct drm_i915_gem_object *
++i915_gem_object_lookup_rcu(struct drm_file *file, u32 handle);
++bool i915_illumos_handle_is(struct drm_file *file, u32 handle,
++			    struct drm_i915_gem_object *obj);
++#else
+ static inline struct drm_i915_gem_object *
+ i915_gem_object_lookup_rcu(struct drm_file *file, u32 handle)
+ {
+@@ -102,6 +113,7 @@ i915_gem_object_lookup_rcu(struct drm_file *file, u32 handle)
+ #endif
+ 	return idr_find(&file->object_idr, handle);
+ }
++#endif
+ 
+ static inline struct drm_i915_gem_object *
+ i915_gem_object_get_rcu(struct drm_i915_gem_object *obj)

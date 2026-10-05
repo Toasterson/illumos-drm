@@ -9,6 +9,18 @@
 #ifndef _ASM_PGTABLE_TYPES_H
 #define	_ASM_PGTABLE_TYPES_H
 
+/* The x86 PTE bits (i915's GTT PTE format borrows them). */
+#define	_PAGE_PRESENT	0x001UL
+#define	_PAGE_RW	0x002UL
+#define	_PAGE_USER	0x004UL
+#define	_PAGE_PWT	0x008UL
+#define	_PAGE_PCD	0x010UL
+#define	_PAGE_ACCESSED	0x020UL
+#define	_PAGE_DIRTY	0x040UL
+#define	_PAGE_PAT	0x080UL
+#define	_PAGE_PSE	0x080UL
+#define	_PAGE_GLOBAL	0x100UL
+
 typedef struct {
 	unsigned long pgprot;
 } pgprot_t;
@@ -30,6 +42,8 @@ typedef struct {
 #define	pgprot_modify(o, n)	(n)
 #define	_PAGE_CACHE_MASK	LKPI_PROT_CACHE_MASK
 #define	cachemode2protval(m)	(m)
+/* illumos enables PAT on every x86 CPU it runs on. */
+#define	pat_enabled()		true
 enum page_cache_mode {
 	_PAGE_CACHE_MODE_WB = LKPI_PROT_WB,
 	_PAGE_CACHE_MODE_WC = LKPI_PROT_WC,

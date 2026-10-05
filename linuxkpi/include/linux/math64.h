@@ -93,6 +93,20 @@ mul_u64_u64_div_u64(u64 a, u64 mul, u64 div)
 	return ((u64)(((unsigned __int128)a * mul) / div));
 }
 
+#ifndef	DIV_ROUND_CLOSEST_ULL
+#define	DIV_ROUND_CLOSEST_ULL(x, divisor) ({ \
+	typeof (divisor) __d = divisor; \
+	unsigned long long _tmp = (x) + (__d) / 2; \
+	(void)do_div(_tmp, __d); _tmp; })
+#endif
+#ifndef	DIV_ROUND_CLOSEST
+#define	DIV_ROUND_CLOSEST(x, divisor) ({ \
+	typeof (x) __x = (x); typeof (divisor) __d = (divisor); \
+	(((typeof (x))-1) > 0 || ((typeof (divisor))-1) > 0 || \
+	(((__x) > 0) == ((__d) > 0))) ? \
+	(((__x) + ((__d) / 2)) / (__d)) : \
+	(((__x) - ((__d) / 2)) / (__d)); })
+#endif
 #define	DIV64_U64_ROUND_UP(ll, d) ({ u64 _d = (d); div64_u64((ll) + _d - 1, _d); })
 #define	DIV64_U64_ROUND_CLOSEST(dividend, divisor) ({ u64 _d = (divisor); \
 	div64_u64((dividend) + _d / 2, _d); })

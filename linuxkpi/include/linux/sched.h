@@ -25,6 +25,7 @@
 #include <linux/preempt.h>
 #include <linux/smp.h>
 #include <linux/sched/clock.h>
+#include <linux/capability.h>
 
 #define	TASK_RUNNING		0x00000000
 #define	TASK_INTERRUPTIBLE	0x00000001
@@ -77,8 +78,8 @@ extern int wake_up_state(struct task_struct *t, unsigned int state);
 #define	__set_current_state(s)		lkpi_set_current_state(s)
 #define	set_special_state(s)		lkpi_set_current_state(s)
 #define	task_is_running(t)		(READ_ONCE((t)->__state) == TASK_RUNNING)
-#define	schedule()		((void)schedule_timeout(MAX_SCHEDULE_TIMEOUT))
-#define	io_schedule()		schedule()
+extern void schedule(void);
+extern void io_schedule(void);
 #define	io_schedule_timeout(t)	schedule_timeout(t)
 #define	schedule_timeout_interruptible(t) \
 	({ set_current_state(TASK_INTERRUPTIBLE); schedule_timeout(t); })
@@ -126,7 +127,23 @@ task_pid_nr(struct task_struct *t)
 #define	task_pid_vnr(t)		task_pid_nr(t)
 #define	task_tgid_nr(t)		task_pid_nr(t)
 #define	task_tgid_vnr(t)	task_pid_nr(t)
-#define	task_pid(t)		((struct pid *)(uintptr_t)(t)->pid)
+/*
+ * struct pid (struct lx_pid; illumos has its own): a reference-counted
+ * process ID, created by get_task_pid() (src/lkpi_sched.c).
+ */
+struct lx_pid;
+enum pid_type {
+	PIDTYPE_PID,
+	PIDTYPE_TGID,
+	PIDTYPE_PGID,
+	PIDTYPE_SID,
+	PIDTYPE_MAX
+};
+extern struct lx_pid *get_task_pid(struct task_struct *task, enum pid_type type);
+extern struct lx_pid *get_pid(struct lx_pid *pid);
+extern void put_pid(struct lx_pid *pid);
+extern pid_t pid_nr(struct lx_pid *pid);
+#define	pid_vnr(p)		pid_nr(p)
 #define	get_task_comm(buf, t)	strscpy(buf, (t)->comm, sizeof (buf))
 #define	__get_task_comm(buf, n, t)	strscpy(buf, (t)->comm, n)
 #define	set_user_nice(t, n)	((void)(t), (void)(n))

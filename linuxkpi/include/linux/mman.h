@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * Linux's mmap protection and flag values (MAP_*/PROT_* are illumos' from
+ * Linux's mmap protection and flag values (the MAP_ and PROT_ values are illumos' from
  * <sys/mman.h>, which the DRM uAPI does not depend on).
  */
 #ifndef _LINUX_MMAN_H

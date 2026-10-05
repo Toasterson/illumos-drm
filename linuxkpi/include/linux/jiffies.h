@@ -14,6 +14,7 @@
 #include <linux/types.h>
 #include <linux/math.h>
 #include <linux/time64.h>
+#include <linux/seqlock.h>
 
 static inline unsigned long
 lkpi_jiffies(void)
@@ -36,6 +37,8 @@ lkpi_jiffies(void)
 #define	time_before_eq(a, b)	time_after_eq(b, a)
 #define	time_in_range(a, b, c)	(time_after_eq(a, b) && time_before_eq(a, c))
 #define	time_in_range_open(a, b, c)	(time_after_eq(a, b) && time_before(a, c))
+#define	time_after32(a, b)	((s32)((u32)(b) - (u32)(a)) < 0)
+#define	time_before32(b, a)	time_after32(a, b)
 #define	time_after64(a, b)	((s64)((b) - (a)) < 0)
 #define	time_before64(a, b)	time_after64(b, a)
 #define	time_after_eq64(a, b)	((s64)((a) - (b)) >= 0)

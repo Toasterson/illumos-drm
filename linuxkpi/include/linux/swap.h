@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/folio_batch.h>
 struct swap_iocb;
+#define	SWAP_CLUSTER_MAX		32UL
 #define	total_swap_pages		0L
 #define	get_nr_swap_pages()		0L
 #define	lru_add_drain()			((void)0)

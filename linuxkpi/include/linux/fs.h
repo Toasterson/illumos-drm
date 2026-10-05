@@ -24,6 +24,7 @@
 #include <linux/wait.h>
 #include <linux/stat.h>
 #include <linux/uidgid.h>
+#include <linux/module.h>
 
 struct lx_file;
 struct inode;
@@ -86,8 +87,75 @@ struct file_operations {
 	void (*show_fdinfo)(struct seq_file *m, struct lx_file *f);
 	unsigned long (*get_unmapped_area)(struct lx_file *, unsigned long,
 	    unsigned long, unsigned long, unsigned long);
+	ssize_t (*read_iter)(struct kiocb *, struct iov_iter *);
+	ssize_t (*write_iter)(struct kiocb *, struct iov_iter *);
 	unsigned int fop_flags;
 };
+
+/* Synchronous I/O control blocks and user-buffer iterators (shmem pwrite). */
+struct kiocb {
+	struct lx_file *ki_filp;
+	loff_t ki_pos;
+	int ki_flags;
+};
+
+#define	ITER_SOURCE	1
+#define	ITER_DEST	0
+#define	ITER_UBUF	0
+
+struct iov_iter {
+	u8 iter_type;
+	bool data_source;
+	size_t iov_offset;
+	size_t count;
+	void __user *ubuf;
+};
+
+static inline void
+iov_iter_ubuf(struct iov_iter *i, unsigned int direction, void __user *buf,
+    size_t count)
+{
+	i->iter_type = ITER_UBUF;
+	i->data_source = (direction == ITER_SOURCE);
+	i->iov_offset = 0;
+	i->count = count;
+	i->ubuf = buf;
+}
+
+#define	iov_iter_count(i)	((i)->count)
+#define	MAX_RW_COUNT		(INT_MAX & PAGE_MASK)
+#define	O_LARGEFILE		0x2000
+#define	force_o_largefile()	true
+
+/* Writeback: illumos kernel memory is not paged out; nothing is written back. */
+enum writeback_sync_modes {
+	WB_SYNC_NONE,
+	WB_SYNC_ALL
+};
+
+struct writeback_control {
+	long nr_to_write;
+	long pages_skipped;
+	loff_t range_start;
+	loff_t range_end;
+	enum writeback_sync_modes sync_mode;
+	unsigned int for_kupdate:1;
+	unsigned int for_background:1;
+	unsigned int for_reclaim:1;
+	unsigned int range_cyclic:1;
+};
+
+static inline struct folio *
+writeback_iter(struct address_space *mapping, struct writeback_control *wbc,
+    struct folio *folio, int *error)
+{
+	(void) mapping; (void) wbc; (void) folio;
+	*error = 0;
+	return (NULL);
+}
+
+#define	folio_mapped(f)				((void)(f), false)
+#define	folio_redirty_for_writepage(wbc, f)	((void)(wbc), (void)(f), false)
 
 struct lx_file {
 	atomic_long_t f_count;
@@ -102,6 +170,18 @@ struct lx_file {
 	struct mutex f_pos_lock;
 };
 
+#define	O_ACCMODE	3
+#ifndef	O_RDONLY
+#define	O_RDONLY	0
+#define	O_WRONLY	1
+#define	O_RDWR		2
+#endif
+#ifndef	O_NONBLOCK
+#define	O_NONBLOCK	0x80
+#endif
+#ifndef	O_CLOEXEC
+#define	O_CLOEXEC	0x800000
+#endif
 #define	FMODE_READ		0x1
 #define	FMODE_WRITE		0x2
 #define	FMODE_LSEEK		0x4
@@ -115,6 +195,18 @@ struct lx_file {
 #define	SEEK_END		2
 
 extern void fput(struct lx_file *file);
+extern ssize_t kernel_write(struct lx_file *file, const void *buf, size_t count,
+    loff_t *pos);
+extern ssize_t kernel_read(struct lx_file *file, void *buf, size_t count,
+    loff_t *pos);
+
+static inline void
+init_sync_kiocb(struct kiocb *kiocb, struct lx_file *filp)
+{
+	kiocb->ki_filp = filp;
+	kiocb->ki_pos = 0;
+	kiocb->ki_flags = 0;
+}
 extern struct lx_file *get_file(struct lx_file *file);
 extern loff_t noop_llseek(struct lx_file *file, loff_t offset, int whence);
 extern loff_t default_llseek(struct lx_file *file, loff_t offset, int whence);
@@ -129,6 +221,8 @@ extern int stream_open(struct inode *inode, struct lx_file *filp);
 #define	file_inode(f)		((f)->f_inode)
 #define	file_count(f)		atomic_long_read(&(f)->f_count)
 #define	get_file_rcu(f)		get_file(f)
+extern struct lx_file *get_file_active(struct lx_file **f);
+extern int vfs_mmap(struct lx_file *file, struct vm_area_struct *vma);
 #define	i_size_read(inode)	((inode)->i_size)
 #define	i_size_write(inode, s)	((inode)->i_size = (s))
 #define	iput(inode)		((void)(inode))
@@ -175,5 +269,14 @@ mapping_unevictable(struct address_space *m)
 }
 
 #define	mapping_mapped(m)	false
+
+/* simple_attr files (debugfs only, which illumos lacks): the fops exist, nothing opens them. */
+#define	DEFINE_DEBUGFS_ATTRIBUTE(fops, get, set, fmt) \
+	static const struct file_operations fops __maybe_unused = { .owner = NULL }
+#define	DEFINE_DEBUGFS_ATTRIBUTE_SIGNED(fops, get, set, fmt) \
+	DEFINE_DEBUGFS_ATTRIBUTE(fops, get, set, fmt)
+#define	DEFINE_SIMPLE_ATTRIBUTE(fops, get, set, fmt) \
+	DEFINE_DEBUGFS_ATTRIBUTE(fops, get, set, fmt)
+
 
 #endif

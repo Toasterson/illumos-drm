@@ -14,6 +14,8 @@
 
 #include <linux/dma-fence.h>
 #include <linux/fs.h>
+#include <linux/file.h>
+#include <linux/dma-fence-array.h>
 #include <drm/drm_syncobj.h>
 
 struct sync_file {

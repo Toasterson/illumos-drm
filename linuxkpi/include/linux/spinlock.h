@@ -20,6 +20,7 @@
 #define	_LINUX_SPINLOCK_H
 
 #include <linux/types.h>
+#include <linux/bitops.h>
 #include <linux/compiler.h>
 #include <linux/spinlock_types.h>
 #include <linux/lockdep.h>
@@ -36,7 +37,7 @@ lkpi_spin_lock_init(spinlock_t *lock)
 }
 
 #define	spin_lock_init(l)		lkpi_spin_lock_init(l)
-#define	raw_spin_lock_init(l)		lkpi_spin_lock_init(l)
+#define	raw_spin_lock_init(l)		(mutex_init)(&(l)->rlock, NULL, MUTEX_DRIVER, NULL)
 #define	spin_lock(l)			mutex_enter(&(l)->rlock)
 #define	spin_unlock(l)			mutex_exit(&(l)->rlock)
 #define	spin_lock_nested(l, s)		mutex_enter(&(l)->rlock)

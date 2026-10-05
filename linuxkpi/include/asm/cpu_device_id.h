@@ -34,7 +34,7 @@ struct cpuinfo_x86 {
 	u8 x86_model;
 	u8 x86_stepping;
 	u32 x86_vfm;
-	int x86_clflush_size;
+	u16 x86_clflush_size;
 	int x86_cache_alignment;
 	u32 x86_capability_lkpi[4];
 };

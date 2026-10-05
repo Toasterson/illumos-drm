@@ -132,9 +132,11 @@ struct ww_mutex {
  * file and node handles (facade 1.1). A driver written for illumos sees
  * the device node (dev_info_t) and opaque file pointers. A compatibility
  * layer may define these three macros before including any facade header
- * to see its own types: the illumos LinuxKPI layer defines
+ * (and DRM_FACADE_INODE_T) to see its own types: the illumos LinuxKPI layer defines
  * DRM_FACADE_DEVICE_T as its struct device, DRM_FACADE_DEVICE_DIP(d) as
- * the node of such a device, and DRM_FACADE_FILE_T as its struct file.
+ * the node of such a device, DRM_FACADE_FILE_T as its struct file and
+ * DRM_FACADE_INODE_T as its struct inode (drm_device.anon_inode, which the
+ * core leaves NULL and never reads).
  * The core writes drm_device.dev, dma_dev and drm_minor.kdev (the node)
  * and never reads them back, so a layer may replace them with its own
  * device after drm_dev_alloc() and drm_dev_register(); the core never
@@ -146,6 +148,9 @@ struct ww_mutex {
 #endif
 #ifndef	DRM_FACADE_FILE_T
 #define	DRM_FACADE_FILE_T		void
+#endif
+#ifndef	DRM_FACADE_INODE_T
+#define	DRM_FACADE_INODE_T		void
 #endif
 
 /* Forward declarations of the facade's structures. */

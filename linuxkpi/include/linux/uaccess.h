@@ -44,6 +44,7 @@ extern long strncpy_from_user(char *dst, const char __user *src, long count);
 #define	__copy_to_user(t, f, n)			copy_to_user(t, f, n)
 #define	__copy_from_user_inatomic(t, f, n)	copy_from_user(t, f, n)
 #define	__copy_to_user_inatomic(t, f, n)	copy_to_user(t, f, n)
+#define	copy_from_user_inatomic_nontemporal(t, f, n)	copy_from_user(t, f, n)
 #define	copy_from_user_inatomic_nocache(t, f, n)	copy_from_user(t, f, n)
 #define	__copy_from_user_inatomic_nocache(t, f, n)	copy_from_user(t, f, n)
 #define	access_ok(addr, size)			((void)(addr), (void)(size), true)

@@ -16,6 +16,7 @@
 #include <linux/types.h>
 #include <linux/compiler.h>
 #include <linux/string.h>
+#include <linux/err.h>
 #include <asm/barrier.h>
 
 #define	__lkpi_rd(T, a)		(*(const volatile T *)(a))
@@ -68,6 +69,8 @@ memset_io(volatile void __iomem *a, int c, size_t n)
 {
 	memset((void *)(uintptr_t)a, c, n);
 }
+
+#define	IOMEM_ERR_PTR(err)	((void __iomem *)ERR_PTR(err))
 
 extern void __iomem *ioremap(resource_size_t offset, unsigned long size);
 extern void __iomem *ioremap_wc(resource_size_t offset, unsigned long size);

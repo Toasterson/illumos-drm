@@ -46,9 +46,13 @@
 #define	smp_cond_load_acquire(ptr, cond_expr) ({ \
 	typeof (*(ptr)) __v = smp_cond_load_relaxed(ptr, cond_expr); \
 	barrier(); __v; })
-#define	cpu_relax()	SMT_PAUSE()
+static inline void
+cpu_relax(void)
+{
+	__asm__ __volatile__("pause" ::: "memory");
+}
 #ifndef	SMT_PAUSE
-#define	SMT_PAUSE()	__asm__ __volatile__("pause" ::: "memory")
+#define	SMT_PAUSE()	cpu_relax()
 #endif
 
 #endif

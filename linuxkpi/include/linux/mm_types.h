@@ -59,6 +59,24 @@ struct folio {
 
 typedef unsigned int vm_flags_t;
 
+/* Linux 7's opaque VMA flag set (only shmem_file_setup() takes one here). */
+typedef struct {
+	unsigned long __vma_flags[1];
+} vma_flags_t;
+#define	EMPTY_VMA_FLAGS		((vma_flags_t){ })
+enum {
+	VMA_READ_BIT = 0,
+	VMA_WRITE_BIT = 1,
+	VMA_SHARED_BIT = 3,
+	VMA_NORESERVE_BIT = 21
+};
+#define	__lkpi_vma_bits(...)	({ unsigned int __b[] = { __VA_ARGS__ }; \
+	vma_flags_t __f = EMPTY_VMA_FLAGS; size_t __i; \
+	for (__i = 0; __i < sizeof (__b) / sizeof (__b[0]); __i++) \
+		__f.__vma_flags[0] |= 1UL << __b[__i]; \
+	__f; })
+#define	mk_vma_flags(...)	__lkpi_vma_bits(__VA_ARGS__)
+
 struct vm_area_struct;
 struct vm_operations_struct;
 

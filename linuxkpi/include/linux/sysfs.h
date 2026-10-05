@@ -42,6 +42,8 @@ struct bin_attribute {
 	    const struct bin_attribute *, char *, loff_t, size_t);
 	ssize_t (*write)(struct lx_file *, struct kobject *,
 	    const struct bin_attribute *, char *, loff_t, size_t);
+	int (*mmap)(struct lx_file *, struct kobject *,
+	    const struct bin_attribute *, struct vm_area_struct *);
 };
 
 struct sysfs_ops {
@@ -67,6 +69,7 @@ struct sysfs_ops {
 	static const struct attribute_group _name##_group = { .attrs = _name##_attrs }; \
 	static const struct attribute_group *_name##_groups[] = { &_name##_group, NULL }
 #define	sysfs_attr_init(a)	((void)(a))
+extern const char power_group_name[];
 #define	sysfs_bin_attr_init(a)	((void)(a))
 
 #define	sysfs_create_file(k, a)		((void)(k), (void)(a), 0)

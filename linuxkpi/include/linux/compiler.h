@@ -36,7 +36,8 @@
 #define	__must_be_array(a)	BUILD_BUG_ON_ZERO(__same_type((a), &(a)[0]))
 #define	__must_be_byte_array(a)	0
 #define	__must_be_cstr(p)	0
-#define	__is_constexpr(x)	__builtin_constant_p(x)
+#define	__is_constexpr(x) \
+	(sizeof (int) == sizeof (*(8 ? ((void *)((long)(x) * 0l)) : (int *)8)))
 #define	is_signed_type(type)	(((type)(-1)) < (__force type)1)
 #define	is_unsigned_type(type)	(!is_signed_type(type))
 #define	statically_true(x)	(__builtin_constant_p(x) && (x))

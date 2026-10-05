@@ -25,6 +25,9 @@
 #include <linux/atomic.h>
 #include <linux/timer.h>
 #include <linux/workqueue_types.h>
+#include <linux/completion.h>
+#include <linux/rcupdate.h>
+#include <linux/cpumask.h>
 
 #define	WORK_STRUCT_PENDING_BIT	0
 #define	WORK_STRUCT_RUNNING_BIT	1

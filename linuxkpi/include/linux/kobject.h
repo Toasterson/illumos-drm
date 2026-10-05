@@ -50,6 +50,7 @@ enum kobject_action {
 	KOBJ_UNBIND
 };
 
+extern const struct sysfs_ops kobj_sysfs_ops;
 extern void kobject_init(struct kobject *kobj, const struct kobj_type *ktype);
 extern int kobject_add(struct kobject *kobj, struct kobject *parent,
     const char *fmt, ...);

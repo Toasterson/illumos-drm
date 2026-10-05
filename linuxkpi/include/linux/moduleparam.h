@@ -29,6 +29,7 @@ struct kernel_param {
 #define	module_param_string(name, string, len, perm)
 #define	module_param_array(name, type, nump, perm)
 #define	module_param_array_named(name, array, type, nump, perm)
+#define	module_param_cb_unsafe(name, ops, arg, perm)
 #define	module_param_cb(name, ops, arg, perm)
 #define	module_param_call(name, set, get, arg, perm)
 #define	MODULE_PARM_DESC(var, desc)

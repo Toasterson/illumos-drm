@@ -13,7 +13,11 @@ typedef struct poll_table_struct {
 	void *_qproc;
 	__poll_t _key;
 } poll_table;
-#define	poll_wait(f, wq, p)	((void)(f), (void)(wq), (void)(p))
+static inline void
+poll_wait(struct lx_file *filp, struct wait_queue_head *wq, poll_table *p)
+{
+	(void) filp; (void) wq; (void) p;
+}
 #define	EPOLLIN		0x00000001
 #define	EPOLLPRI	0x00000002
 #define	EPOLLOUT	0x00000004

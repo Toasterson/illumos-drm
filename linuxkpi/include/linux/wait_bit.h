@@ -16,6 +16,8 @@ extern struct wait_queue_head *bit_waitqueue(void *word, int bit);
 extern void wake_up_var(void *var);
 extern void wake_up_bit(void *word, int bit);
 
+#define	___wait_var_event(var, condition, state, exclusive, ret, cmd) \
+	___wait_event(*__var_waitqueue(var), condition, state, exclusive, ret, cmd)
 #define	wait_var_event(var, condition) \
 	wait_event(*__var_waitqueue(var), condition)
 #define	wait_var_event_killable(var, condition) \

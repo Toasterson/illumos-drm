@@ -4,8 +4,8 @@
  *
  * Linux's fence arrays (include/linux/dma-fence-array.h, GPL-2.0;
  * reimplemented in src/lkpi_fence_array.c as a driver-side fence over the
- * DRM facade): the array signals when all (or, with signal_on_any, one)
- * of its fences have signalled, with the first error. It takes over the
+ * DRM facade): the array signals when all of its fences have signalled,
+ * with the first error (Linux 7 dropped signal_on_any). It takes over the
  * caller's references to the fences and the fences array.
  */
 #ifndef _LINUX_DMA_FENCE_ARRAY_H
@@ -39,11 +39,9 @@ to_dma_fence_array(struct dma_fence *fence)
 
 extern struct dma_fence_array *dma_fence_array_alloc(int num_fences);
 extern void dma_fence_array_init(struct dma_fence_array *array,
-    int num_fences, struct dma_fence **fences, u64 context, unsigned int seqno,
-    bool signal_on_any);
+    int num_fences, struct dma_fence **fences, u64 context, unsigned int seqno);
 extern struct dma_fence_array *dma_fence_array_create(int num_fences,
-    struct dma_fence **fences, u64 context, unsigned int seqno,
-    bool signal_on_any);
+    struct dma_fence **fences, u64 context, unsigned int seqno);
 extern bool dma_fence_match_context(struct dma_fence *fence, u64 context);
 extern struct dma_fence *dma_fence_array_first(struct dma_fence *head);
 extern struct dma_fence *dma_fence_array_next(struct dma_fence *head,

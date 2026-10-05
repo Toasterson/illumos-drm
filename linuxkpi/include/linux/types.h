@@ -6,7 +6,11 @@
  * include/uapi/asm-generic/int-ll64.h; the uapi part is GPL-2.0 WITH
  * Linux-syscall-note, the rest GPL-2.0; reimplemented). The DRM facade's
  * base types (struct list_head, atomic_t, refcount_t, struct kref, struct
- * rcu_head, ktime_t, gfp_t) are used as they are.
+ * rcu_head, ktime_t, gfp_t) are used as they are. u64 and __u64 are
+ * uint64_t (unsigned long on illumos' LP64), not Linux's unsigned long
+ * long: the facade's interfaces are uint64_t, and a driver passes pointers
+ * to its u64 fields to them. Printing a u64 with %llx is only a format
+ * warning.
  */
 #ifndef _LINUX_TYPES_H
 #define	_LINUX_TYPES_H
@@ -18,19 +22,19 @@
 typedef uint8_t		u8;
 typedef uint16_t	u16;
 typedef uint32_t	u32;
-typedef unsigned long long u64;
+typedef uint64_t	u64;
 typedef int8_t		s8;
 typedef int16_t		s16;
 typedef int32_t		s32;
-typedef long long	s64;
+typedef int64_t		s64;
 typedef uint8_t		__u8;
 typedef uint16_t	__u16;
 typedef uint32_t	__u32;
-typedef unsigned long long __u64;
+typedef uint64_t	__u64;
 typedef int8_t		__s8;
 typedef int16_t		__s16;
 typedef int32_t		__s32;
-typedef long long	__s64;
+typedef int64_t		__s64;
 typedef __u16		__le16;
 typedef __u16		__be16;
 typedef __u32		__le32;
@@ -55,6 +59,7 @@ typedef unsigned char	unchar;
 typedef u64		dma_addr_t;
 typedef u64		phys_addr_t;
 typedef phys_addr_t	resource_size_t;
+typedef long long	loff_t;
 typedef unsigned long	pgoff_t;
 typedef unsigned long	irq_hw_number_t;
 typedef unsigned short	umode_t;

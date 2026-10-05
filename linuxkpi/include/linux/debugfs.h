@@ -36,10 +36,4 @@ struct debugfs_blob_wrapper {
 #define	debugfs_remove_recursive(d)		((void)(d))
 #define	debugfs_lookup_and_remove(n, p)		((void)(n))
 #define	debugfs_initialized()			false
-#define	DEFINE_DEBUGFS_ATTRIBUTE(fops, get, set, fmt) \
-	static const struct file_operations fops = { .owner = NULL }
-#define	DEFINE_DEBUGFS_ATTRIBUTE_SIGNED(fops, get, set, fmt) \
-	DEFINE_DEBUGFS_ATTRIBUTE(fops, get, set, fmt)
-#define	DEFINE_SIMPLE_ATTRIBUTE(fops, get, set, fmt) \
-	DEFINE_DEBUGFS_ATTRIBUTE(fops, get, set, fmt)
 #endif

@@ -9,6 +9,7 @@
 #define	_LINUX_WORKQUEUE_TYPES_H
 
 #include <linux/types.h>
+#include <linux/lockdep_types.h>
 
 struct work_struct;
 struct workqueue_struct;
@@ -19,6 +20,7 @@ struct work_struct {
 	struct list_head entry;
 	work_func_t func;
 	struct workqueue_struct *wq;
+	struct lockdep_map lockdep_map;
 };
 
 #endif

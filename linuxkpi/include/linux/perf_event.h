@@ -8,6 +8,10 @@
 #ifndef _LINUX_PERF_EVENT_H
 #define	_LINUX_PERF_EVENT_H
 #include <linux/types.h>
+#include <linux/sysfs.h>
 struct perf_event;
-struct pmu;
+/* Only the size matters: i915's struct i915_pmu embeds one (i915_pmu.c is not built). */
+struct pmu {
+	void *lkpi_unused[8];
+};
 #endif

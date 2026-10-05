@@ -198,6 +198,10 @@ extern int pci_bus_alloc_resource(struct pci_bus *bus, struct resource *res,
     resource_size_t (*alignf)(void *, const struct resource *,
     resource_size_t, resource_size_t), void *alignf_data);
 extern void pci_assign_unassigned_bus_resources(struct pci_bus *bus);
+extern resource_size_t pcibios_align_resource(void *data,
+    const struct resource *res, resource_size_t size, resource_size_t align);
+#define	PCIBIOS_MIN_MEM		0x10000000UL
+#define	PCIBIOS_MIN_IO		0x1000UL
 extern int pci_resize_resource(struct pci_dev *dev, int i, int size);
 extern int pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar);
 
@@ -210,6 +214,7 @@ extern int pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar);
 #define	pci_map_rom(p, s)		((void __iomem *)NULL)
 #define	pci_unmap_rom(p, r)		((void)(r))
 #define	pci_upstream_bridge(p)		((struct pci_dev *)NULL)
+#define	pcie_find_root_port(p)		((struct pci_dev *)NULL)
 #define	pci_physfn(p)			(p)
 #define	pci_num_vf(p)			0
 #define	pci_sriov_get_totalvfs(p)	0

@@ -25,6 +25,16 @@
 #include <linux/page-flags.h>
 #include <linux/page_ref.h>
 #include <linux/pgtable.h>
+#include <linux/shrinker.h>
+#include <linux/uaccess.h>
+
+static inline int
+get_order(unsigned long size)
+{
+	if (size <= PAGE_SIZE)
+		return (0);
+	return ((int)(64 - __builtin_clzl((size - 1) >> PAGE_SHIFT)));
+}
 
 #define	PAGE_ALIGN(addr)	ALIGN((addr), PAGE_SIZE)
 #define	PAGE_ALIGN_DOWN(addr)	ALIGN_DOWN((addr), PAGE_SIZE)
@@ -84,6 +94,8 @@ extern struct lx_page *lkpi_virt_to_page(const void *kva);
 extern void lkpi_page_release(struct lx_page *page);
 
 #define	virt_to_page(kva)	lkpi_virt_to_page(kva)
+#define	pfn_to_page(pfn)	lkpi_virt_to_page((void *)((unsigned long)(pfn) << PAGE_SHIFT))
+#define	pfn_valid(pfn)		true
 #define	virt_to_folio(kva)	page_folio(lkpi_virt_to_page(kva))
 #define	virt_to_phys(kva)	lkpi_page_to_phys(lkpi_virt_to_page(kva))
 #define	page_mapping(p)		((p)->mapping)
@@ -132,6 +144,7 @@ extern vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma,
     unsigned long addr, unsigned long pfn, pgprot_t pgprot);
 extern vm_fault_t vmf_insert_mixed(struct vm_area_struct *vma,
     unsigned long addr, unsigned long pfn);
+#define	zap_special_vma_range(vma, a, s)	zap_vma_ptes(vma, a, s)
 extern void zap_vma_ptes(struct vm_area_struct *vma, unsigned long address,
     unsigned long size);
 extern int apply_to_page_range(struct mm_struct *mm, unsigned long addr,
@@ -139,6 +152,17 @@ extern int apply_to_page_range(struct mm_struct *mm, unsigned long addr,
     void *data);
 extern struct vm_area_struct *find_vma(struct mm_struct *mm,
     unsigned long addr);
+
+/* VMA iteration over Linux address spaces: there are none (mm is NULL). */
+struct vma_iterator {
+	struct mm_struct *mm;
+	unsigned long addr;
+};
+#define	VMA_ITERATOR(name, mm_, addr_) \
+	struct vma_iterator name = { .mm = (mm_), .addr = (addr_) }
+#define	for_each_vma_range(vmi, vma, end) \
+	for ((vma) = NULL; (vma) != NULL; )
+#define	for_each_vma(vmi, vma)	for ((vma) = NULL; (vma) != NULL; )
 extern unsigned long vm_mmap(struct lx_file *file, unsigned long addr,
     unsigned long len, unsigned long prot, unsigned long flag,
     unsigned long offset);
@@ -160,26 +184,11 @@ extern long get_user_pages_fast(unsigned long start, int nr_pages,
 #define	mmap_write_lock(mm)	down_write(&(mm)->mmap_lock)
 #define	mmap_write_unlock(mm)	up_write(&(mm)->mmap_lock)
 #define	mmap_read_lock_killable(mm)	({ mmap_read_lock(mm); 0; })
+#define	mmap_write_lock_killable(mm)	({ mmap_write_lock(mm); 0; })
 #define	mmap_assert_locked(mm)	((void)(mm))
 #define	is_cow_mapping(f)	(((f) & (VM_SHARED | VM_MAYWRITE)) == VM_MAYWRITE)
 #define	si_mem_available()	((long)physmem_lkpi())
 #define	want_init_on_free()	false
-
-struct sysinfo {
-	unsigned long totalram;
-	unsigned long totalhigh;
-	unsigned long freeram;
-	unsigned int mem_unit;
-};
-
-static inline void
-si_meminfo(struct sysinfo *val)
-{
-	val->totalram = physmem_lkpi();
-	val->totalhigh = 0;
-	val->freeram = 0;
-	val->mem_unit = PAGE_SIZE;
-}
 
 #include <linux/page_ref.h>
 

@@ -20,6 +20,9 @@
 #define	_LINUX_INTERRUPT_H
 
 #include <linux/types.h>
+#include <linux/bitops.h>
+#include <linux/irqflags.h>
+#include <linux/preempt.h>
 #include <linux/irqreturn.h>
 #include <linux/atomic.h>
 #include <linux/workqueue.h>
@@ -94,12 +97,6 @@ extern bool tasklet_trylock(struct tasklet_struct *t);
 extern void tasklet_unlock(struct tasklet_struct *t);
 
 #define	tasklet_hi_schedule(t)		tasklet_schedule(t)
-
-static inline bool
-tasklet_is_locked(struct tasklet_struct *t)
-{
-	return (test_bit(TASKLET_STATE_RUN, &t->state));
-}
 
 static inline void
 tasklet_disable_nosync(struct tasklet_struct *t)

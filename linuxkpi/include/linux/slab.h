@@ -64,8 +64,25 @@ extern size_t ksize(const void *p);
 #define	kvrealloc(p, size, gfp)		lkpi_krealloc((p), (size), (gfp))
 #define	kvfree(p)			lkpi_kfree(p)
 #define	kvfree_sensitive(p, len)	lkpi_kfree(p)
-#define	kmalloc_obj(p, gfp)		kmalloc(sizeof (*(p)), gfp)
-#define	kzalloc_obj(p, gfp)		kzalloc(sizeof (*(p)), gfp)
+/* Linux 7's typed allocators: an optional gfp (GFP_KERNEL by default). */
+#define	__lkpi_gfp_pick(a, b, ...)	b
+#define	default_gfp(...)	__lkpi_gfp_pick(_ __VA_OPT__(,) __VA_ARGS__, GFP_KERNEL)
+#define	__alloc_objs(KM, GFP, TYPE, COUNT) \
+	((TYPE *)KM(size_mul(sizeof (TYPE), (COUNT)), (GFP)))
+#define	__alloc_flex(KM, GFP, TYPE, FAM, COUNT) \
+	((TYPE *)KM(struct_size_t(TYPE, FAM, (COUNT)), (GFP)))
+#define	kmalloc_obj(V, ...)	__alloc_objs(kmalloc, default_gfp(__VA_ARGS__), typeof (V), 1)
+#define	kmalloc_objs(V, N, ...)	__alloc_objs(kmalloc, default_gfp(__VA_ARGS__), typeof (V), N)
+#define	kmalloc_flex(V, F, N, ...)	__alloc_flex(kmalloc, default_gfp(__VA_ARGS__), typeof (V), F, N)
+#define	kzalloc_obj(V, ...)	__alloc_objs(kzalloc, default_gfp(__VA_ARGS__), typeof (V), 1)
+#define	kzalloc_objs(V, N, ...)	__alloc_objs(kzalloc, default_gfp(__VA_ARGS__), typeof (V), N)
+#define	kzalloc_flex(V, F, N, ...)	__alloc_flex(kzalloc, default_gfp(__VA_ARGS__), typeof (V), F, N)
+#define	kvmalloc_obj(V, ...)	__alloc_objs(kvmalloc, default_gfp(__VA_ARGS__), typeof (V), 1)
+#define	kvmalloc_objs(V, N, ...)	__alloc_objs(kvmalloc, default_gfp(__VA_ARGS__), typeof (V), N)
+#define	kvmalloc_flex(V, F, N, ...)	__alloc_flex(kvmalloc, default_gfp(__VA_ARGS__), typeof (V), F, N)
+#define	kvzalloc_obj(V, ...)	__alloc_objs(kvzalloc, default_gfp(__VA_ARGS__), typeof (V), 1)
+#define	kvzalloc_objs(V, N, ...)	__alloc_objs(kvzalloc, default_gfp(__VA_ARGS__), typeof (V), N)
+#define	kvzalloc_flex(V, F, N, ...)	__alloc_flex(kvzalloc, default_gfp(__VA_ARGS__), typeof (V), F, N)
 #define	kmalloc_size_roundup(s)		(s)
 
 DEFINE_FREE(kfree, void *, if (!IS_ERR_OR_NULL(_T)) kfree(_T))
@@ -96,8 +113,7 @@ lkpi_kmem_cache_zalloc(struct lkpi_kmem_cache *c, gfp_t gfp)
 	return (lkpi_kmem_cache_alloc(c, gfp | __GFP_ZERO));
 }
 
-/* Linux names the cache type struct kmem_cache. */
-#define	kmem_cache	lkpi_kmem_cache
+/* Linux's struct kmem_cache is the layer's (the prologue renames the tag). */
 #define	KMEM_CACHE(__struct, __flags) \
 	lkpi_kmem_cache_create(#__struct, sizeof (struct __struct), \
 	    __alignof__(struct __struct), (__flags), NULL)

@@ -38,6 +38,13 @@ extern char *strchrnul(const char *s, int c);
 extern bool sysfs_streq(const char *s1, const char *s2);
 extern int match_string(const char * const *array, size_t n,
     const char *string);
+static inline void
+memset_p(void **p, void *v, size_t n)
+{
+	while (n-- > 0)
+		*p++ = v;
+}
+
 extern void *memset32(u32 *s, u32 v, size_t count);
 extern void *memset64(u64 *s, u64 v, size_t count);
 extern void *memdup_user(const void __user *src, size_t len);

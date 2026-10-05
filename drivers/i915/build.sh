@@ -42,6 +42,7 @@ CROSS=${CROSS:-0}
 I915=$LINUX/drivers/gpu/drm/i915
 mode=${1:-all}
 
+rm -rf "$OUT/log"
 mkdir -p "$OUT/obj" "$OUT/log" "$OUT/sysinc"
 # Only the kernel header directories of the system include tree, so a
 # Linux header the layer lacks is an error and not a userland header.
@@ -86,12 +87,13 @@ CFLAGS=$(for f in $CFLAGS; do probe "$f" && printf '%s ' "$f"; done)
 
 CPPFLAGS="-D_KERNEL -D_SYSCALL32 -D_SYSCALL32_IMPL -D_ELF64 -D_DDI_STRICT"
 CPPFLAGS="$CPPFLAGS -Dsun -D__sun -D__SVR4 -D__illumos__ -D_ASM_INLINES"
-CPPFLAGS="$CPPFLAGS -D__KERNEL__ -DMODULE -DI915 -DKBUILD_MODNAME=\\\"i915\\\""
+CPPFLAGS="$CPPFLAGS -D__KERNEL__ -DMODULE -DI915 -DKBUILD_MODNAME=\"i915\""
 if [ "$CROSS" = 1 ]; then
 	CPPFLAGS="$CPPFLAGS -U__linux__ -U__linux -Ulinux -U__gnu_linux__ -U__unix__ -Uunix"
 fi
 CPPFLAGS="$CPPFLAGS -nostdinc -I$REPO/linuxkpi/include -I$REPO/include"
-CPPFLAGS="$CPPFLAGS -I$LINUX/.illumos/mit-include -I$I915 -I$OUT/sysinc"
+CPPFLAGS="$CPPFLAGS -I$LINUX/.illumos/mit-include -I$LINUX/.illumos/mit-include/uapi"
+CPPFLAGS="$CPPFLAGS -I$I915 -I$OUT/sysinc"
 CPPFLAGS="$CPPFLAGS -include $HERE/config.h -include $REPO/linuxkpi/include/linux/kconfig.h"
 CPPFLAGS="$CPPFLAGS -include $REPO/linuxkpi/include/lkpi/prologue.h"
 echo "$CC $CFLAGS $CPPFLAGS" > "$OUT/flags.txt"

@@ -15,6 +15,7 @@
 #include <linux/ktime.h>
 #include <linux/timer.h>
 #include <linux/rbtree.h>
+#include <linux/interrupt.h>
 
 enum hrtimer_mode {
 	HRTIMER_MODE_ABS = 0x00,

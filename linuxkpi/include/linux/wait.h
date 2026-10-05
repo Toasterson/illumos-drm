@@ -232,6 +232,8 @@ __out: \
 		if (__r) break; \
 	} \
 	__r; })
+#include <linux/wait_bit.h>
+
 #define	wait_event_lock_irq(wq, condition, lock) do { \
 	while (!(condition)) { \
 		spin_unlock_irq(&(lock)); \

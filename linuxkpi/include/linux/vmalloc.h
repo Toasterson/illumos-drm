@@ -22,6 +22,7 @@
 #define	VM_ALLOC	0x00000002
 #define	VM_USERMAP	0x00000008
 #define	VM_DMA_COHERENT	0x00000010
+#define	VM_MAP_PUT_PAGES	0x00000200	/* vunmap() puts the pages, frees the array */
 
 #define	vmalloc(size)			lkpi_kmalloc((size), GFP_KERNEL)
 #define	vzalloc(size)			lkpi_kmalloc((size), GFP_KERNEL | __GFP_ZERO)
@@ -34,6 +35,10 @@
 #define	vcalloc(n, size)		vzalloc(size_mul((n), (size)))
 #define	vfree(p)			lkpi_kfree(p)
 #define	is_vmalloc_addr(p)		false
+
+/* No vmap-space pressure notifications on illumos: nothing to register. */
+#define	register_vmap_purge_notifier(nb)	((void)(nb), 0)
+#define	unregister_vmap_purge_notifier(nb)	((void)(nb), 0)
 
 extern void *vmap(struct lx_page **pages, unsigned int count,
     unsigned long flags, pgprot_t prot);
