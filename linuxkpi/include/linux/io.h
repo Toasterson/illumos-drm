@@ -88,4 +88,53 @@ extern void arch_io_free_memtype_wc(resource_size_t start,
 #define	devm_ioremap_wc(d, o, s)	ioremap_wc(o, s)
 #define	mmiowb()		barrier()
 
+/*
+ * memremap(): a kernel mapping of physical memory that is not a BAR of
+ * the driver's device, such as the ACPI OpRegion the firmware leaves for
+ * the GPU (src/lkpi_page.c). Only MEMREMAP_WB is supported; other types
+ * fail (NULL), as do ranges beyond the CPU's physical address width.
+ * memunmap() takes the returned address.
+ */
+#define	MEMREMAP_WB	(1UL << 0)
+#define	MEMREMAP_WT	(1UL << 1)
+#define	MEMREMAP_WC	(1UL << 2)
+#define	MEMREMAP_ENC	(1UL << 3)
+#define	MEMREMAP_DEC	(1UL << 4)
+
+extern void *memremap(resource_size_t offset, size_t size,
+    unsigned long flags);
+extern void memunmap(void *addr);
+
+/*
+ * Port I/O in Linux's argument order, outb(value, port). The prologue
+ * included illumos' <sys/sunddi.h>, whose inb() .. outl() (inline
+ * assembly with _ASM_INLINES) take the port first: outb(port, value).
+ * Linux code calling outb(value, port) against those would write the
+ * port number to the port the value names (i915's VGA sequencer access
+ * in intel_vga.c). The in*() functions take the same argument in both,
+ * so only the out*() calls are redirected; the parenthesised names reach
+ * illumos' functions.
+ */
+static inline void
+lkpi_outb(u8 v, unsigned long port)
+{
+	(outb)((int)port, v);
+}
+
+static inline void
+lkpi_outw(u16 v, unsigned long port)
+{
+	(outw)((int)port, v);
+}
+
+static inline void
+lkpi_outl(u32 v, unsigned long port)
+{
+	(outl)((int)port, v);
+}
+
+#define	outb(v, p)	lkpi_outb((v), (p))
+#define	outw(v, p)	lkpi_outw((v), (p))
+#define	outl(v, p)	lkpi_outl((v), (p))
+
 #endif

@@ -5,7 +5,8 @@
  * The layer's pages: alloc_pages(), the address index behind
  * virt_to_page(), page_to_phys() and vmap()/vmap_pfn() (the interfaces of
  * Linux's <linux/gfp.h>, <linux/mm.h> and <linux/vmalloc.h>; independent
- * implementation over illumos kmem, vmem and the kernel HAT). See
+ * implementation over illumos kmem, vmem and the kernel HAT), and
+ * memremap() of <linux/io.h> over vmap_pfn(). See
  * <linux/mm_types.h> for the page model and src/lkpi_mem.h for the owners.
  *
  * alloc_pages() of order 0 takes a page from a page-aligned kmem cache and
@@ -57,6 +58,7 @@
  */
 
 #include <vm/seg_kmem.h>
+#include <linux/io.h>
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
@@ -641,6 +643,61 @@ vmap_pfn(unsigned long *pfns, unsigned int count, pgprot_t prot)
 	vm->vm_loaded = true;
 	lkpi_vmap_insert(vm);
 	return (va);
+}
+
+/*
+ * memremap(): physical memory outside the driver's BARs, such as the ACPI
+ * OpRegion and the VBT behind it (i915's display), mapped write-back with
+ * vmap_pfn() into a kernel heap range. Linux's memremap(MEMREMAP_WB)
+ * returns the direct-map address for System RAM and an ioremap_cache()
+ * mapping otherwise; here both are a mapping of their own, write-back in
+ * both cases: frames outside RAM (ACPI NVS and reserved ranges, where
+ * firmware tables live) are loaded without a page_t, frames of RAM (a
+ * firmware address pointing into usable memory) get a write-back alias
+ * of the kernel's own write-back mapping, which only reads harmlessly
+ * (a caller writes only to memory it owns). Only MEMREMAP_WB is
+ * supported: a WC or WT mapping of RAM would give a frame two cache
+ * types. Refused (NULL): other types, a zero size, a wrapping range,
+ * more than 1 GiB, and frames above the CPU's physical address width,
+ * whose page-table entries would fault (reserved bits) at the first
+ * access.
+ */
+#define	LKPI_MEMREMAP_MAX	(1UL << 30)
+
+void *
+memremap(resource_size_t offset, size_t size, unsigned long flags)
+{
+	unsigned long *pfns, first, n, i;
+	unsigned int bits = lkpi_phys_addr_bits();
+	uint64_t end;
+	caddr_t va;
+
+	if ((flags & MEMREMAP_WB) == 0 || size == 0 ||
+	    size > LKPI_MEMREMAP_MAX ||
+	    (uint64_t)offset + size < (uint64_t)offset)
+		return (NULL);
+	end = (uint64_t)offset + size - 1;
+	if (bits < 64 && (end >> bits) != 0)
+		return (NULL);
+	first = (unsigned long)(offset >> PAGE_SHIFT);
+	n = (unsigned long)(end >> PAGE_SHIFT) - first + 1;
+	pfns = kmem_alloc(n * sizeof (*pfns), KM_SLEEP);
+	for (i = 0; i < n; i++)
+		pfns[i] = first + i;
+	va = vmap_pfn(pfns, (unsigned int)n, PAGE_KERNEL);
+	kmem_free(pfns, n * sizeof (*pfns));
+	if (va == NULL)
+		return (NULL);
+	return (va + (offset & (PAGE_SIZE - 1)));
+}
+
+/* Takes memremap()'s address (inside the first page of the mapping). */
+void
+memunmap(void *addr)
+{
+	if (addr == NULL)
+		return;
+	vunmap((const void *)((uintptr_t)addr & ~(uintptr_t)(PAGE_SIZE - 1)));
 }
 
 /* Undoes the newest vmap() at addr; false if there is none. */

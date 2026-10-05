@@ -13,8 +13,12 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 
-/* src/lkpi_cpu.c: boot_cpu_data (CPUID). */
+/*
+ * src/lkpi_cpu.c: boot_cpu_data (CPUID); the CPU's physical address
+ * width in bits (memremap()).
+ */
 extern int lkpi_cpu_init(void);
+extern unsigned int lkpi_phys_addr_bits(void);
 
 /* src/lkpi_slab.c, src/lkpi_page.c: allocation, the page cache. */
 extern int lkpi_slab_init(void);

@@ -3,9 +3,10 @@
  * Copyright 2026 The illumos-drm authors
  *
  * Linux's GPU switching between integrated and discrete GPUs. Not
- * supported: registration fails with -ENODEV, the queries report no
- * switcheroo, the DDC lock is a no-op (unlocking reports -ENODEV, as on
- * Linux without CONFIG_VGA_SWITCHEROO).
+ * supported, as on Linux without CONFIG_VGA_SWITCHEROO: registration
+ * succeeds without a switcheroo (i915 logged "Failed to register vga
+ * switcheroo!" at every attach while it failed), the queries report no
+ * switcheroo, the DDC lock is a no-op (unlocking reports -ENODEV).
  */
 #ifndef _LINUX_VGA_SWITCHEROO_H
 #define	_LINUX_VGA_SWITCHEROO_H
@@ -28,7 +29,7 @@ struct vga_switcheroo_client_ops {
 	bool (*can_switch)(struct pci_dev *dev);
 	void (*gpu_bound)(struct pci_dev *dev, int id);
 };
-#define	vga_switcheroo_register_client(p, o, d)	(-ENODEV)
+#define	vga_switcheroo_register_client(p, o, d)	((void)(p), 0)
 #define	vga_switcheroo_unregister_client(p)	((void)(p))
 #define	vga_switcheroo_process_delayed_switch()	0
 #define	vga_switcheroo_handler_flags()		0
