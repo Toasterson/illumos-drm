@@ -1,0 +1,44 @@
+# The Linux translation units of misc/drm_kms, relative to the pinned
+# Linux tree (drivers/i915/PIN): the closure of Linux's DRM KMS code that
+# i915's display code imports (artifacts/i915n-kms/kms-closure.tsv, 36
+# objects of drm.ko, drm_kms_helper and drm_display_helper) minus
+# drm_hdcp_helper.c (GPL-2.0-only; MIT stubs in illumos/drm_kms_stubs.c),
+# plus drivers/video/hdmi.c (MIT), Linux's HDMI infoframe library that
+# i915 and the helpers call. Every file must be MIT (or offer MIT as an
+# alternative); fetch-and-patch.sh and build.sh check them.
+drivers/gpu/drm/display/drm_dp_dual_mode_helper.c
+drivers/gpu/drm/display/drm_dp_helper.c
+drivers/gpu/drm/display/drm_dp_mst_topology.c
+drivers/gpu/drm/display/drm_dsc_helper.c
+drivers/gpu/drm/display/drm_hdmi_helper.c
+drivers/gpu/drm/display/drm_scdc_helper.c
+drivers/gpu/drm/drm_atomic.c
+drivers/gpu/drm/drm_atomic_helper.c
+drivers/gpu/drm/drm_atomic_state_helper.c
+drivers/gpu/drm/drm_atomic_uapi.c
+drivers/gpu/drm/drm_blend.c
+drivers/gpu/drm/drm_color_mgmt.c
+drivers/gpu/drm/drm_colorop.c
+drivers/gpu/drm/drm_connector.c
+drivers/gpu/drm/drm_crtc.c
+drivers/gpu/drm/drm_crtc_helper.c
+drivers/gpu/drm/drm_damage_helper.c
+drivers/gpu/drm/drm_displayid.c
+drivers/gpu/drm/drm_edid.c
+drivers/gpu/drm/drm_encoder.c
+drivers/gpu/drm/drm_fourcc.c
+drivers/gpu/drm/drm_framebuffer.c
+drivers/gpu/drm/drm_mode_config.c
+drivers/gpu/drm/drm_mode_object.c
+drivers/gpu/drm/drm_modes.c
+drivers/gpu/drm/drm_modeset_helper.c
+drivers/gpu/drm/drm_modeset_lock.c
+drivers/gpu/drm/drm_plane.c
+drivers/gpu/drm/drm_plane_helper.c
+drivers/gpu/drm/drm_probe_helper.c
+drivers/gpu/drm/drm_property.c
+drivers/gpu/drm/drm_rect.c
+drivers/gpu/drm/drm_self_refresh_helper.c
+drivers/gpu/drm/drm_vblank.c
+drivers/gpu/drm/drm_vblank_work.c
+drivers/video/hdmi.c

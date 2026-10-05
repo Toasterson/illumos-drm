@@ -4,17 +4,20 @@
 # Copyright 2026 The illumos-drm authors
 #
 # Fetches the pinned Linux tree (PIN), applies the illumos patch series
-# (patches/*.patch, in order) and prepares <tree>/.illumos/mit-include with
-# the MIT-licensed Linux headers of mit-headers.txt. The Linux source stays
-# outside illumos-drm; only the patches and this script are in it.
+# (patches/*.patch, then carried/drm_kms/patches/*.patch, in order) and
+# prepares <tree>/.illumos/mit-include with the MIT-licensed Linux headers
+# of mit-headers.txt. The Linux source stays outside illumos-drm; only the
+# patches and this script are in it. One tree serves i915n
+# (drivers/i915/build.sh) and misc/drm_kms (carried/drm_kms/build.sh).
 #
-# Licences: every TU of tus.txt and header of mit-headers.txt must be MIT
-# or HPND (check-licences.py), else the script refuses the tree. GPL-2.0
-# headers i915 includes are replaced in the tree: the two tracepoint
-# headers by MIT no-op headers that illumos/gen-trace-stubs.py writes from
-# the originals' event names (TRACE_HEADERS below), intel_ips.h by
-# illumos/intel_ips.h (MIT); build.sh checks every Linux file the compiler
-# read, so no GPL text reaches the build.
+# Licences: every TU of tus.txt and of carried/drm_kms/tus.txt and every
+# header of mit-headers.txt must be MIT or HPND (check-licences.py), else
+# the script refuses the tree. GPL-2.0 headers the builds include are
+# replaced in the tree: the tracepoint headers by MIT no-op headers that
+# illumos/gen-trace-stubs.py writes from the originals' event names
+# (TRACE_HEADERS below), intel_ips.h and drm_dp_mst_topology_internal.h by
+# MIT files of illumos-drm (REPLACED); the build scripts check every Linux
+# file the compiler read, so no GPL text reaches a build.
 #
 #   drivers/i915/fetch-and-patch.sh <directory>
 #
@@ -29,6 +32,7 @@ PATH=/usr/gnu/bin:$PATH
 export LC_ALL=C
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+KMS=$(cd "$HERE/../../carried/drm_kms" && pwd)
 # shellcheck disable=SC1091
 . "$HERE/PIN"
 dest=${1:?usage: fetch-and-patch.sh <directory>}
@@ -48,17 +52,25 @@ fi
 
 I915=drivers/gpu/drm/i915
 TRACE_HEADERS="$I915/i915_trace.h $I915/intel_uncore_trace.h"
-# GPL-2.0 headers i915 includes by relative path, replaced by the MIT
-# files of illumos/ (tree path, then replacement)
-REPLACED="drivers/platform/x86/intel_ips.h illumos/intel_ips.h"
+TRACE_HEADERS="$TRACE_HEADERS $I915/display/intel_display_trace.h drivers/gpu/drm/drm_trace.h"
+# GPL-2.0 headers the builds include by relative path, replaced by MIT
+# files of illumos-drm (tree path, then replacement relative to the
+# repository)
+REPLACED="drivers/platform/x86/intel_ips.h drivers/i915/illumos/intel_ips.h"
+REPLACED="$REPLACED drivers/gpu/drm/display/drm_dp_mst_topology_internal.h"
+REPLACED="$REPLACED carried/drm_kms/illumos/drm_dp_mst_topology_internal.h"
+REPO=$(cd "$HERE/../.." && pwd)
 # git pathspecs that leave out the generated and replaced headers
 keep=()
 for h in $TRACE_HEADERS; do keep+=(":(exclude)$h"); done
 set -- $REPLACED
 while [ $# -ge 2 ]; do keep+=(":(exclude)$1"); shift 2; done
 
-series=$( (cd "$HERE" && ls patches/*.patch 2>/dev/null || true) | sort)
-sum=$(cd "$HERE" && cat /dev/null $series | sha256sum 2>/dev/null | cut -d' ' -f1 ||
+# The series: i915's patches, then misc/drm_kms', as paths relative to
+# the repository (each group in name order).
+series=$( (cd "$REPO" && { ls drivers/i915/patches/*.patch 2>/dev/null | sort
+    ls carried/drm_kms/patches/*.patch 2>/dev/null | sort; } || true) )
+sum=$(cd "$REPO" && cat /dev/null $series | sha256sum 2>/dev/null | cut -d' ' -f1 ||
     cat /dev/null $series | digest -a sha256)
 stamp=$dest/.illumos/applied
 if [ -f "$stamp" ] && [ "$(sed -n 1p "$stamp")" = "$sum" ]; then
@@ -84,10 +96,16 @@ else
 	git -C "$dest" checkout -- $TRACE_HEADERS $(echo $REPLACED | awk '{ for (i = 1; i <= NF; i += 2) print $i }')
 	for p in $series; do
 		echo "fetch-and-patch: applying $p"
-		git -C "$dest" apply --whitespace=nowarn "$HERE/$p"
+		git -C "$dest" apply --whitespace=nowarn "$REPO/$p"
 	done
+	# Copies named in application order, so that a later run can take
+	# them off newest first (sort -r) without the repository's files.
 	mkdir -p "$dest/.illumos/series"
-	for p in $series; do cp "$HERE/$p" "$dest/.illumos/series/"; done
+	i=0
+	for p in $series; do
+		i=$((i + 1))
+		cp "$REPO/$p" "$dest/.illumos/series/$(printf '%03d' $i)-$(basename "$p")"
+	done
 	{ echo "$sum"; echo "$series"; } > "$stamp"
 fi
 
@@ -102,7 +120,7 @@ done
 # The replaced headers.
 set -- $REPLACED
 while [ $# -ge 2 ]; do
-	cp "$HERE/$2" "$dest/$1"
+	cp "$REPO/$2" "$dest/$1"
 	shift 2
 done
 
@@ -110,6 +128,7 @@ done
 # checks every Linux file the compiler read, too (build.sh).
 {
 	grep -v '^#' "$HERE/tus.txt" | grep . | grep -v '^illumos/' | sed "s|^|$I915/|"
+	grep -v '^#' "$KMS/tus.txt" | grep .
 	grep -v '^#' "$HERE/mit-headers.txt" | grep .
 } > "$dest/.illumos/licence-check.txt"
 python3 "$HERE/check-licences.py" "$dest" "$dest/.illumos/licence-check.txt"
