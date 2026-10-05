@@ -112,7 +112,9 @@ SYMBOL_SCOPE {
 		drm_illumos_mapping_unload;
 		drm_illumos_mapping_user_offset;
 		drm_illumos_resv_fences;
+		drm_illumos_resv_is_locked;
 		drm_illumos_resv_lock_ctx;
+		drm_illumos_resv_trylock_ctx;
 		drm_illumos_resv_unlock_ctx;
 		drm_illumos_sync_file_get_fence;
 		drm_illumos_syncobj_dup;

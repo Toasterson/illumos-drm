@@ -112,6 +112,9 @@ extern bool dma_resv_test_signaled(struct dma_resv *obj,
  *	slow), -EALREADY (held by the transaction), -EINTR (intr), -EINVAL.
  *	The lock belongs to the calling thread; release it with
  *	drm_illumos_resv_unlock_ctx() and the same stamp.
+ *	drm_illumos_resv_trylock_ctx() takes it for the stamp without
+ *	waiting (false if held); drm_illumos_resv_is_locked() reports
+ *	whether anyone holds it (assertions).
  * drm_illumos_resv_fences()
  *	a snapshot of the unsignalled fences with a usage at least as
  *	important as `usage`: up to `max` of them, each with a new reference,
@@ -126,7 +129,9 @@ extern bool dma_resv_trylock(struct dma_resv *obj);
 extern uint64_t drm_illumos_ww_stamp(void);
 extern int drm_illumos_resv_lock_ctx(struct dma_resv *obj, uint64_t stamp,
     uint32_t acquired, bool slow, bool intr);
+extern bool drm_illumos_resv_trylock_ctx(struct dma_resv *obj, uint64_t stamp);
 extern void drm_illumos_resv_unlock_ctx(struct dma_resv *obj, uint64_t stamp);
+extern bool drm_illumos_resv_is_locked(struct dma_resv *obj);
 extern int drm_illumos_resv_fences(struct dma_resv *obj,
     enum dma_resv_usage usage, struct dma_fence **fences, uint32_t max,
     uint32_t *count);

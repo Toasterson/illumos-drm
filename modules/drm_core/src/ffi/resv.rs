@@ -263,6 +263,26 @@ pub unsafe extern "C" fn drm_illumos_resv_lock_ctx(
     }
 }
 
+/// Takes the lock for the transaction `stamp` without waiting (Linux's
+/// `ww_mutex_trylock` with a context); false if anyone holds it. Released
+/// with `drm_illumos_resv_unlock_ctx`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_resv_trylock_ctx(obj: *mut f::dma_resv, stamp: u64) -> bool {
+    // SAFETY: the caller holds the object.
+    match unsafe { resv(obj) } {
+        Some(r) => r.lock().try_lock_raw_ctx(stamp),
+        None => false,
+    }
+}
+
+/// Whether anyone holds the reservation's lock (Linux's `dma_resv_held`,
+/// for assertions; false for an unknown reservation).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn drm_illumos_resv_is_locked(obj: *mut f::dma_resv) -> bool {
+    // SAFETY: the caller holds the object.
+    unsafe { resv(obj) }.is_some_and(|r| r.lock().is_locked())
+}
+
 /// Releases a lock taken with `drm_illumos_resv_lock_ctx` for `stamp`;
 /// a warning if the calling thread does not hold it that way.
 #[unsafe(no_mangle)]

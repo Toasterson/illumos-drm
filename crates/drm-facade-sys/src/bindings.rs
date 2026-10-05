@@ -825,7 +825,13 @@ unsafe extern "C" {
     ) -> core::ffi::c_int;
 }
 unsafe extern "C" {
+    pub fn drm_illumos_resv_trylock_ctx(obj: *mut dma_resv, stamp: u64) -> bool;
+}
+unsafe extern "C" {
     pub fn drm_illumos_resv_unlock_ctx(obj: *mut dma_resv, stamp: u64);
+}
+unsafe extern "C" {
+    pub fn drm_illumos_resv_is_locked(obj: *mut dma_resv) -> bool;
 }
 unsafe extern "C" {
     pub fn drm_illumos_resv_fences(

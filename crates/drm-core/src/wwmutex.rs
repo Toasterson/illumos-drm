@@ -305,6 +305,17 @@ impl<T> WwMutex<T> {
         }
     }
 
+    /// Takes the mutex for the C transaction `stamp` without waiting (Linux's
+    /// `ww_mutex_trylock` with a context): false if anyone holds it.
+    pub fn try_lock_raw_ctx(&self, stamp: u64) -> bool {
+        let mut g = self.owner.lock();
+        if *g != Owner::Free {
+            return false;
+        }
+        *g = Owner::RawCtx(stamp, crate::ksync::thread_id());
+        true
+    }
+
     /// Releases a mutex the calling thread took with
     /// [`WwMutex::lock_raw_ctx`] for the transaction `stamp`; `EPERM` (and
     /// nothing changes) otherwise.
@@ -469,6 +480,13 @@ mod tests {
         drop(g);
         assert!(m.try_lock_raw());
         m.unlock_raw().unwrap();
+        assert!(!m.is_locked());
+        let s = CLASS.next_stamp();
+        assert!(m.try_lock_raw_ctx(s));
+        assert!(!m.try_lock_raw_ctx(s), "no recursion");
+        assert!(m.held_raw_by_current());
+        assert_eq!(m.unlock_raw().err(), Some(Errno::EPERM), "a transaction's lock is not a plain one");
+        m.unlock_raw_ctx(s).unwrap();
         assert!(!m.is_locked());
     }
 
