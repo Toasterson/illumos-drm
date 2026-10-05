@@ -15,9 +15,10 @@ virtio-gpu driver on top of it. Existing vendor drivers stay in C and would
 be carried later through a C interface of the core. The milestones are R0
 (uAPI, device registration, per-file state, core ioctls), R1 (GEM and dumb
 buffers), R2 (fences, syncobj, PRIME), R3 (KMS and atomic), R4
-(virtio-gpu), all five done, and R5 (C interface), whose first step R5a
+(virtio-gpu), all five done, and R5 (C interface), whose steps R5a
 (the `misc/drm_core` kernel module with a versioned C facade, and the C test
-driver `cdrmnull`) is done.
+driver `cdrmnull`), R5b (public layouts), R5e (carried helpers) and R5c
+(the Linux compatibility layer and the headless i915, `i915n`) are done.
 
 ## Where things stand
 
@@ -76,6 +77,31 @@ red-black/interval tree tests: 26 tests and 840,436 checks with gcc on
 illumos, 24 tests and 839,569 checks with clang under AddressSanitizer and
 UndefinedBehaviorSanitizer on arm64 (no `drm_cache` there); a seed gives
 the same `drm_mm` counts on every compiler and in the kernel.
+
+R5c (the Linux compatibility layer and the headless i915; see *R5c* under
+*Decisions*): `misc/linuxkpi` (`linuxkpi/`, MIT) implements the Linux
+kernel interfaces Linux v7.2's i915 needs over the DDI and the facade
+(1.1), and `i915n` (`drivers/i915/`: 154 Linux translation units, ten
+illumos patches, generated display stubs) links against it with `-z defs`
+and no unresolved symbol. On 5 October 2026, at `05e43d0` (modules built
+at `57022d7`, the following commit changed the test script only), on
+oibuild (gcc 14.3.0-oi-4): 35 layer files, 157 i915 units, every one of
+the 483 Linux files the compiler read MIT or HPND, `i915n` linked, and the
+three packages (`linuxkpi`, `drm-helpers`, `i915n`) published as a p5p,
+pkglint-clean. On a guest of `golden-20260930` (illumos `7e802e88a3`,
+`-device pci-testdev`) `tools/test/run-r5c-test.sh` passed 22 checks (its
+second run there; the first, on the fresh guest, failed only the test
+script's lookup of the DRM node, fixed in `05e43d0`): no module defines a kernel symbol, `linuxkpi_selftest`
+passed 157 checks (including the concurrency tests of the scheduling,
+memory and reservation parts and a DRM device made as i915 makes its own:
+GEM object before registration, freed in the release at detach), detach
+was refused while a node was open, `i915n` loaded and unloaded twice and
+refused a device outside its ID table, and nothing warned outside the
+self-test; `run-r5e-test.sh` with `misc/drm_helpers` on the layer passed
+(16 tests, 130,876 checks at seed 20261004, as R5e). The host tests pass
+(the layer's: 30 tests, 777 checks; the carried helpers': 24 tests;
+`drm-core`: 160). i915n has not attached to an Intel GPU yet: that is the
+first step on the owner's ThinkPad X230 and MacBook Pro.
 
 G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
 of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
