@@ -18,7 +18,7 @@
  * dmi_first_match(list)
  *	the first matching entry, or NULL.
  * dmi_match(field, str)
- *	whether the field contains str.
+ *	whether the field equals str (both NULL counts as equal).
  *
  * An entry matches when every used slot (slot != DMI_NONE) matches: its
  * substr is a substring of the field's string (exact_match: equal).

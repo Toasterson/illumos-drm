@@ -96,6 +96,10 @@ extern void lkpi_taskq_name(char *buf, size_t len, const char *base);
 /* src/lkpi_resv.c: snapshots of locked walks never unlocked again. */
 extern void lkpi_resv_fini(void);
 
+/* src/lkpi_dmi.c: the SMBIOS strings of <linux/dmi.h>. */
+extern int lkpi_dmi_init(void);
+extern void lkpi_dmi_fini(void);
+
 /* src/lkpi_pci.c: attached PCI devices. */
 extern int lkpi_pci_init(void);
 extern void lkpi_pci_fini(void);

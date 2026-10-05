@@ -47,6 +47,7 @@ static const struct {
 	{ "work", lkpi_work_init, lkpi_work_fini },
 	{ "drm", lkpi_drm_init, lkpi_drm_fini },
 	{ "shrinker", lkpi_shrinker_init, lkpi_shrinker_fini },
+	{ "dmi", lkpi_dmi_init, lkpi_dmi_fini },
 	{ "pci", lkpi_pci_init, lkpi_pci_fini }
 };
 
