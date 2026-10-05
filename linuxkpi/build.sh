@@ -106,13 +106,18 @@ if [ "$mode" = selftest ] || [ "$mode" = all ]; then
 	: "${DDI_MAPFILE:?set DDI_MAPFILE to the ddi.mapfile of illumos-gate}"
 	b=linuxkpi_selftest
 	STCPP="$CPPFLAGS -UKBUILD_MODNAME -DKBUILD_MODNAME=\"linuxkpi_selftest\""
-	# shellcheck disable=SC2086
-	"$CC" $CFLAGS $STCPP -c "$HERE/selftest/$b.c" -o "$OUT/$b.o" \
-	    > "$OUT/log/$b.log" 2>&1 || { cat "$OUT/log/$b.log"; exit 1; }
+	mkdir -p "$OUT/selftest"
+	rm -f "$OUT"/selftest/*.o
+	for f in "$HERE"/selftest/*.c; do
+		o=$OUT/selftest/$(basename "${f%.c}").o
+		# shellcheck disable=SC2086
+		"$CC" $CFLAGS $STCPP -c "$f" -o "$o" \
+		    > "$OUT/log/$b.log" 2>&1 || { cat "$OUT/log/$b.log"; exit 1; }
+	done
 	[ "$mode" = selftest ] && [ ! -f "$OUT/linuxkpi.mapfile" ] &&
 	    { echo "linuxkpi: link the layer first"; exit 1; }
 	"$LD" -ztype=kmod -N misc/linuxkpi -N misc/drm_core -z defs \
 	    -M "$DDI_MAPFILE" -M "$REPO/include/drm/drm_facade.mapfile" \
-	    -M "$OUT/linuxkpi.mapfile" -o "$OUT/$b" "$OUT/$b.o" || exit 1
+	    -M "$OUT/linuxkpi.mapfile" -o "$OUT/$b" "$OUT"/selftest/*.o || exit 1
 	echo "linuxkpi: linked $OUT/$b"
 fi

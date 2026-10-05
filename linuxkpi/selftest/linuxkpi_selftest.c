@@ -8,6 +8,8 @@
  * checks from probe(): locks, workqueues (plain, ordered, delayed,
  * cancel), timers, completions, wait queues, RCU, idr/xarray, slab
  * caches, pages, and DMA scatterlists and coherent memory on the device.
+ * The concurrency tests of the scheduling, memory and reservation parts
+ * are in st_sched.c, st_mem.c and st_resv.c (st.h).
  * Every check logs "linuxkpi_selftest: ok <name>" or "FAIL <name>"; the
  * last line is "linuxkpi_selftest: done <passed> passed <failed> failed",
  * which tools/test/run-r5c-test.sh greps from the system log. The result
@@ -33,18 +35,9 @@
 #include <linux/xarray.h>
 #include <lkpi/version.h>
 
-static int st_passed, st_failed;
+#include "st.h"
 
-#define	CHECK(name, cond) do { \
-	if (cond) { \
-		st_passed++; \
-		pr_info("linuxkpi_selftest: ok %s\n", name); \
-	} else { \
-		st_failed++; \
-		pr_err("linuxkpi_selftest: FAIL %s (%s:%d)\n", name, \
-		    __FILE__, __LINE__); \
-	} \
-	} while (0)
+int st_passed, st_failed;
 
 /* --- locks ------------------------------------------------------------- */
 
@@ -402,6 +395,10 @@ st_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	test_idr_xarray();
 	test_slab();
 	test_dma(pdev);
+	/* The concurrency tests of the other selftest files (st.h). */
+	st_sched_tests();
+	st_mem_tests(pdev);
+	st_resv_tests();
 	pr_info("linuxkpi_selftest: done %d passed %d failed\n", st_passed,
 	    st_failed);
 	(void) ddi_prop_update_int(DDI_DEV_T_NONE, lkpi_dev_dip(&pdev->dev),
