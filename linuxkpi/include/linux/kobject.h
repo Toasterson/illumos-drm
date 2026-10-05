@@ -2,11 +2,15 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * Linux's kobjects, reduced. illumos has no sysfs: a kobject is a name
- * and a reference count so that structures embedding one keep their
- * layout; kobject_create_and_add() returns an object that sysfs functions
- * accept and ignore, kobject_uevent*() do nothing (return 0). Drivers'
- * sysfs files therefore do not exist on illumos (see <linux/sysfs.h>).
+ * Linux's kobjects, reduced. illumos has no sysfs: a kobject is a name,
+ * a parent and a reference count so that structures embedding one keep
+ * their layout; kobject_create_and_add() returns an object that sysfs
+ * functions accept and ignore, kobject_uevent*() do nothing (return 0).
+ * Drivers' sysfs files therefore do not exist on illumos (see
+ * <linux/sysfs.h>). An added kobject is also on its parent's list of
+ * children (lkpi_children, lkpi_sibling; src/lkpi_kobject.c), so that the
+ * layer can detach the children left under a kobject whose memory it
+ * frees (lkpi_kobject_orphan_children(), a layer device's kobject).
  */
 #ifndef _LINUX_KOBJECT_H
 #define	_LINUX_KOBJECT_H
@@ -29,6 +33,9 @@ struct kobject {
 	const struct kobj_type *ktype;
 	struct kref kref;
 	unsigned int state_initialized:1;
+	/* illumos: under the layer's kobject lock (src/lkpi_kobject.c). */
+	struct list_head lkpi_children;	/* the kobjects added under this */
+	struct list_head lkpi_sibling;	/* on the parent's lkpi_children */
 };
 
 struct kobj_attribute {
@@ -62,6 +69,13 @@ extern struct kobject *kobject_create_and_add(const char *name,
 extern struct kobject *kobject_get(struct kobject *kobj);
 extern void kobject_put(struct kobject *kobj);
 extern void kobject_del(struct kobject *kobj);
+/*
+ * illumos: unlinks every child of kobj (child->parent becomes NULL) and
+ * drops the reference each child held on kobj; for the owner of kobj,
+ * who holds a reference of its own, before it frees kobj's memory.
+ * Returns the number of children.
+ */
+extern int lkpi_kobject_orphan_children(struct kobject *kobj);
 #define	kobject_uevent(kobj, action)		((void)(kobj), 0)
 #define	kobject_uevent_env(kobj, action, envp)	((void)(kobj), (void)(envp), 0)
 #define	kobject_name(kobj)			((kobj)->name)
