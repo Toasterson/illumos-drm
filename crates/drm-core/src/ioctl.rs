@@ -42,10 +42,16 @@
 //!
 //! Driver-private commands match an entry with the complete value first
 //! ([`lookup_driver`]), so that a driver that accepts several layouts of a
-//! structure can list each (as `virtio_gpu` does for `EXECBUFFER`), and
-//! otherwise, since R5a and as Linux does, the first entry with the same
-//! number and direction, whose argument the driver copies with the size
-//! rule above (the facade's `drm_ioctl_desc` handlers do).
+//! structure can list each (as `virtio_gpu` does for `EXECBUFFER`), then
+//! the first entry with the same number and direction, and otherwise, as
+//! Linux does, the first entry with the same number in any direction. The
+//! argument is copied with the size rule above, in the directions both
+//! commands have (the facade's `drm_ioctl_desc` handlers do). Linux's
+//! drivers rely on that: i915 lists `DRM_IOCTL_I915_GEM_EXECBUFFER2_WR`
+//! (`_IOWR`) only, and userland (Mesa's crocus and iris) submits every
+//! batch with `DRM_IOCTL_I915_GEM_EXECBUFFER2` (`_IOW`, the same number),
+//! which is copied in and not back. The core's own and the mode-setting
+//! commands keep the stricter rule above.
 
 use drm_uapi as uapi;
 use drm_uapi::ioc;
@@ -229,11 +235,23 @@ impl DriverIoctl {
 /// Finds a driver-private ioctl: the entry with the complete command value
 /// if there is one (a table may list one number with several structure
 /// sizes, the layouts of older userland), otherwise the first entry with
-/// the same group, number and direction, whose argument the driver then
-/// copies with Linux's size rule ([`SizePlan`]).
+/// the same group, number and direction, otherwise (as Linux's
+/// `drm_ioctl()`, which indexes the table by number) the first entry with
+/// the same group and number. The driver then copies the argument with
+/// Linux's size rule, in the directions both commands have ([`SizePlan`]).
 pub fn lookup_driver(table: &[DriverIoctl], cmd: u32) -> Option<&DriverIoctl> {
-    let mut entries = table.iter().filter(|e| e.in_driver_range());
-    entries.clone().find(|e| e.cmd == cmd).or_else(|| entries.find(|e| same_command(e.cmd, cmd)))
+    let entries = table.iter().filter(|e| e.in_driver_range());
+    entries
+        .clone()
+        .find(|e| e.cmd == cmd)
+        .or_else(|| entries.clone().find(|e| same_command(e.cmd, cmd)))
+        .or_else(|| entries.clone().find(|e| same_number(e.cmd, cmd)))
+}
+
+/// Reports whether `cmd` has the group and number of `table_cmd`, whatever
+/// its direction and size.
+pub const fn same_number(table_cmd: u32, cmd: u32) -> bool {
+    ioc::ioc_group(table_cmd) == ioc::ioc_group(cmd) && ioc::ioc_nr(table_cmd) == ioc::ioc_nr(cmd)
 }
 
 /// Reports whether a command has the group and number of one of the
@@ -591,13 +609,35 @@ mod tests {
         assert!(lookup_driver(T, ioc::drm_iowr::<[u8; 16]>(0x9f)).is_some());
         // Another size of a listed command: Linux's size rule applies.
         assert_eq!(lookup_driver(T, ioc::drm_iowr::<[u8; 12]>(0x40)).map(|e| e.cmd), Some(T[0].cmd));
-        // Another direction is another command.
-        assert!(lookup_driver(T, ioc::drm_ior::<[u8; 8]>(0x40)).is_none());
+        // Another direction of a listed number: the entry, as in Linux,
+        // with the directions both commands have.
+        assert_eq!(lookup_driver(T, ioc::drm_ior::<[u8; 8]>(0x40)).map(|e| e.cmd), Some(T[0].cmd));
+        let p = SizePlan::new(T[0].cmd, ioc::drm_ior::<[u8; 8]>(0x40));
+        assert!(!p.input && p.output);
+        assert!(lookup_driver(T, ioc::drm_ior::<[u8; 8]>(0x41)).is_none());
         assert!(lookup_driver(T, ioc::drm_iowr::<[u8; 8]>(0x0c)).is_none());
         assert!(lookup_driver(T, ioc::drm_iowr::<[u8; 8]>(0xa0)).is_none());
         assert!(is_driver_nr(T, ioc::drm_iowr::<[u8; 4]>(0x40)));
         assert!(!is_driver_nr(T, ioc::drm_iowr::<[u8; 8]>(0x0c)));
         assert!(!is_driver_nr(T, ioc::drm_iowr::<[u8; 8]>(0x41)));
+    }
+
+    /// i915's table lists `DRM_IOCTL_I915_GEM_EXECBUFFER2_WR` only; Mesa
+    /// submits with `DRM_IOCTL_I915_GEM_EXECBUFFER2`, the `_IOW` form of the
+    /// same number (ENOTTY before, at the first submission on an X230).
+    #[test]
+    fn driver_write_only_form_of_a_read_write_entry() {
+        const EXECBUFFER2_WR: u32 = ioc::drm_iowr::<[u8; 64]>(0x69);
+        const EXECBUFFER2: u32 = ioc::drm_iow::<[u8; 64]>(0x69);
+        const T: &[DriverIoctl] = &[DriverIoctl { cmd: EXECBUFFER2_WR, perm: RENDER }];
+        assert_eq!(lookup_driver(T, EXECBUFFER2).map(|e| e.cmd), Some(EXECBUFFER2_WR));
+        let p = SizePlan::new(EXECBUFFER2_WR, EXECBUFFER2);
+        assert_eq!((p.copy_in(), p.copy_out()), (64, 0));
+        // A table that lists both forms keeps each.
+        const B: &[DriverIoctl] =
+            &[DriverIoctl { cmd: EXECBUFFER2_WR, perm: RENDER }, DriverIoctl { cmd: EXECBUFFER2, perm: NONE }];
+        assert_eq!(lookup_driver(B, EXECBUFFER2).map(|e| e.perm), Some(NONE));
+        assert_eq!(lookup_driver(B, EXECBUFFER2_WR).map(|e| e.perm), Some(RENDER));
     }
 
     #[test]
