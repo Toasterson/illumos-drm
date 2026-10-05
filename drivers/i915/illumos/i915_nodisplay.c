@@ -8,7 +8,9 @@
  * where i915's display is not built (decision of R5c: headless first).
  * Each answers as a device without a display would: nothing happens,
  * false, NULL, 0, or -ENODEV for the display ioctls. The display
- * parent interfaces are empty tables.
+ * parent interfaces are empty tables. The display device itself
+ * exists, with Linux's "no display" device info, so that code
+ * outside display/ never sees a NULL i915->display.
  */
 
 #include <drm/intel/display_parent_interface.h>
@@ -19,6 +21,7 @@
 #include "display/intel_crtc.h"
 #include "display/intel_display.h"
 #include "display/intel_display_clock_gating.h"
+#include "display/intel_display_core.h"
 #include "display/intel_display_device.h"
 #include "display/intel_display_driver.h"
 #include "display/intel_display_irq.h"
@@ -233,13 +236,22 @@ intel_display_device_probe(struct pci_dev *pdev,
 {
 	(void) pdev;
 	(void) parent;
-	return (NULL);
+	static const struct intel_display_device_info no_display = { 0 };
+	struct intel_display *display;
+	display = kzalloc(sizeof (*display), GFP_KERNEL);
+	if (display == NULL)
+		return (ERR_PTR(-ENOMEM));
+	display->drm = pci_get_drvdata(pdev);
+	display->parent = parent;
+	DISPLAY_INFO(display) = &no_display;
+	return (display);
 }
 
 void
 intel_display_device_remove(struct intel_display *display)
 {
 	(void) display;
+	kfree(display);
 }
 
 void
