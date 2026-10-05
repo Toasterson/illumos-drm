@@ -182,6 +182,8 @@ mapfiles() {
 		echo '	global:'
 		printf '\t\t%s;\n' _init _fini _info
 		sed 's/^/		/; s/$/;/' "$OUT/exports.txt"
+		echo '	local:'
+		echo '		*;'
 		echo '};'
 	} > "$OUT/scope.mapfile"
 	if [ "${UPDATE_MAPFILE:-0}" = 1 ]; then

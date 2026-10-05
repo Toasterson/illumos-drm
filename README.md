@@ -548,6 +548,57 @@ is in this repository), `build.sh`, the licence checks
 (`illumos/`). `packaging/linuxkpi.p5m` and `packaging/i915n.p5m` package
 them.
 
+### misc/drm_kms
+
+`carried/drm_kms/` builds `misc/drm_kms`, Linux v7.2's DRM mode-setting
+code for the Linux display drivers of this stack (i915n's display; design:
+`notes/i915n-kms-design.md` of the workspace, decision K2). The Rust core
+keeps the ioctl entry, permissions, master, files and their event queues,
+GEM and PRIME; the module keeps the mode objects, properties, blobs,
+framebuffers, atomic state, vblank and the mode-setting ioctl handlers,
+reached through the facade 2.0 hooks (`include/drm/drm_lkms.h`).
+
+- **What it carries** (`tus.txt`, 36 Linux TUs): the KMS core of `drm.ko`
+  (atomic and its uAPI, blend, colour management and colorops,
+  connectors, CRTCs, DisplayID, EDID, encoders, fourcc, framebuffers,
+  mode config and objects, modes, modeset locks, planes, properties,
+  rects, vblank and vblank works), the `drm_kms_helper` libraries
+  (atomic and state helpers, CRTC, damage, modeset, plane, probe and
+  self-refresh helpers), the `drm_display_helper` libraries (DP, DP dual
+  mode, DP MST, DSC, HDMI, SCDC) and `drivers/video/hdmi.c` (HDMI
+  infoframes). One patch (`patches/`): `drm_mode_object.c` has no legacy
+  load callback to read.
+- **Licences:** every carried file is MIT (SPDX MIT, `GPL-2.0 OR MIT`, or
+  the MIT/HPND notice); `drm_hdcp_helper.c` (GPL-2.0-only) is not carried.
+  `drivers/i915/fetch-and-patch.sh` prepares one Linux tree for i915n and
+  this module, refuses non-MIT TUs and headers, and replaces the GPL
+  `drm_dp_mst_topology_internal.h` and `drm_trace.h` by MIT files; the
+  build checks every Linux file the compiler read
+  (`drivers/i915/check-licences.py`). GPL Linux headers the code includes
+  are MIT reimplementations under `linuxkpi/include`. The package's
+  licence file lists the carried files' notices
+  (`MODULE=drm_kms drivers/i915/gen-license.sh`).
+- **illumos sources** (`illumos/`, MIT): the module linkage (facade and
+  LinuxKPI checks at `_init`), Linux's event functions over the core's
+  event queue (`drm_kms_event.c`), the hook table `drm_kms_illumos_funcs`
+  that a driver points `drm_driver.illumos_lkms` at (`drm_kms_lkms.c`:
+  ioctl dispatch by Linux's `drm_ioctls[]` rows, file open/close,
+  register/unregister, the GET_CAP limits), and documented stubs for what
+  is not carried: bridges, leases, sysfs, writeback, panels, panel
+  orientation quirks, the HDCP helper, plus GEM handle references and the
+  implicit-fence plane helper over the facade (`drm_kms_stubs.c`).
+- **Build:** `carried/drm_kms/build.sh all` with `LINUX` (the prepared
+  tree), `DDI_MAPFILE` and `LKPI_MAPFILE`, compiles with i915n's flags and
+  configuration (`linuxkpi/kflags.sh`, `drivers/i915/config.h`) and links
+  `ld -ztype=kmod -N misc/drm_core -N misc/linuxkpi -N misc/drm_helpers
+  -z defs -B reduce` against the DDI, facade, LinuxKPI, drm_helpers and
+  `private.mapfile` (genunix's `memcmp`, `memmove`, `strlcat`). The module
+  exports what its sources `EXPORT_SYMBOL` (`drm_kms.mapfile`, which
+  drivers link against with `-N misc/drm_kms`); the build regenerates the
+  list and fails if it differs from the committed file or from the
+  module's global symbols. `packaging/drm-kms.p5m` packages it
+  (`driver/graphics/drm-kms`).
+
 ## Decisions
 
 **Dependency on illumos-ddi.** `ddi-sys` and `ddi` are a git dependency on
