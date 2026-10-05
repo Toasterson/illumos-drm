@@ -133,20 +133,6 @@ extern int drm_dev_illumos_lkms_register(struct drm_device *dev);
  *	copied the event out. Events of a file that is closing are dropped
  *	and their space given back.
  */
-/*
- * drm_dev_illumos_lkms_register
- *	starts Linux KMS on a registered device: called once, when the
- *	driver's mode configuration exists (the LinuxKPI layer calls it
- *	where a Linux driver calls drm_dev_register()). If
- *	dev->driver_features has DRIVER_MODESET at that moment and the
- *	driver has illumos_lkms, the core calls the mode_config hook, then
- *	register_dev, and forwards the mode-setting ioctls from then on.
- *	0 (also when there is nothing to start), -EINVAL for a device that
- *	is not registered, -EBUSY for a second call, or register_dev's
- *	error.
- */
-extern int drm_dev_illumos_lkms_register(struct drm_device *dev);
-
 extern int drm_illumos_event_reserve(struct drm_file *file, size_t size);
 extern void drm_illumos_event_unreserve(struct drm_file *file, size_t size);
 extern void drm_illumos_event_deliver(struct drm_file *file,
