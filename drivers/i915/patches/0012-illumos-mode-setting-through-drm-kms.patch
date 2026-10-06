@@ -5,7 +5,9 @@ On illumos the DRM core (misc/drm_core) owns the ioctl entry, files and
 events, and forwards the mode-setting ioctls of a Linux-KMS device to
 Linux's KMS code, which misc/drm_kms carries (facade 2.0, drm_lkms.h).
 The display build of i915n (I915N_DISPLAY, drivers/i915/build.sh) points
-the driver table's illumos_lkms at misc/drm_kms' hook table. The core
+the driver table's illumos_lkms at i915n's copy of misc/drm_kms' hook
+table (drm_kms_illumos_funcs, with lastclose also restoring the illumos
+console). The core
 uses it only if the device still has DRIVER_MODESET when the LinuxKPI
 layer's drm_dev_register() starts mode setting: a platform without
 display (patch 0011) has cleared it by then and stays headless. The
@@ -14,14 +16,18 @@ against misc/drm_kms.
 
 --- a/drivers/gpu/drm/i915/i915_driver.c
 +++ b/drivers/gpu/drm/i915/i915_driver.c
-@@ -1888,11 +1888,19 @@
+@@ -1888,11 +1888,23 @@
  #define DRIVER_MAJOR		1
  #define DRIVER_MINOR		6
  #define DRIVER_PATCHLEVEL	0
 +
 +#if defined(__illumos__) && defined(I915N_DISPLAY)
-+/* misc/drm_kms: Linux's KMS code behind the DRM core (facade 2.0). */
-+extern const struct drm_illumos_lkms_funcs drm_kms_illumos_funcs;
++/*
++ * misc/drm_kms: Linux's KMS code behind the DRM core (facade 2.0); i915n's
++ * copy of its hook table also restores the illumos console at lastclose
++ * (illumos/i915_illumos_con_kms.c).
++ */
++extern struct drm_illumos_lkms_funcs i915n_lkms_funcs;
 +#endif
  
  static const struct drm_driver i915_drm_driver = {
@@ -29,7 +35,7 @@ against misc/drm_kms.
  	DRM_FACADE_DRIVER_VERSION,
  #endif
 +#if defined(__illumos__) && defined(I915N_DISPLAY)
-+	.illumos_lkms = &drm_kms_illumos_funcs,
++	.illumos_lkms = &i915n_lkms_funcs,
 +#endif
  	.driver_features =
  	    DRIVER_GEM |

@@ -32,6 +32,8 @@
 -illumos/i915_nokms.c
 illumos/i915_excluded.c
 illumos/i915_illumos_vbt.c
+illumos/i915_illumos_con.c
+illumos/i915_illumos_con_kms.c
 display/dvo_ch7017.c
 display/dvo_ch7xxx.c
 display/dvo_ivch.c

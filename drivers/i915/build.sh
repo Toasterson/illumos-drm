@@ -160,7 +160,7 @@ if [ "$mode" = link ] || [ "$mode" = all ]; then
 	    { echo "build.sh: obj/ does not hold the $n objects of this build; compile first" >&2; exit 1; }
 	kms=""
 	if [ "$I915_DISPLAY" = 1 ]; then
-		kms="-N misc/drm_kms -M $KMS_MAPFILE"
+		kms="-N misc/drm_kms -N misc/gfx_private -M $KMS_MAPFILE"
 	fi
 	echo "\$ $LD -ztype=kmod -N misc/drm_core -N misc/linuxkpi -N misc/drm_helpers $kms -z defs" \
 	    "-M $DDI_MAPFILE -M $REPO/include/drm/drm_facade.mapfile -M $LKPI_MAPFILE" \

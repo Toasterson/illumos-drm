@@ -33,6 +33,9 @@
 #include "display/intel_display_core.h"
 #include "display/intel_display_device.h"
 #include "display/intel_display_irq.h"
+#ifdef I915N_DISPLAY
+#include "i915_illumos_con.h"
+#endif
 
 extern int lkpi_module_init(void);
 extern void lkpi_module_exit(void);
@@ -42,25 +45,82 @@ static struct pci_driver *i915n_pci_driver;
 static int
 i915n_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
+	int ret;
+
 	if (i915n_pci_driver == NULL)
 		return (DDI_FAILURE);
-	return (lkpi_pci_attach(dip, cmd, i915n_pci_driver));
+#ifdef I915N_DISPLAY
+	/*
+	 * The console minor node first (i915_illumos_con.c): consconfig
+	 * opens the first minor node of the display device.
+	 */
+	if (cmd == DDI_ATTACH)
+		(void) i915n_con_attach_early(dip);
+#endif
+	ret = lkpi_pci_attach(dip, cmd, i915n_pci_driver);
+#ifdef I915N_DISPLAY
+	if (cmd == DDI_ATTACH) {
+		if (ret == DDI_SUCCESS)
+			(void) i915n_con_attach_late(dip);
+		else
+			i915n_con_attach_undo(dip);
+	}
+#endif
+	return (ret);
 }
 
 static int
 i915n_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 {
+	int ret;
+
 	if (i915n_pci_driver == NULL)
 		return (DDI_FAILURE);
-	return (lkpi_pci_detach(dip, cmd, i915n_pci_driver));
+#ifdef I915N_DISPLAY
+	/* The console's device stays (consconfig holds it anyway). */
+	if (cmd == DDI_DETACH && i915n_con_is_console(dip))
+		return (DDI_FAILURE);
+#endif
+	ret = lkpi_pci_detach(dip, cmd, i915n_pci_driver);
+#ifdef I915N_DISPLAY
+	if (cmd == DDI_DETACH && ret == DDI_SUCCESS)
+		i915n_con_attach_undo(dip);
+#endif
+	return (ret);
 }
 
+#ifdef I915N_DISPLAY
+/* The console minor goes to gfx_private, the rest to the DRM core. */
+static struct cb_ops i915n_cb_ops = {
+	.cb_open = i915n_con_open,
+	.cb_close = i915n_con_close,
+	.cb_strategy = nodev,
+	.cb_print = nodev,
+	.cb_dump = nodev,
+	.cb_read = i915n_con_read,
+	.cb_write = nodev,
+	.cb_ioctl = i915n_con_ioctl,
+	.cb_devmap = i915n_con_devmap,
+	.cb_mmap = nodev,
+	.cb_segmap = i915n_con_segmap,
+	.cb_chpoll = i915n_con_chpoll,
+	.cb_prop_op = ddi_prop_op,
+	.cb_str = NULL,
+	.cb_flag = D_NEW | D_MP | D_64BIT | D_DEVMAP,
+	.cb_rev = CB_REV,
+	.cb_aread = nodev,
+	.cb_awrite = nodev
+};
+#define	I915N_GETINFO	i915n_con_getinfo
+#else
 static struct cb_ops i915n_cb_ops = DRM_CB_OPS;
+#define	I915N_GETINFO	drm_getinfo
+#endif
 
 static struct dev_ops i915n_dev_ops = {
 	.devo_rev = DEVO_REV,
 	.devo_refcnt = 0,
-	.devo_getinfo = drm_getinfo,
+	.devo_getinfo = I915N_GETINFO,
 	.devo_identify = nulldev,
 	.devo_probe = nulldev,
 	.devo_attach = i915n_attach,
@@ -100,6 +160,9 @@ _init(void)
 		return (ret);
 	if ((ret = linuxkpi_check("i915n", LINUXKPI_ABI)) != 0)
 		return (ret);
+#ifdef I915N_DISPLAY
+	i915n_con_kms_init();
+#endif
 	ret = lkpi_module_init();
 	if (ret != 0) {
 		cmn_err(CE_WARN, "i915n: i915 module init failed (%d)", ret);
@@ -129,6 +192,9 @@ _fini(void)
 	if ((ret = mod_remove(&i915n_modlinkage)) != 0)
 		return (ret);
 	i915n_pci_driver = NULL;
+#ifdef I915N_DISPLAY
+	i915n_con_kms_fini();
+#endif
 	lkpi_module_exit();
 	/* Nothing of the layer may call into this module's text any more. */
 	lkpi_module_quiesce(&i915n_modlinkage);

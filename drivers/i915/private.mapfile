@@ -27,4 +27,45 @@ SYMBOL_SCOPE {
 		memcmp			{ FLAGS = EXTERN };
 		memmove			{ FLAGS = EXTERN };
 		strrchr			{ FLAGS = EXTERN };
+		#
+		# The illumos console on the display build
+		# (illumos/i915_illumos_con.c; notes: design section 4).
+		# gfx_private, the gate's contract-private interface for DRM
+		# drivers (uts/common/sys/gfx_private.h; misc/gfx_private,
+		# linked with -N misc/gfx_private): the console minor node's
+		# tem interface (VIS_*, KDSETMODE, the polled panic path, the
+		# /dev/fb mapping) over the loader's framebuffer, as vgatext
+		# and the legacy i915 use it.
+		#
+		gfxp_fb_softc_alloc	{ FLAGS = EXTERN };
+		gfxp_fb_softc_free	{ FLAGS = EXTERN };
+		gfxp_fb_attach		{ FLAGS = EXTERN };
+		gfxp_fb_detach		{ FLAGS = EXTERN };
+		gfxp_fb_open		{ FLAGS = EXTERN };
+		gfxp_fb_close		{ FLAGS = EXTERN };
+		gfxp_fb_ioctl		{ FLAGS = EXTERN };
+		gfxp_fb_devmap		{ FLAGS = EXTERN };
+		gfxp_bm_register_fbops	{ FLAGS = EXTERN };
+		#
+		# unix: the loader's framebuffer description (i86pc
+		# sys/framebuffer.h), read to find the console's framebuffer.
+		#
+		fb_info			{ FLAGS = EXTERN };
+		#
+		# genunix: CB_CL_PANIC callbacks (sys/callb.h) and panicstr,
+		# to show the console framebuffer when the system panics.
+		#
+		callb_add		{ FLAGS = EXTERN };
+		callb_delete		{ FLAGS = EXTERN };
+		panicstr		{ FLAGS = EXTERN };
+		#
+		# Documented DDI (9F/9S) that the gate's ddi.mapfile does not
+		# list: getminor(9F), makedevice(9F), ddi_devmap_segmap(9F)
+		# for the console minor's mmap, kcred for gfx_private's
+		# in-kernel KDSETMODE at panic.
+		#
+		getminor		{ FLAGS = EXTERN };
+		makedevice		{ FLAGS = EXTERN };
+		ddi_devmap_segmap	{ FLAGS = EXTERN };
+		kcred			{ FLAGS = EXTERN };
 };
