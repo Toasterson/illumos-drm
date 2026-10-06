@@ -65,6 +65,19 @@
 #include <sys/cred.h>
 #include <sys/ioccom.h>
 
+/*
+ * Port output: illumos' outb(port, value), outw() and outl() (declared by
+ * <sys/sunddi.h> above) take the arguments in the other order than
+ * Linux's outb(value, port). <linux/io.h> redefines them in Linux's
+ * order; a TU that calls them without it fails to compile here rather
+ * than swap the port and the value. (outb)(...) still reaches illumos'.
+ */
+extern void lkpi_port_output_needs_linux_io_h(void)
+    __attribute__((__error__("outb(value, port) needs <linux/io.h>")));
+#define	outb(v, p)	lkpi_port_output_needs_linux_io_h()
+#define	outw(v, p)	lkpi_port_output_needs_linux_io_h()
+#define	outl(v, p)	lkpi_port_output_needs_linux_io_h()
+
 /* illumos macros whose names Linux code defines differently. */
 #undef	min
 #undef	max

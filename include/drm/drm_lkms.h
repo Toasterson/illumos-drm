@@ -104,11 +104,13 @@ struct drm_illumos_lkms_funcs {
  * limits), register_dev, and from then on the mode-setting ioctls of
  * files opened afterwards go to the ioctl hook; GET_CAP and
  * SET_CLIENT_CAP follow driver_features (DRIVER_MODESET, DRIVER_ATOMIC)
- * as read here. Returns 0 (also when the device has no DRIVER_MODESET or
- * no illumos_lkms: then nothing is done), -EINVAL for a device that is
- * not registered (or unplugged), -EBUSY for a second call or while a file
- * of the device is open (the call is not counted then), or register_dev's
- * negative errno (mode setting stays off; the device stays registered).
+ * as read here, masked with the driver table's driver_features (Linux's
+ * drm_core_check_feature()). Returns 0 (also when the device has no
+ * DRIVER_MODESET or no illumos_lkms: then nothing is done), -EINVAL for a
+ * device that is not registered (or unplugged), -EBUSY for a second call
+ * or while a file of the device is open (then no hook has run and the
+ * call is not counted), or register_dev's negative errno (mode setting
+ * stays off; the device stays registered; the call is counted).
  * Thread context, no core locks held.
  */
 extern int drm_dev_illumos_lkms_register(struct drm_device *dev);

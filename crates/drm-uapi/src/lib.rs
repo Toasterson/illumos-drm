@@ -8,6 +8,8 @@
 //! `virtgpu_drm.h`; the last comes from Linux v6.12 rather than libdrm
 //! (`tools/uapi/include/README`), with the two older layouts of
 //! `drm_virtgpu_execbuffer` in [`virtgpu_compat`](crate::drm_virtgpu_execbuffer_v1).
+//! A few later Linux additions the Linux KMS code needs are written by hand
+//! ([`DRM_IOCTL_MODE_CLOSEFB`], [`DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`]).
 //! Only the 64-bit ABI exists: the kernel refuses 32-bit callers.
 //!
 //! The generated files carry the MIT licence of the headers they are
@@ -53,8 +55,11 @@ mod bindings;
 pub mod ioc;
 mod ioctl;
 #[allow(non_camel_case_types)]
+mod linux_newer;
+#[allow(non_camel_case_types)]
 mod virtgpu_compat;
 
 pub use bindings::*;
 pub use ioctl::*;
+pub use linux_newer::*;
 pub use virtgpu_compat::*;

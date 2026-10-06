@@ -10,7 +10,8 @@
  *
  * dmi_get_system_info(field)
  *	the string of `field` (enum dmi_field), or NULL if the firmware has
- *	none. The strings are read once, when misc/linuxkpi loads.
+ *	no structure for it ("" for a string it leaves empty or blank, as
+ *	Linux). The strings are read once, when misc/linuxkpi loads.
  * dmi_check_system(list)
  *	walks the table (terminated by an entry whose ident and first match
  *	are empty) and calls each matching entry's callback (if any) until

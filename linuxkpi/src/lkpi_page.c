@@ -657,7 +657,15 @@ vmap_pfn(unsigned long *pfns, unsigned int count, pgprot_t prot)
  * of the kernel's own write-back mapping, which only reads harmlessly
  * (a caller writes only to memory it owns). Only MEMREMAP_WB is
  * supported: a WC or WT mapping of RAM would give a frame two cache
- * types. Refused (NULL): other types, a zero size, a wrapping range,
+ * types. Firmware memory may have a mapping of another type already:
+ * illumos' ACPICA maps an AML OperationRegion (the IGD OpRegion's, for
+ * one) with psm_map_new(), uncached outside RAM, so such frames can be
+ * mapped write-back here and uncached there at the same time, an alias
+ * Intel's SDM advises against. Linux's memremap(MEMREMAP_WB) of the
+ * OpRegion has the same alias; callers keep it short and read-only
+ * (i915_illumos_vbt.c copies and unmaps), so no dirty line of this
+ * mapping is ever written back over the firmware's data.
+ * Refused (NULL): other types, a zero size, a wrapping range,
  * more than 1 GiB, and frames above the CPU's physical address width,
  * whose page-table entries would fault (reserved bits) at the first
  * access.

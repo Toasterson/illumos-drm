@@ -57,7 +57,6 @@ CROSS=${CROSS:-0}
 I915=$LINUX/drivers/gpu/drm/i915
 mode=${1:-all}
 
-rm -rf "$OUT/log"
 mkdir -p "$OUT/obj" "$OUT/log"
 # shellcheck disable=SC1091
 . "$REPO/linuxkpi/kflags.sh"
@@ -66,6 +65,8 @@ CPPFLAGS="$LKPI_CPPFLAGS -DI915 -DKBUILD_MODNAME=\"i915\""
 CPPFLAGS="$CPPFLAGS -nostdinc -I$REPO/linuxkpi/include -I$REPO/include"
 CPPFLAGS="$CPPFLAGS -I$LINUX/.illumos/mit-include -I$LINUX/.illumos/mit-include/uapi"
 CPPFLAGS="$CPPFLAGS -I$I915 -I$OUT/sysinc"
+# Last: the illumos glue's headers the patches include (i915_illumos_vbt.h).
+CPPFLAGS="$CPPFLAGS -I$HERE/illumos"
 CPPFLAGS="$CPPFLAGS -include $HERE/config.h -include $REPO/linuxkpi/include/linux/kconfig.h"
 CPPFLAGS="$CPPFLAGS -include $REPO/linuxkpi/include/lkpi/prologue.h"
 case "$I915_DISPLAY" in
@@ -113,8 +114,10 @@ export -f compile_one
 export CC CFLAGS CPPFLAGS OUT I915 HERE
 
 if [ "$mode" = compile ] || [ "$mode" = all ]; then
-	# Only this TU list's objects are linked: start from an empty obj/.
-	rm -rf "$OUT/obj"
+	# Only this TU list's objects are linked: start from an empty obj/
+	# (and log/; `link` keeps the compile's logs).
+	rm -rf "$OUT/obj" "$OUT/log"
+	mkdir -p "$OUT/log"
 	xargs -P "$JOBS" -I{} bash -c 'compile_one {}' < "$OUT/tus.txt" \
 	    > "$OUT/results.txt"
 	ok=$(grep -c '^OK' "$OUT/results.txt")

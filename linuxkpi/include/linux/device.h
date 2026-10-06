@@ -104,6 +104,19 @@ dev_set_drvdata(struct device *dev, void *data)
 #define	set_dev_node(dev, n)		((void)(dev))
 extern struct device *get_device(struct device *dev);
 extern void put_device(struct device *dev);
+
+/*
+ * The layer's own life cycle of a struct device it did not get from the
+ * PCI glue (src/lkpi_device.c), for illumos glue that makes devices of
+ * its own (misc/drm_kms' connector class devices): lkpi_device_init()
+ * sets one up on the node `dip` with the name (count 1, devres ready);
+ * lkpi_device_fini(), called from its release, runs its managed
+ * resources and tears it down. lkpi_dev_dip() (lkpi/prologue.h) is the
+ * node of a device.
+ */
+extern void lkpi_device_init(struct device *dev, dev_info_t *dip,
+    const char *name);
+extern void lkpi_device_fini(struct device *dev);
 #define	device_is_registered(dev)	true
 #define	dev_driver_string(dev)		((dev)->driver != NULL ? (dev)->driver->name : "")
 #define	dev_is_pci(dev)			((dev)->bus == &pci_bus_type)

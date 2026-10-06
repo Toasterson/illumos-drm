@@ -42,8 +42,9 @@ pub unsafe extern "C" fn drm_dev_illumos_lkms_register(dev: *mut f::drm_device) 
         if s.lkms_called {
             return neg(Errno::EBUSY);
         }
-        // SAFETY: the caller's live device.
-        let driver_features = unsafe { (*dev).driver_features };
+        // SAFETY: the caller's live device. Masked with the table's, as
+        // Linux's drm_core_check_feature() (and devcore::features).
+        let driver_features = unsafe { (*dev).driver_features } & core.table.driver_features;
         if core.lkms.is_none() || driver_features & f::DRIVER_MODESET == 0 {
             s.lkms_called = true;
             return 0;
@@ -62,7 +63,15 @@ pub unsafe extern "C" fn drm_dev_illumos_lkms_register(dev: *mut f::drm_device) 
     let drv = CDriver::new(NonNull::from(core));
     let mut reg = ::core::mem::take(&mut core.setup.lock().lkms_reg);
     let r = d.lkms_start(features, &drv as &dyn LkmsHooks, &mut reg, &ctx);
-    core.setup.lock().lkms_reg = reg;
+    {
+        let mut s = core.setup.lock();
+        s.lkms_reg = reg;
+        // Refused before any hook ran (a file opened since the check
+        // above): not counted as the call, as above (drm_lkms.h).
+        if r.is_err() && !s.lkms_reg.attempted() {
+            s.lkms_called = false;
+        }
+    }
     match r {
         Ok(()) => 0,
         Err(e) => neg(e),

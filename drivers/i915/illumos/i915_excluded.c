@@ -81,7 +81,10 @@ icl_dsi_init(struct intel_display *display,
 }
 
 /*
- * As intel_hdcp_init (intel_dp_init_connector(), DP MST).
+ * Linux's answer without HDCP: 0 when is_hdcp_supported() is false (it is,
+ * above). intel_dp_init_connector() calls it only if HDCP is supported; the
+ * DP MST connector init calls it for every connector and only logs a
+ * failure.
  */
 int
 intel_dp_hdcp_init(struct intel_digital_port *dig_port,
@@ -89,7 +92,7 @@ intel_dp_hdcp_init(struct intel_digital_port *dig_port,
 {
 	(void) dig_port;
 	(void) intel_connector;
-	return (-ENODEV);
+	return (0);
 }
 
 /*

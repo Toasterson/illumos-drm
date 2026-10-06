@@ -21,9 +21,29 @@
  * is ACPI NVS, not kernel RAM). Layout and the choice between RVDA and
  * mailbox 4 as Intel's OpRegion specification describes them and Linux
  * v7.2's intel_opregion_setup() applies them; written for illumos.
+ *
+ * As Linux:
+ * - the boards of Linux's intel_no_opregion_vbt DMI table (a ThinkCentre
+ *   A57, whose OpRegion VBT is wrong) get no OpRegion VBT, so i915 looks
+ *   in its other places (SPI flash, the PCI ROM) as there;
+ * - from OpRegion 2.1 on, RVDA is relative to the OpRegion and must lie
+ *   beyond its 8 KiB; one that does not is reported, and used as Linux
+ *   uses it (its validation as a VBT still decides).
+ *
+ * Cache types: the mapping is write-back, as Linux's (intel_opregion_
+ * setup() uses memremap(MEMREMAP_WB) too). If the firmware's AML declares
+ * an OperationRegion over the OpRegion, illumos' ACPICA maps those frames
+ * as well (AcpiOsMapMemory(): psm_map_new(), uncached for frames outside
+ * RAM), so the frames can have a write-back and an uncached mapping at
+ * the same time, an alias of memory types that Intel's SDM advises
+ * against. It is short-lived and read-only here (copy, unmap): no line
+ * this mapping caches is ever dirty, so nothing can be written back over
+ * what the firmware writes through its mapping (see memremap() in
+ * linuxkpi/src/lkpi_page.c).
  */
 
 #include <linux/types.h>
+#include <linux/dmi.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/io.h>
@@ -33,6 +53,7 @@
 
 #include "display/intel_bios.h"
 #include "display/intel_display_core.h"
+#include "i915_illumos_vbt.h"
 
 #define	ILL_ASLS		0xfc	/* PCI config: OpRegion address */
 #define	ILL_OPREGION_SIZE	(8 * 1024)
@@ -51,8 +72,17 @@
 /* An RVDS beyond this is not a VBT (they are a few KiB). */
 #define	ILL_RVDS_MAX		(1024 * 1024)
 
-extern const void *i915_illumos_opregion_vbt(struct intel_display *display,
-    size_t *sizep);
+/* Linux v7.2's intel_no_opregion_vbt: boards whose OpRegion VBT is bad. */
+static const struct dmi_system_id ill_no_opregion_vbt[] = {
+	{
+		.ident = "ThinkCentre A57",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "97027RG"),
+		},
+	},
+	{ }
+};
 
 static uint32_t
 ill_get32(const uint8_t *p)
@@ -119,6 +149,10 @@ i915_illumos_opregion_vbt(struct intel_display *display, size_t *sizep)
 	mboxes = ill_get32(op + ILL_MBOXES);
 	drm_dbg_kms(display->drm, "OpRegion %u.%u at 0x%x, mailboxes 0x%x\n",
 	    op[ILL_OVER_MAJOR], op[ILL_OVER_MINOR], asls, mboxes);
+	if (dmi_check_system(ill_no_opregion_vbt) != 0) {
+		drm_dbg_kms(display->drm, "OpRegion VBT skipped (DMI quirk)\n");
+		goto out;
+	}
 
 	/*
 	 * OpRegion 2.0 and later: a VBT outside the region (RVDA/RVDS of
@@ -130,8 +164,14 @@ i915_illumos_opregion_vbt(struct intel_display *display, size_t *sizep)
 		rvda = ill_get64(op + ILL_ASLE_RVDA);
 		rvds = ill_get32(op + ILL_ASLE_RVDS);
 		if (rvda != 0 && rvds != 0 && rvds <= ILL_RVDS_MAX) {
-			if (op[ILL_OVER_MAJOR] > 2 || op[ILL_OVER_MINOR] >= 1)
+			if (op[ILL_OVER_MAJOR] > 2 || op[ILL_OVER_MINOR] >= 1) {
+				if (rvda < ILL_OPREGION_SIZE)
+					drm_warn(display->drm, "OpRegion "
+					    "RVDA 0x%llx points into the "
+					    "OpRegion\n",
+					    (unsigned long long)rvda);
 				rvda += asls;
+			}
 			vbt = ill_copy_phys(rvda, rvds);
 			if (vbt != NULL &&
 			    intel_bios_is_valid_vbt(display, vbt, rvds)) {

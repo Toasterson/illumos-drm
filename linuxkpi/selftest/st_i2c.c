@@ -374,7 +374,10 @@ st_i2c_transfers(struct st_i2c *t)
 	CHECK("i2c: bus idle after NACK", ee->m_sda && ee->m_scl);
 	m[0].flags = I2C_M_IGNORE_NAK;
 	m[0].len = 0;
+	ee->addr_nacks = 0;
 	CHECK("i2c: I2C_M_IGNORE_NAK", i2c_transfer(a, m, 1) == 1);
+	CHECK("i2c: I2C_M_IGNORE_NAK: the address is not retried",
+	    ee->addr_nacks == 1);
 
 	/* A stretched clock is waited for. */
 	ee->stretch_reads = 20;

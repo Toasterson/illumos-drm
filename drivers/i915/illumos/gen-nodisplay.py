@@ -136,8 +136,11 @@ EXCLUDED = {
         "Called only if is_hdcp_supported(); the caller logs \"HDCP init "
         "failed, skipping\" (debug) and goes on without HDCP."),
     "intel_dp_hdcp_init": (
-        "display/intel_dp_hdcp.h", "return (-ENODEV);",
-        "As intel_hdcp_init (intel_dp_init_connector(), DP MST)."),
+        "display/intel_dp_hdcp.h", "return (0);",
+        "Linux's answer without HDCP: 0 when is_hdcp_supported() is false "
+        "(it is, above). intel_dp_init_connector() calls it only if HDCP is "
+        "supported; the DP MST connector init calls it for every "
+        "connector and only logs a failure."),
     "intel_hdcp_atomic_check": (
         "display/intel_hdcp.h", "",
         "Linux only rewrites conn_state->content_protection and forces a "

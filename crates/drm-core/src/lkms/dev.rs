@@ -17,6 +17,13 @@
 //! the driver gave one (`drm_dev_illumos_set_fence_priority`, the priority
 //! of its interrupt handler), and the paths that take it from the event
 //! functions neither allocate nor block nor call back into the KMS code.
+//! The LinuxKPI layer gives none: it registers the device in
+//! `devm_drm_dev_alloc()`, before the driver allocates its interrupts, and
+//! the priority can only be set before registration. That is sound for the
+//! low-level handlers the layer accepts (`request_irq()` refuses a
+//! high-level vector): an adaptive mutex created without an interrupt
+//! cookie may be taken by an interrupt thread below `LOCK_LEVEL`
+//! (`mutex_init(9F)`); the cookie matters only for a spin mutex.
 //! No path holds it while calling into C code, so the order is always the
 //! KMS code's lock, then this one (a reader's `read(2)` holds neither
 //! while it copies out). Pollers and readers are woken after it is

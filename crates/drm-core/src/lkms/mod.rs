@@ -206,17 +206,24 @@ pub fn caps_view(
 #[derive(Debug, Default)]
 pub struct Registration {
     registered: bool,
+    attempted: bool,
 }
 
 impl Registration {
     /// Not registered.
     pub const fn new() -> Registration {
-        Registration { registered: false }
+        Registration { registered: false, attempted: false }
     }
 
     /// Whether `unregister_dev` is owed.
     pub fn is_registered(&self) -> bool {
         self.registered
+    }
+
+    /// Whether [`Registration::start`] ran the hooks (successfully or
+    /// not): a start refused before them is not counted as the call.
+    pub fn attempted(&self) -> bool {
+        self.attempted
     }
 
     /// The hooks of `drm_dev_illumos_lkms_register()` on a registered
@@ -227,6 +234,7 @@ impl Registration {
         if self.registered {
             return Err(Errno::EBUSY);
         }
+        self.attempted = true;
         let m = h.mode_config(ctx);
         h.register_dev(ctx)?;
         self.registered = true;
@@ -550,7 +558,9 @@ mod tests {
         let ctx = ctx();
         let h = Mock::default();
         let mut reg = Registration::new();
+        assert!(!reg.attempted());
         let m = reg.start(&h, &ctx);
+        assert!(reg.attempted());
         assert_eq!(m.map(|m| (m.cursor_width, m.async_page_flip)), Ok((256, true)));
         assert!(reg.is_registered());
         assert_eq!(h.log(), ["mode_config", "register_dev"]);
@@ -572,7 +582,7 @@ mod tests {
         let mut reg = Registration::new();
         assert_eq!(reg.start(&h, &ctx), Err(Errno::ENODEV));
         assert_eq!(h.log(), ["mode_config", "register_dev"]);
-        assert!(!reg.is_registered());
+        assert!(!reg.is_registered() && reg.attempted(), "a failed register_dev counts");
         reg.unregister(&h, &ctx);
         assert!(h.log().is_empty(), "no unregister_dev without register_dev");
     }
@@ -599,6 +609,34 @@ mod tests {
         assert_eq!(get_cap(f, &m, u64::from(uapi::DRM_CAP_CURSOR_WIDTH)), Ok(256));
         assert_eq!(get_cap(f, &m, u64::from(uapi::DRM_CAP_ASYNC_PAGE_FLIP)), Ok(1));
         assert_eq!(c.set(f, u64::from(uapi::DRM_CLIENT_CAP_ATOMIC), 1), Ok(()));
+    }
+
+    /// `carried/drm_kms/illumos/drm_kms_lkms.c` asserts at compile time
+    /// that Linux's structure of each command has the size listed in its
+    /// `DRM_KMS_ARG(DRM_IOCTL_..., size)` lines; here the list is checked
+    /// against the sizes the core copies: one line per command of the
+    /// core's table, each with the core's size.
+    #[test]
+    fn c_argument_sizes() {
+        let src = include_str!("../../../../carried/drm_kms/illumos/drm_kms_lkms.c");
+        let mut seen = Vec::new();
+        for line in src.lines().filter(|l| l.starts_with("DRM_KMS_ARG(")) {
+            let inner = line.trim_start_matches("DRM_KMS_ARG(").trim_end_matches(");");
+            let (name, size) = inner.split_once(", ").expect(line);
+            let size: usize = size.parse().expect(line);
+            let cmd = uapi::DRM_IOCTLS
+                .iter()
+                .chain([("DRM_IOCTL_MODE_CLOSEFB", uapi::DRM_IOCTL_MODE_CLOSEFB)].iter())
+                .find(|(n, _)| *n == name)
+                .map(|(_, c)| *c)
+                .unwrap_or_else(|| panic!("{name}: no such command"));
+            let e = lookup(cmd).unwrap_or_else(|| panic!("{name}: not in the core's table"));
+            assert_eq!(ioc::ioc_size(e.cmd), size, "{name}: the core copies another size");
+            seen.push(e.op);
+        }
+        for e in KMS_TABLE {
+            assert_eq!(seen.iter().filter(|op| **op == e.op).count(), 1, "{:?}: one DRM_KMS_ARG line", e.op);
+        }
     }
 
     #[test]

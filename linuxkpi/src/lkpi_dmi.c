@@ -7,8 +7,10 @@
  * system, base board, BIOS and chassis structures are copied once at
  * module load (lkpi_dmi_init()) into the field table Linux's quirk tables
  * are matched against (dmi_check_system(), dmi_first_match()). A field
- * the firmware does not provide (or a system without SMBIOS) is NULL and
- * matches nothing, as on Linux. Not provided: DMI_BIOS_RELEASE,
+ * of a structure the firmware does not provide (or of a system without
+ * SMBIOS) is NULL and matches nothing, as on Linux; a string the firmware
+ * leaves empty (or blank: spaces only) in a structure it provides is "",
+ * as Linux's dmi_string() makes it. Not provided: DMI_BIOS_RELEASE,
  * DMI_EC_FIRMWARE_RELEASE, DMI_PRODUCT_UUID and OEM strings (no user).
  */
 
@@ -21,13 +23,22 @@
 #include "lkpi_internal.h"
 
 static char *lkpi_dmi_ident[DMI_STRING_MAX];
+/* The value of an empty field: not allocated, never freed. */
+static char lkpi_dmi_empty[1];
 
 static void
 lkpi_dmi_set(int field, const char *s)
 {
-	if (s == NULL || *s == '\0' || lkpi_dmi_ident[field] != NULL)
+	const char *p;
+
+	if (s == NULL || lkpi_dmi_ident[field] != NULL)
 		return;
-	lkpi_dmi_ident[field] = kstrdup(s, GFP_KERNEL);
+	for (p = s; *p == ' '; p++)
+		;
+	if (*p == '\0')
+		lkpi_dmi_ident[field] = lkpi_dmi_empty;
+	else
+		lkpi_dmi_ident[field] = kstrdup(s, GFP_KERNEL);
 }
 
 /* The common strings (vendor, name, version, serial, asset tag) of id. */
@@ -96,7 +107,8 @@ lkpi_dmi_fini(void)
 	int i;
 
 	for (i = 0; i < DMI_STRING_MAX; i++) {
-		kfree(lkpi_dmi_ident[i]);
+		if (lkpi_dmi_ident[i] != lkpi_dmi_empty)
+			kfree(lkpi_dmi_ident[i]);
 		lkpi_dmi_ident[i] = NULL;
 	}
 }

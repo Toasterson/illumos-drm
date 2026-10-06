@@ -151,9 +151,6 @@ extern int lkpi_pci_phys_lookup(resource_size_t phys, size_t size,
  */
 extern ddi_dma_attr_t *lkpi_dev_dma_attr(struct device *dev);
 
-/* src/lkpi_device.c: devres of a device at detach. */
-extern void lkpi_device_init(struct device *dev, dev_info_t *dip,
-    const char *name);
-extern void lkpi_device_fini(struct device *dev);
+/* src/lkpi_device.c: lkpi_device_init()/_fini() are in <linux/device.h>. */
 
 #endif

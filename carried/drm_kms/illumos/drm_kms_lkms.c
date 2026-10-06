@@ -30,9 +30,9 @@
  * lastclose
  *	nothing: there is no fbdev emulation whose mode could be restored.
  * register_dev / unregister_dev
- *	drm_modeset_register_all() / drm_modeset_unregister_all(): the
- *	connectors (late_register hooks, e.g. i915's panel and backlight),
- *	planes, CRTCs and encoders.
+ *	drm_mode_config_validate(), then drm_modeset_register_all() /
+ *	drm_modeset_unregister_all(): the connectors (late_register hooks,
+ *	e.g. i915's panel and backlight), planes, CRTCs and encoders.
  * mode_config
  *	what Linux's GET_CAP reports from dev->mode_config: the cursor size
  *	(64 when the driver set none), the preferred depth, the shadow
@@ -67,6 +67,54 @@ drm_kms_noop(struct drm_device *dev, void *data, struct drm_file *file_priv)
 }
 
 #define	DRM_KMS_IOCTL(cmd, fn)	[_IOC_NR(cmd)] = (fn)
+
+/*
+ * The core copies each command's argument into a kernel buffer of the
+ * size its own table gives the command (crates/drm-core, kms::ioctl:
+ * libdrm 2.4.109's structures, Linux's for CLOSEFB) and hands that to the
+ * handlers here, which read and write Linux v7.2's structures: the two
+ * must have the same size. The list below is the core's sizes, checked
+ * here against Linux's structures and by the drm-core test
+ * lkms::tests::c_argument_sizes against the core's table (which also
+ * requires a line for every command the core forwards).
+ */
+#define	DRM_KMS_ARG(cmd, size) \
+	_Static_assert(_IOC_SIZE(cmd) == (size), #cmd ": argument size")
+
+DRM_KMS_ARG(DRM_IOCTL_MODESET_CTL, 8);
+DRM_KMS_ARG(DRM_IOCTL_WAIT_VBLANK, 24);
+DRM_KMS_ARG(DRM_IOCTL_CRTC_GET_SEQUENCE, 24);
+DRM_KMS_ARG(DRM_IOCTL_CRTC_QUEUE_SEQUENCE, 24);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETRESOURCES, 64);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETCRTC, 104);
+DRM_KMS_ARG(DRM_IOCTL_MODE_SETCRTC, 104);
+DRM_KMS_ARG(DRM_IOCTL_MODE_CURSOR, 28);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETGAMMA, 32);
+DRM_KMS_ARG(DRM_IOCTL_MODE_SETGAMMA, 32);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETENCODER, 20);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETCONNECTOR, 80);
+DRM_KMS_ARG(DRM_IOCTL_MODE_ATTACHMODE, 72);
+DRM_KMS_ARG(DRM_IOCTL_MODE_DETACHMODE, 72);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETPROPERTY, 64);
+DRM_KMS_ARG(DRM_IOCTL_MODE_SETPROPERTY, 16);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETPROPBLOB, 16);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETFB, 28);
+DRM_KMS_ARG(DRM_IOCTL_MODE_ADDFB, 28);
+DRM_KMS_ARG(DRM_IOCTL_MODE_RMFB, 4);
+DRM_KMS_ARG(DRM_IOCTL_MODE_PAGE_FLIP, 24);
+DRM_KMS_ARG(DRM_IOCTL_MODE_DIRTYFB, 24);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETPLANERESOURCES, 16);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETPLANE, 32);
+DRM_KMS_ARG(DRM_IOCTL_MODE_SETPLANE, 48);
+DRM_KMS_ARG(DRM_IOCTL_MODE_ADDFB2, 104);
+DRM_KMS_ARG(DRM_IOCTL_MODE_OBJ_GETPROPERTIES, 32);
+DRM_KMS_ARG(DRM_IOCTL_MODE_OBJ_SETPROPERTY, 24);
+DRM_KMS_ARG(DRM_IOCTL_MODE_CURSOR2, 36);
+DRM_KMS_ARG(DRM_IOCTL_MODE_ATOMIC, 56);
+DRM_KMS_ARG(DRM_IOCTL_MODE_CREATEPROPBLOB, 16);
+DRM_KMS_ARG(DRM_IOCTL_MODE_DESTROYPROPBLOB, 4);
+DRM_KMS_ARG(DRM_IOCTL_MODE_GETFB2, 104);
+DRM_KMS_ARG(DRM_IOCTL_MODE_CLOSEFB, 8);
 
 /* Linux v7.2's drm_ioctls[] rows of mode setting, by command number. */
 static drm_kms_ioctl_fn *const drm_kms_ioctls[256] = {
@@ -162,7 +210,13 @@ drm_kms_register_dev(struct drm_device *dev)
 {
 	int ret;
 
-	/* Linux's drm_dev_register(): registered, then the objects. */
+	/*
+	 * Linux's drm_dev_register() for a driver without load: the mode
+	 * configuration is checked and completed first (encoders' possible
+	 * clones and CRTCs, planes' formats; WARNs for driver bugs), then
+	 * the device counts as registered, then its objects register.
+	 */
+	drm_mode_config_validate(dev);
 	WRITE_ONCE(dev->illumos_kms_registered, true);
 	if ((ret = drm_modeset_register_all(dev)) != 0)
 		WRITE_ONCE(dev->illumos_kms_registered, false);
