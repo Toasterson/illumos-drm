@@ -193,7 +193,13 @@ impl Driver for CDriver {
             // copy of the argument (the table's size) and the file.
             unsafe { ioctl(ddev, nr, data.as_mut_ptr().cast(), fp.as_ptr()) }
         });
-        r.unwrap_or_else(|e| -e.get())
+        let r = r.unwrap_or_else(|e| -e.get());
+        if drm_core::lkms::is_linux_internal(r) {
+            // The KMS code maps these (lkpi_errno()); one that gets
+            // through fails the ioctl with EIO (lkms::from_neg).
+            core.dip.warn(format_args!("KMS ioctl {nr:#x} returned Linux-internal error {}; EIO", -r));
+        }
+        r
     }
 
     fn file_flags(&self, file: CloneId, flags: &FileFlags) {

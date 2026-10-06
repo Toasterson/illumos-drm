@@ -17,7 +17,8 @@
  *	(-EINVAL, as Linux's drm_ioctl() for a row without a function).
  *	Leases are not offered (CREATE/LIST/GET/REVOKE_LEASE: -ENOTTY), and
  *	the dumb-buffer commands are the core's (-ENOTTY should one arrive);
- *	every other number is -ENOTTY.
+ *	every other number is -ENOTTY. A handler's Linux-only error number
+ *	(-ERESTARTSYS, ...) is mapped to an illumos one (lkpi_errno()).
  * file_open
  *	initialises the file's KMS area (framebuffer and blob lists, the
  *	framebuffer lock, the pending events), as drm_file_alloc().
@@ -40,6 +41,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/errno.h>
 #include <linux/mutex.h>
 #include <linux/list.h>
 #include <linux/export.h>
@@ -113,13 +115,22 @@ drm_kms_ioctl(struct drm_device *dev, unsigned int nr, void *data,
     struct drm_file *file_priv)
 {
 	drm_kms_ioctl_fn *fn;
+	int ret;
 
 	if (nr == _IOC_NR(DRM_IOCTL_MODESET_CTL))
 		return (-EINVAL);
 	if (nr >= ARRAY_SIZE(drm_kms_ioctls) ||
 	    (fn = drm_kms_ioctls[nr]) == NULL)
 		return (-ENOTTY);
-	return (fn(dev, data, file_priv));
+	/*
+	 * The handlers return Linux's kernel-internal numbers too
+	 * (-ERESTARTSYS from an interrupted lock or wait, ...), which Linux's
+	 * syscall exit turns into a restart or EINTR: here they become the
+	 * illumos errno user space sees, as for the driver's own ioctls
+	 * (lkpi_ioctl_trampoline()).
+	 */
+	ret = fn(dev, data, file_priv);
+	return (ret < 0 ? -lkpi_errno(-ret) : ret);
 }
 
 static int

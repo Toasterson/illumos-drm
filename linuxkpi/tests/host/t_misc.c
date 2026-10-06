@@ -5,7 +5,8 @@
  * Tests of src/lkpi_misc.c and src/lkpi_kobject.c: refcount_t semantics
  * (saturation instead of overflow/underflow, dec_and_test, the
  * dec_and_lock forms), kref, sort()/sort_r(), bsearch(), random bytes,
- * uuid_is_valid(), kobjects and sysfs_emit().
+ * uuid_is_valid(), kobjects and sysfs_emit(), and lkpi_errno() (the
+ * Linux error numbers that must not reach user space).
  */
 
 #include <linux/kernel.h>
@@ -20,6 +21,7 @@
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/slab.h>
+#include <linux/errno.h>
 #include "test.h"
 
 TEST(refcount)
@@ -300,4 +302,24 @@ TEST(kobject_sysfs)
 	kobject_put(&child);
 	CHECK_EQ(ktype_released, 2);
 	free(page);
+}
+
+TEST(errno_map)
+{
+	/* illumos' own numbers pass unchanged. */
+	CHECK_EQ(lkpi_errno(EINVAL), EINVAL);
+	CHECK_EQ(lkpi_errno(ENOTTY), ENOTTY);
+	CHECK_EQ(lkpi_errno(EINTR), EINTR);
+	/* An interrupted wait or lock: EINTR, as Linux's syscall exit. */
+	CHECK_EQ(lkpi_errno(ERESTARTSYS), EINTR);
+	CHECK_EQ(lkpi_errno(ERESTARTNOINTR), EINTR);
+	CHECK_EQ(lkpi_errno(ERESTARTNOHAND), EINTR);
+	CHECK_EQ(lkpi_errno(ERESTART_RESTARTBLOCK), EINTR);
+	CHECK_EQ(lkpi_errno(ENOIOCTLCMD), ENOTTY);
+	CHECK_EQ(lkpi_errno(EPROBE_DEFER), EAGAIN);
+	CHECK_EQ(lkpi_errno(ENOTSUPP), ENOTSUP);
+	CHECK_EQ(lkpi_errno(EREMOTEIO), EIO);
+	/* Nothing from 512 up stays. */
+	for (int e = 512; e < 700; e++)
+		CHECK(lkpi_errno(e) < 512);
 }

@@ -98,15 +98,29 @@ pub const ARG_MAX: usize = 256;
 #[repr(C, align(8))]
 struct ArgBuf([u8; ARG_MAX]);
 
+/// The first of Linux's kernel-internal error numbers (`ERESTARTSYS`, 512,
+/// and up), which never reach user space on Linux. The KMS code maps them
+/// to illumos numbers (`lkpi_errno()`) before it returns.
+pub const LINUX_INTERNAL_ERRNO: i32 = 512;
+
 /// An errno from a hook's negative result; 0 and positive values are
-/// success, as for the facade's ioctl handlers.
-/// A value below -4095 (Linux's `MAX_ERRNO`) is no errno: `EINVAL`.
+/// success, as for the facade's ioctl handlers. A kernel-internal Linux
+/// number that got through (-512 to -4095, Linux's `MAX_ERRNO`) is no
+/// errno user space knows: `EIO` (the caller warns, see
+/// [`is_linux_internal`]). A value below -4095 is no errno: `EINVAL`.
 pub fn from_neg(r: i32) -> Result<(), Errno> {
     match r {
         0.. => Ok(()),
+        _ if is_linux_internal(r) => Err(Errno::EIO),
         -4095..0 => Err(Errno::new(-r).unwrap_or(Errno::EINVAL)),
         _ => Err(Errno::EINVAL),
     }
+}
+
+/// Whether a hook's result is one of Linux's kernel-internal error
+/// numbers, which [`from_neg`] turns into `EIO`.
+pub fn is_linux_internal(r: i32) -> bool {
+    (-4095..=-LINUX_INTERNAL_ERRNO).contains(&r)
 }
 
 /// Runs a mode-setting command of a Linux-KMS device: the core's
@@ -413,7 +427,16 @@ mod tests {
         let m = s.open(Opener { kind: NodeKind::Primary, privileged: false, pid: 1 }, &ctx).unwrap();
         let cmd = uapi::DRM_IOCTL_MODE_GETPROPBLOB;
         // The KMS code's errno is the ioctl's; nothing is copied back.
-        for (r, want) in [(-25, Err(Errno::ENOTTY)), (-22, Err(Errno::EINVAL)), (-2, Err(Errno::ENOENT)), (3, Ok(()))] {
+        // An interrupted handler: EINTR (the C side's lkpi_errno() of
+        // ERESTARTSYS); a leaked ERESTARTSYS itself: EIO.
+        for (r, want) in [
+            (-25, Err(Errno::ENOTTY)),
+            (-22, Err(Errno::EINVAL)),
+            (-2, Err(Errno::ENOENT)),
+            (-(Errno::EINTR.get()), Err(Errno::EINTR)),
+            (-512, Err(Errno::EIO)),
+            (3, Ok(())),
+        ] {
             let a = UserMem::new(cmd, cmd, |_| 9);
             let h = |_: u32, d: &mut [u8]| {
                 d.fill(0);
@@ -583,7 +606,16 @@ mod tests {
         assert_eq!(from_neg(0), Ok(()));
         assert_eq!(from_neg(1), Ok(()));
         assert_eq!(from_neg(-25), Err(Errno::ENOTTY));
-        assert_eq!(from_neg(-4095).map_err(|e| e.get()), Err(4095));
+        // The KMS code maps ERESTARTSYS (512) to EINTR (lkpi_errno());
+        // one that got through is refused as EIO, as is every other
+        // kernel-internal number up to MAX_ERRNO.
+        assert_eq!(from_neg(-(Errno::EINTR.get())), Err(Errno::EINTR));
+        assert_eq!(from_neg(-511).map_err(|e| e.get()), Err(511));
+        for r in [-512, -513, -517, -524, -4095] {
+            assert!(is_linux_internal(r));
+            assert_eq!(from_neg(r), Err(Errno::EIO), "result {r}");
+        }
+        assert!(!is_linux_internal(-511) && !is_linux_internal(-4096) && !is_linux_internal(0));
         assert_eq!(from_neg(-4096), Err(Errno::EINVAL));
         assert_eq!(from_neg(i32::MIN), Err(Errno::EINVAL));
     }
