@@ -285,6 +285,12 @@ lkpi_devm_drm_dev_alloc(struct device *parent,
 	 * contexts). So the device is registered here, in attach(9E): its
 	 * nodes exist from now on, but opens wait until attach returns, and
 	 * the driver's drm_dev_register() then only completes the minors.
+	 * No fence priority is set (drm_dev_illumos_set_fence_priority()
+	 * must come before registration, and the driver allocates its
+	 * interrupts later). The core's KMS event lock, which i915's
+	 * interrupt handler takes (vblank and flip events), is then an
+	 * adaptive mutex without an interrupt cookie, which the low-level
+	 * handlers request_irq() accepts may take (mutex_init(9F)).
 	 */
 	if ((ret = (drm_dev_register)(drm, 0)) != 0)
 		return (ERR_PTR(ret));
