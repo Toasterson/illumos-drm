@@ -43,14 +43,14 @@
 /* How long a blocked operation is observed to stay blocked. */
 #define	ST_BLOCK_MS	50
 
-static bool
+bool
 st_wait(struct completion *c, unsigned int ms)
 {
 	return (wait_for_completion_timeout(c, msecs_to_jiffies(ms)) != 0);
 }
 
 /* Holds (sleeping) while *flag is set, at most ST_HOLD_MS. */
-static void
+void
 st_hold_sleep(volatile int *flag)
 {
 	int i;
@@ -71,14 +71,7 @@ st_hold_spin(volatile int *flag)
 
 /* --- helper threads ---------------------------------------------------- */
 
-/* Runs fn(arg) on a kthread; done completes when it returned. */
-struct st_call {
-	void (*fn)(void *);
-	void *arg;
-	struct completion done;
-	struct task_struct *k;
-};
-
+/* Runs fn(arg) on a kthread (struct st_call, st.h). */
 static int
 st_call_main(void *a)
 {
@@ -89,7 +82,7 @@ st_call_main(void *a)
 	return (0);
 }
 
-static bool
+bool
 st_call_start(struct st_call *c, void (*fn)(void *), void *arg)
 {
 	c->fn = fn;
@@ -104,7 +97,7 @@ st_call_start(struct st_call *c, void (*fn)(void *), void *arg)
 }
 
 /* Waits for the call; reaps the kthread only if it returned. */
-static bool
+bool
 st_call_finish(struct st_call *c, unsigned int ms)
 {
 	if (c->k == NULL || !st_wait(&c->done, ms))

@@ -88,9 +88,11 @@ extern void lkpi_work_flush_system(void);
 extern int lkpi_shrinker_init(void);
 extern void lkpi_shrinker_fini(void);
 
-/* src/lkpi_drm.c: the DRM driver-table copies, the unplug SRCU. */
+/* src/lkpi_ww_mutex.c: the stand-alone wound/wait mutexes' wait buckets. */
 extern int lkpi_ww_init(void);
 extern void lkpi_ww_fini(void);
+
+/* src/lkpi_drm.c: the DRM driver-table copies, the unplug SRCU. */
 extern int lkpi_drm_init(void);
 extern void lkpi_drm_fini(void);
 /*

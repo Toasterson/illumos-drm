@@ -152,6 +152,20 @@ extern int mutex_owned(const kmutex_t *);
 #define	MUTEX_HELD(m)		mutex_owned(m)
 #define	MUTEX_NOT_HELD(m)	(!mutex_owned(m))
 
+typedef enum { CV_DEFAULT = 0, CV_DRIVER = 1 } kcv_type_t;
+
+extern void cv_init(kcondvar_t *, char *, kcv_type_t, void *);
+extern void cv_destroy(kcondvar_t *);
+extern void cv_wait(kcondvar_t *, kmutex_t *);
+extern int cv_wait_sig(kcondvar_t *, kmutex_t *);
+extern void cv_signal(kcondvar_t *);
+extern void cv_broadcast(kcondvar_t *);
+/*
+ * Set in a thread to make its next cv_wait_sig() return 0 (a signal)
+ * without waiting; cleared by that call.
+ */
+extern __thread int lkpi_host_cv_signal_pending;
+
 extern void rw_init(krwlock_t *, char *, krw_type_t, void *);
 extern void rw_destroy(krwlock_t *);
 extern void rw_enter(krwlock_t *, krw_t);

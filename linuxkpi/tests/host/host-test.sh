@@ -24,7 +24,7 @@ OUT=${OUT:-${TMPDIR:-/tmp}/lkpi-host-test}
 
 # The layer sources under test.
 SRCS="lkpi_rbtree.c lkpi_xarray.c lkpi_bitmap.c lkpi_printf.c lkpi_string.c
-lkpi_misc.c lkpi_kobject.c"
+lkpi_misc.c lkpi_kobject.c lkpi_ww_mutex.c"
 
 ARCH=
 if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
