@@ -598,8 +598,11 @@ reached through the facade 2.0 hooks (`include/drm/drm_lkms.h`).
   (atomic and state helpers, CRTC, damage, modeset, plane, probe and
   self-refresh helpers), the `drm_display_helper` libraries (DP, DP dual
   mode, DP MST, DSC, HDMI, SCDC) and `drivers/video/hdmi.c` (HDMI
-  infoframes). One patch (`patches/`): `drm_mode_object.c` has no legacy
-  load callback to read.
+  infoframes). Three patches (`patches/`, conditional on `__illumos__`):
+  `drm_mode_object.c` has no legacy load callback to read; the device's
+  `registered` means "KMS registered" (the layer registers the device
+  with the core before mode setting starts); the vblank event list is
+  initialised in `drmm_mode_config_init()`.
 - **Licences:** every carried file is MIT (SPDX MIT, `GPL-2.0 OR MIT`, or
   the MIT/HPND notice); `drm_hdcp_helper.c` (GPL-2.0-only) is not carried.
   `drivers/i915/fetch-and-patch.sh` prepares one Linux tree for i915n and
@@ -662,7 +665,10 @@ the default) carries i915's display code for Ivy Bridge (display version
   at `drm_kms_illumos_funcs`. Patch 0006's display-engine interrupt
   helpers (`illumos/i915_illumos.c`) act only on a device without display
   (the gen5-7 master enable lives in DEIER); with a display, Linux's
-  display code owns those registers.
+  display code owns those registers. Only Ivy Bridge (the X230) has run
+  the display build on hardware: the headless path it takes on every
+  other platform is untested there (the MacBook Pro's gen9.5 GPU, the
+  other test machine, has not run this build).
 - **The stubs:** DSI (MIPI DSI bus), HDCP (MEI/GSC, the GPL
   `drm_hdcp_helper`) and LPE audio (platform devices) are not built.
   `illumos/gen-nodisplay.py --excluded` writes `illumos/i915_excluded.c`:
@@ -1962,12 +1968,18 @@ first attach on hardware.
 
 **R5c: tests.** `linuxkpi/tests/host` runs the layer's pure-logic files
 (trees, xarray, IDR/IDA, bitmaps, lists, refcount, printf, strings,
-kobjects) as a userland program (`host-test.sh`, with clang's sanitizers
-where available). `linuxkpi_selftest` is a Linux PCI driver on the layer
-that binds QEMU's PCI test device and checks, from its probe(), locks,
-workqueues, timers, waits, RCU, idr/xarray, slab caches, pages and DMA,
-and the concurrency of the scheduling, memory and reservation parts
-(`st_sched.c`, `st_mem.c`, `st_resv.c`). The self-test also registers a DRM device the way i915 does (a GEM
+kobjects, the Linux-only error numbers, and with host threads the
+stand-alone wound/wait mutexes) as a userland program (`host-test.sh`,
+with clang's sanitizers where available). `linuxkpi_selftest` is a Linux
+PCI driver on the layer that binds QEMU's PCI test device and checks, from
+its probe(), locks, workqueues, timers, waits, RCU, idr/xarray, slab
+caches, pages and DMA, and the concurrency of the scheduling, memory and
+reservation parts (`st_sched.c`, `st_mem.c`, `st_resv.c`); the display
+build added the I2C core and bit-banging algorithm on a simulated bus
+(`st_i2c.c`), the stand-alone wound/wait mutexes alone and in cycles with
+reservation locks (`st_ww.c`) and the kthread workers (`st_kthread.c`).
+These three are built (CI, the serial builds) but have not yet run in a
+guest: no `run-r5c-test.sh` run since they were added. The self-test also registers a DRM device the way i915 does (a GEM
 object made before `drm_dev_register()` and freed in the driver's release).
 `tools/test/run-r5c-test.sh` checks that no module defines a kernel
 symbol, loads the layer, runs the self-test, holds a node of its DRM device
