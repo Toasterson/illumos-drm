@@ -101,7 +101,7 @@ jobs:
       # lacks them.
       - run: >
           mkdir -p target/sysinc && for f in /usr/include/*; do ln -sfn "$f" target/sysinc/; done &&
-          if [ ! -f /usr/include/drm/drm.h ]; then rm -f target/sysinc/drm && mkdir target/sysinc/drm &&
+          if [ ! -f /usr/include/drm/drm.h ]; then rm -rf target/sysinc/drm && mkdir target/sysinc/drm &&
           for h in drm.h drm_mode.h; do curl -sSf -o target/sysinc/drm/$h
           https://raw.githubusercontent.com/OpenIndiana/gfx-drm/d109414c4f/usr/src/uts/common/drm/$h || exit 1; done; fi &&
           ls -l target/sysinc/drm/drm.h

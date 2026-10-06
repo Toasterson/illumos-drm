@@ -7,7 +7,8 @@ Linux's KMS code, which misc/drm_kms carries (facade 2.0, drm_lkms.h).
 The display build of i915n (compiled with -DI915N_DISPLAY: build.sh's
 I915_DISPLAY=1, the default) points the driver table's illumos_lkms at
 i915n's copy of misc/drm_kms' hook table (drm_kms_illumos_funcs, with
-lastclose also restoring the illumos console). The core
+lastclose and the DRM master's file close also restoring the illumos
+console). The core
 uses it only if the device still has DRIVER_MODESET when the LinuxKPI
 layer's drm_dev_register() starts mode setting: a platform without
 display (patch 0011) has cleared it by then and stays headless. The

@@ -91,7 +91,6 @@ extern struct i915n_boot_fb fb_info;	/* unix */
 typedef void *i915n_callb_id_t;
 extern i915n_callb_id_t callb_add(boolean_t (*)(void *, int), void *, int,
     char *);
-extern int callb_delete(i915n_callb_id_t);
 #define	I915N_CB_CL_PANIC	5	/* CB_CL_PANIC */
 
 /* The console minor: node minors 256 + instance, unused by the DRM core. */
@@ -104,6 +103,7 @@ static struct {
 	boolean_t		console;	/* taken over: tem may use it */
 	i915n_callb_id_t	panic_cb;
 	volatile int		kd_mode;	/* KD_TEXT, KD_GRAPHICS */
+	volatile boolean_t	devinit;	/* tem's VIS_DEVINIT succeeded */
 	char			name[16];
 } i915n_con_st = { .kd_mode = KD_TEXT };
 
@@ -124,10 +124,46 @@ con_minor(dev_t dev)
 	    i915n_con_st.dip));
 }
 
+static dev_t
+con_dev(void)
+{
+	return (makedevice(ddi_driver_major(i915n_con_st.dip),
+	    I915N_CON_MINOR_BASE + ddi_get_instance(i915n_con_st.dip)));
+}
+
+/*
+ * The console's KD mode. gfx_private's own (KDGETMODE) is the authority:
+ * KD_RESETTEXT and this driver's own KDSETMODE change it without always
+ * calling the mode hook, so the hook's copy (kd_mode) is only used where
+ * gfx_private cannot be asked (panic). Thread context, without
+ * gfx_private's lock held.
+ */
 boolean_t
 i915n_con_text_mode(void)
 {
-	return (i915n_con_st.kd_mode == KD_TEXT);
+	int mode = i915n_con_st.kd_mode, rval;
+
+	if (i915n_con_st.devinit && panicstr == NULL &&
+	    gfxp_fb_ioctl(con_dev(), KDGETMODE, (intptr_t)&mode, FKIOCTL,
+	    kcred, &rval, i915n_con_st.gfxp) == 0)
+		i915n_con_st.kd_mode = mode;
+	return (mode == KD_TEXT);
+}
+
+/*
+ * gfx_private's KDSETMODE from this driver (not from tem or X). Only
+ * after tem's VIS_DEVINIT: before it, gfx_private has no console state
+ * (softc->console) and its KD_TEXT would dereference NULL.
+ */
+static void
+con_kdsetmode(int mode)
+{
+	int rval;
+
+	if (!i915n_con_st.devinit)
+		return;
+	(void) gfxp_fb_ioctl(con_dev(), KDSETMODE, mode, FKIOCTL, kcred,
+	    &rval, i915n_con_st.gfxp);
 }
 
 /* gfx_private's mode hook: called under its lock, from tem or wc. */
@@ -148,28 +184,26 @@ static struct gfxp_blt_ops i915n_con_ops = {
 	.setmode = i915n_con_setmode
 };
 
+/*
+ * The DRM master's file closed (X exited or died): the console takes the
+ * display back. A killed X leaves gfx_private in KD_GRAPHICS (illumos' VT
+ * driver does not reset the mode of a VT whose process died): switch it
+ * to KD_TEXT, which repaints the console framebuffer from gfx_private's
+ * shadow. The restore is queued directly, whatever the hook saw.
+ */
 void
 i915n_con_master_gone(void)
 {
-	int rval;
-
 	if (!i915n_con_st.console)
 		return;
-	if (i915n_con_st.kd_mode == KD_TEXT) {
-		i915n_con_kms_restore();
-		return;
-	}
-	/* gfx_private calls i915n_con_setmode(KD_TEXT), which restores. */
-	(void) gfxp_fb_ioctl(makedevice(ddi_driver_major(i915n_con_st.dip),
-	    I915N_CON_MINOR_BASE + ddi_get_instance(i915n_con_st.dip)),
-	    KDSETMODE, KD_TEXT, FKIOCTL, kcred, &rval, i915n_con_st.gfxp);
+	if (!i915n_con_text_mode())
+		con_kdsetmode(KD_TEXT);
+	i915n_con_kms_restore();
 }
 
 static boolean_t
 i915n_con_panic(void *arg, int code)
 {
-	int rval;
-
 	_NOTE(ARGUNUSED(arg, code));
 	if (!i915n_con_st.console)
 		return (B_TRUE);
@@ -177,15 +211,13 @@ i915n_con_panic(void *arg, int code)
 	 * Always: the console may be in KD_TEXT while X scans out its own
 	 * framebuffer (tem has X's VT in text mode once X acknowledged a VT
 	 * switch), and rewriting the plane registers with what they hold is
-	 * harmless.
+	 * harmless. Then gfx_private to KD_TEXT, so that tem's polled panic
+	 * output reaches the console framebuffer; panicstr is set, so
+	 * gfx_private's lock is bypassed (mutex_vector_enter()).
 	 */
 	i915n_con_kms_panic();
-	if (i915n_con_st.kd_mode == KD_TEXT)
-		return (B_TRUE);
-	/* panicstr is set: gfx_private's lock is bypassed. */
-	(void) gfxp_fb_ioctl(makedevice(ddi_driver_major(i915n_con_st.dip),
-	    I915N_CON_MINOR_BASE + ddi_get_instance(i915n_con_st.dip)),
-	    KDSETMODE, KD_TEXT, FKIOCTL, kcred, &rval, i915n_con_st.gfxp);
+	if (i915n_con_st.kd_mode != KD_TEXT)
+		con_kdsetmode(KD_TEXT);
 	return (B_TRUE);
 }
 
@@ -332,29 +364,45 @@ int
 i915n_con_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
     int *rvalp)
 {
-	if (con_minor(dev)) {
-		int ret;
+	int ret;
 
-		/* tem uses VIS_CONSCLEAR's *rvalp, which gfx_private leaves. */
-		*rvalp = 0;
-		ret = gfxp_fb_ioctl(dev, cmd, arg, mode, credp, rvalp,
-		    i915n_con_st.gfxp);
+	if (!con_minor(dev))
+		return (drm_ioctl(dev, cmd, arg, mode, credp, rvalp));
+	switch (cmd) {
+	case VIS_CONSDISPLAY:
+	case VIS_CONSCOPY:
+	case VIS_CONSCURSOR:
+	case VIS_CONSCLEAR:
+	case VIS_DEVFINI:
 		/*
-		 * tem repaints a text VT that becomes active with a full
-		 * clear. A switch between two VTs that tem has in text mode
-		 * (X's own VT is in text mode again once X acknowledged a
-		 * switch) sends no KDSETMODE, so the clear is the signal that
-		 * a text VT is in front: queue the restore, which does
-		 * nothing while a DRM client is master or the console is
-		 * shown already.
+		 * tem's commands, from the kernel only: gfx_private trusts
+		 * their coordinates and data pointer (it checks FKIOCTL only
+		 * for VIS_DEVINIT).
 		 */
-		if (cmd == VIS_CONSCLEAR && ret == 0 &&
-		    i915n_con_st.console && i915n_con_st.kd_mode == KD_TEXT &&
-		    panicstr == NULL)
-			i915n_con_kms_restore();
-		return (ret);
+		if ((mode & FKIOCTL) == 0)
+			return (EPERM);
+		break;
+	default:
+		break;
 	}
-	return (drm_ioctl(dev, cmd, arg, mode, credp, rvalp));
+	/* tem uses VIS_CONSCLEAR's *rvalp, which gfx_private leaves. */
+	*rvalp = 0;
+	ret = gfxp_fb_ioctl(dev, cmd, arg, mode, credp, rvalp,
+	    i915n_con_st.gfxp);
+	if (cmd == VIS_DEVINIT && ret == 0)
+		i915n_con_st.devinit = B_TRUE;
+	/*
+	 * tem repaints a text VT that becomes active with a full clear. A
+	 * switch between two VTs that tem has in text mode (X's own VT is in
+	 * text mode again once X acknowledged a switch) sends no KDSETMODE,
+	 * so the clear is the signal that a text VT is in front: queue the
+	 * restore, which does nothing while a DRM client is master or the
+	 * console is shown already.
+	 */
+	if (cmd == VIS_CONSCLEAR && ret == 0 && i915n_con_st.console &&
+	    i915n_con_st.kd_mode == KD_TEXT && panicstr == NULL)
+		i915n_con_kms_restore();
+	return (ret);
 }
 
 int

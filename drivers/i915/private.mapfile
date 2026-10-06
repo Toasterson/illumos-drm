@@ -52,17 +52,18 @@ SYMBOL_SCOPE {
 		#
 		fb_info			{ FLAGS = EXTERN };
 		#
-		# genunix: CB_CL_PANIC callbacks (sys/callb.h) and panicstr,
+		# genunix: callb_add() for the CB_CL_PANIC callback (sys/callb.h;
+		# never deleted: a console device does not detach) and panicstr,
 		# to show the console framebuffer when the system panics.
 		#
 		callb_add		{ FLAGS = EXTERN };
-		callb_delete		{ FLAGS = EXTERN };
 		panicstr		{ FLAGS = EXTERN };
 		#
 		# Documented DDI (9F/9S) that the gate's ddi.mapfile does not
 		# list: getminor(9F), makedevice(9F), ddi_devmap_segmap(9F)
-		# for the console minor's mmap, kcred for gfx_private's
-		# in-kernel KDSETMODE at panic.
+		# for the console minor's mmap, kcred for the driver's own
+		# in-kernel KDGETMODE/KDSETMODE on gfx_private (restore, X's
+		# master file closing, panic).
 		#
 		getminor		{ FLAGS = EXTERN };
 		makedevice		{ FLAGS = EXTERN };

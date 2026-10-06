@@ -30,6 +30,18 @@
  * console configuration not on the display already; so a restore never
  * overrides X and a text console's own clears cost one lock round.
  *
+ * Why the decision is safe without more state: it is taken in the work,
+ * in thread context, with every modeset lock held, from four reads that
+ * cannot change against it in a harmful way: the KD mode is gfx_private's
+ * own (KDGETMODE; X's KD_GRAPHICS comes before its commit, which needs
+ * the modeset locks this work holds), the master flags are the core's
+ * (X takes the master before its commit and drops it after leaving the
+ * display), the closing master's file is excluded explicitly (the core
+ * unlinks it from filelist only after this hook), and con_shown() reads
+ * the committed state under the locks. A trigger that loses the race
+ * against X costs one skipped restore; the next trigger (VT switch, X's
+ * file closing, lastclose) repeats the decision.
+ *
  * Panic (i915n_con_kms_panic()): register writes only, no locks, no
  * allocation: the console CRTC's primary plane scans out the console
  * framebuffer again. Not covered: a pipe X switched off, or drives with
@@ -77,6 +89,14 @@ static struct i915n_con_kms {
 	unsigned int		nconns;
 	struct drm_display_mode	mode;
 	struct work_struct	restore_work;
+	/*
+	 * The master's file whose close queued a restore: the core unlinks
+	 * a file from drm->filelist only after the KMS close hook (and the
+	 * GEM release and postclose), so the restore work may still find it
+	 * there with is_master set. Compared, never dereferenced; cleared
+	 * by the work.
+	 */
+	struct drm_file		*closing;
 } i915n_con;
 
 /*
@@ -101,8 +121,10 @@ i915n_file_close(struct drm_device *dev, struct drm_file *file)
 	bool master = READ_ONCE(file->is_master);
 
 	drm_kms_illumos_funcs.file_close(dev, file);
-	if (master && READ_ONCE(i915n_con.active) && i915n_con.drm == dev)
+	if (master && READ_ONCE(i915n_con.active) && i915n_con.drm == dev) {
+		WRITE_ONCE(i915n_con.closing, file);
 		i915n_con_master_gone();
+	}
 }
 
 static void
@@ -198,9 +220,15 @@ i915n_con_kms_takeover(dev_info_t *dip, const struct i915n_con_fb *want)
 	i915n_con.nconns = 0;
 	drm_connector_list_iter_begin(drm, &iter);
 	drm_for_each_connector_iter(conn, &iter) {
-		if (conn->state == NULL || conn->state->crtc != found ||
-		    i915n_con.nconns == I915N_CON_MAX_CONNECTORS)
+		if (conn->state == NULL || conn->state->crtc != found)
 			continue;
+		if (i915n_con.nconns == I915N_CON_MAX_CONNECTORS) {
+			drm_info(drm, "console: more than %d connectors on "
+			    "[CRTC:%d]; [CONNECTOR:%d] left out\n",
+			    I915N_CON_MAX_CONNECTORS, found->base.id,
+			    conn->base.id);
+			continue;
+		}
 		drm_connector_get(conn);
 		i915n_con.conns[i915n_con.nconns++] = conn;
 	}
@@ -308,14 +336,14 @@ con_commit(struct drm_atomic_commit *state)
  * stays off it.
  */
 static bool
-con_master_present(struct drm_device *drm)
+con_master_present(struct drm_device *drm, struct drm_file *closing)
 {
 	struct drm_file *file;
 	bool found = false;
 
 	mutex_lock(&drm->filelist_mutex);
 	list_for_each_entry(file, &drm->filelist, lhead) {
-		if (READ_ONCE(file->is_master)) {
+		if (file != closing && READ_ONCE(file->is_master)) {
 			found = true;
 			break;
 		}
@@ -342,6 +370,7 @@ con_restore_work(struct work_struct *work)
 	struct drm_device *drm = i915n_con.drm;
 	struct drm_modeset_acquire_ctx ctx;
 	struct drm_atomic_commit *state;
+	struct drm_file *closing = xchg(&i915n_con.closing, NULL);
 	int ret;
 
 	if (!READ_ONCE(i915n_con.active) || !i915n_con_text_mode())
@@ -361,8 +390,8 @@ retry:
 		 * to do while a client is master (X in front of its VT) or the
 		 * console is in KD_GRAPHICS, or when the console is shown.
 		 */
-		if (!i915n_con_text_mode() || con_master_present(drm) ||
-		    con_shown())
+		if (!i915n_con_text_mode() ||
+		    con_master_present(drm, closing) || con_shown())
 			ret = 0;
 		else
 			ret = con_commit(state);
