@@ -206,17 +206,24 @@ pub fn caps_view(
 #[derive(Debug, Default)]
 pub struct Registration {
     registered: bool,
+    attempted: bool,
 }
 
 impl Registration {
     /// Not registered.
     pub const fn new() -> Registration {
-        Registration { registered: false }
+        Registration { registered: false, attempted: false }
     }
 
     /// Whether `unregister_dev` is owed.
     pub fn is_registered(&self) -> bool {
         self.registered
+    }
+
+    /// Whether [`Registration::start`] ran the hooks (successfully or
+    /// not): a start refused before them is not counted as the call.
+    pub fn attempted(&self) -> bool {
+        self.attempted
     }
 
     /// The hooks of `drm_dev_illumos_lkms_register()` on a registered
@@ -227,6 +234,7 @@ impl Registration {
         if self.registered {
             return Err(Errno::EBUSY);
         }
+        self.attempted = true;
         let m = h.mode_config(ctx);
         h.register_dev(ctx)?;
         self.registered = true;
@@ -550,7 +558,9 @@ mod tests {
         let ctx = ctx();
         let h = Mock::default();
         let mut reg = Registration::new();
+        assert!(!reg.attempted());
         let m = reg.start(&h, &ctx);
+        assert!(reg.attempted());
         assert_eq!(m.map(|m| (m.cursor_width, m.async_page_flip)), Ok((256, true)));
         assert!(reg.is_registered());
         assert_eq!(h.log(), ["mode_config", "register_dev"]);
@@ -572,7 +582,7 @@ mod tests {
         let mut reg = Registration::new();
         assert_eq!(reg.start(&h, &ctx), Err(Errno::ENODEV));
         assert_eq!(h.log(), ["mode_config", "register_dev"]);
-        assert!(!reg.is_registered());
+        assert!(!reg.is_registered() && reg.attempted(), "a failed register_dev counts");
         reg.unregister(&h, &ctx);
         assert!(h.log().is_empty(), "no unregister_dev without register_dev");
     }

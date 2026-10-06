@@ -124,8 +124,12 @@ fn perm(flags: u32) -> Perm {
 }
 
 /// The core's features of a driver table, with the `DRIVER_*` flags
-/// `driver_features` (the table's, or a device's at registration).
+/// `driver_features` (the table's, or a device's at registration), masked
+/// with the table's own: a feature counts only if both have it (Linux's
+/// `drm_core_check_feature()`, so a device cannot add one its driver
+/// lacks).
 pub(crate) fn features(t: &f::drm_driver, driver_features: u32) -> Features {
+    let driver_features = driver_features & t.driver_features;
     let mut out = Features::NONE;
     let map = [
         (f::DRIVER_GEM, Features::GEM),

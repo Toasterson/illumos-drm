@@ -810,9 +810,7 @@ mod tests {
     /// FileFlags::store writes Linux's booleans in place and nothing else.
     #[test]
     fn file_flags_store_into_drm_file() {
-        let mut fp: drm_facade_sys::drm_file = Default::default();
-        fp.pid = 77;
-        fp.client_id = 0x1234;
+        let mut fp = drm_facade_sys::drm_file { pid: 77, client_id: 0x1234, ..Default::default() };
         let f = FileFlags {
             caps: ClientCaps {
                 stereo_3d: true,
