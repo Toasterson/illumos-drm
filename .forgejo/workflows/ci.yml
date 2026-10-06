@@ -95,6 +95,16 @@ jobs:
           core_symbols target/$m > target/$m.core &&
           echo "$m: $(wc -l < target/$m.core) stateful core symbols" && head target/$m.core &&
           test ! -s target/$m.core || exit 1; done
+      # The system headers the C builds use (target/sysinc): /usr/include,
+      # with OpenIndiana's libdrm uAPI headers (developer/header-drm) from
+      # gfx-drm at the commit OpenIndiana ships (MIT) when the runner image
+      # lacks them.
+      - run: >
+          mkdir -p target/sysinc && for f in /usr/include/*; do ln -sfn "$f" target/sysinc/; done &&
+          if [ ! -f /usr/include/drm/drm.h ]; then rm -f target/sysinc/drm && mkdir target/sysinc/drm &&
+          for h in drm.h drm_mode.h; do curl -sSf -o target/sysinc/drm/$h
+          https://raw.githubusercontent.com/OpenIndiana/gfx-drm/d109414c4f/usr/src/uts/common/drm/$h || exit 1; done; fi &&
+          ls -l target/sysinc/drm/drm.h
       # cdrmnull, the C driver: gcc with the gate's kernel flags, linked
       # with -N misc/drm_core -z defs against the gate's ddi.mapfile (of the
       # gate commit ddi-sys is pinned to), the facade's mapfile and its
@@ -102,14 +112,14 @@ jobs:
       - run: >
           curl -sSf -o target/ddi.mapfile
           https://raw.githubusercontent.com/illumos/illumos-gate/cda5b9a49f77a86a151a20cdde0e948a49b37160/usr/src/uts/common/mapfiles/ddi.mapfile &&
-          DDI_MAPFILE=target/ddi.mapfile OUT=target/cdrmnull drivers/cdrmnull/build.sh &&
+          SYSINC=$PWD/target/sysinc DDI_MAPFILE=target/ddi.mapfile OUT=target/cdrmnull drivers/cdrmnull/build.sh &&
           elfdump -d target/cdrmnull/cdrmnull | grep SUNW_KMOD
       # misc/linuxkpi, the Linux compatibility layer (linuxkpi/), and its
       # test driver linuxkpi_selftest: gcc with the gate's kernel flags and
       # the Linux dialect (linuxkpi/kflags.sh), -z defs against the gate's
       # ddi.mapfile, the facade's mapfile and the layer's private.d.
       - run: >
-          DDI_MAPFILE=target/ddi.mapfile OUT=target/linuxkpi linuxkpi/build.sh all &&
+          SYSINC=$PWD/target/sysinc DDI_MAPFILE=target/ddi.mapfile OUT=target/linuxkpi linuxkpi/build.sh all &&
           elfdump -d target/linuxkpi/linuxkpi | grep NEEDED &&
           elfdump -d target/linuxkpi/linuxkpi_selftest | grep NEEDED
       # misc/drm_helpers, the carried Linux helpers (carried/), and its test
@@ -119,7 +129,7 @@ jobs:
       # drm_helpers_scope.mapfile's, and the test driver links with
       # -N misc/drm_helpers against drm_helpers.mapfile only.
       - run: >
-          DDI_MAPFILE=target/ddi.mapfile OUT=target/carried
+          SYSINC=$PWD/target/sysinc DDI_MAPFILE=target/ddi.mapfile OUT=target/carried
           LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile carried/build.sh &&
           elfdump -d target/carried/drm_helpers | grep NEEDED &&
           elfdump -d target/carried/drm_helpers_test | grep NEEDED
@@ -129,7 +139,7 @@ jobs:
       # linked with -z defs against the facade, layer, helpers and DDI.
       - run: >
           drivers/i915/fetch-and-patch.sh target/linux &&
-          LINUX=target/linux DDI_MAPFILE=target/ddi.mapfile
+          SYSINC=$PWD/target/sysinc LINUX=target/linux DDI_MAPFILE=target/ddi.mapfile
           LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile OUT=target/i915 JOBS=4
           drivers/i915/build.sh all &&
           elfdump -d target/i915/i915n | grep NEEDED
@@ -140,7 +150,7 @@ jobs:
       # -z defs against the core, layer, helpers and DDI, and the module's
       # global symbols exactly the exports.
       - run: >
-          LINUX=target/linux DDI_MAPFILE=target/ddi.mapfile
+          SYSINC=$PWD/target/sysinc LINUX=target/linux DDI_MAPFILE=target/ddi.mapfile
           LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile OUT=target/drm_kms JOBS=4
           carried/drm_kms/build.sh all &&
           elfdump -d target/drm_kms/drm_kms | grep NEEDED
