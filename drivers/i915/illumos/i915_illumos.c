@@ -5,8 +5,9 @@
  * The illumos module of Linux's i915 driver: the kernel module "i915n"
  * (the name G7 reserved for this stack's Intel driver; its package ships
  * the driver without PCI aliases and `drmadm select new` moves the Intel
- * GPU aliases to it), with display on Ivy Bridge (build.sh's default) or
- * headless (I915_DISPLAY=0).
+ * GPU aliases to it), with display on Ivy Bridge (the display build:
+ * compiled with -DI915N_DISPLAY, build.sh's default I915_DISPLAY=1) or
+ * headless (build.sh I915_DISPLAY=0: no I915N_DISPLAY).
  *
  * _init checks the DRM facade and the LinuxKPI layer it was built
  * against, runs i915's module_init (which registers its struct pci_driver

@@ -12,20 +12,19 @@ it, and returns a kmalloc() copy as intel_opregion_get_vbt() does.
 
 --- a/drivers/gpu/drm/i915/display/intel_bios.c
 +++ b/drivers/gpu/drm/i915/display/intel_bios.c
-@@ -3222,6 +3222,12 @@
+@@ -3222,6 +3222,11 @@
  	intel_rom_free(rom);
  	return NULL;
  }
 +
 +#ifdef __illumos__
 +/* drivers/i915/illumos/i915_illumos_vbt.c */
-+extern const void *i915_illumos_opregion_vbt(struct intel_display *display,
-+					     size_t *sizep);
++#include "i915_illumos_vbt.h"
 +#endif
  
  static const struct vbt_header *intel_bios_get_vbt(struct intel_display *display,
  						   size_t *sizep)
-@@ -3232,6 +3238,12 @@
+@@ -3232,6 +3237,12 @@
  
  	if (!vbt)
  		vbt = intel_opregion_get_vbt(display, sizep);
