@@ -365,6 +365,7 @@ impl LkmsEvents {
             return Delivery::Dropped;
         };
         if !(HEADER..=EVENT_SPACE).contains(&len) || header_len != Some(len as u32) {
+            // Refused: the reservation is kept (see below).
             self.stats.refused += 1;
             return Delivery::Refused;
         }
@@ -377,6 +378,10 @@ impl LkmsEvents {
             return Delivery::Dropped;
         }
         if len > f.reserved {
+            // A refused event changes nothing: what the file reserved
+            // stays charged until the KMS code gives it back or the file
+            // closes (a malformed delivery is the caller's bug, and the
+            // bytes it reserved are not known to be this event's).
             self.stats.refused += 1;
             return Delivery::Refused;
         }
@@ -577,6 +582,116 @@ mod tests {
             assert_eq!(read(&mut e, 5, usize::MAX), sent, "round {round}");
         }
         assert_eq!(e.stats().charged, 0);
+    }
+
+    /// The bytes of a held event, copied from its pieces.
+    fn held(r: &EventRef) -> Vec<u8> {
+        let mut b = Vec::new();
+        for (p, n) in r.pieces {
+            // SAFETY: the pieces are valid while the read turn is held.
+            b.extend_from_slice(unsafe { core::slice::from_raw_parts(p, n) });
+        }
+        b
+    }
+
+    #[test]
+    fn held_event_survives_a_full_ring() {
+        // The ring's invariant: while a reader holds the first event,
+        // deliveries write only the free part. Fill the whole budget
+        // behind a held event that itself wraps around the ring's end.
+        let mut e = opened(&[8]);
+        // Move the head to 4016 (a ring that empties starts over at 0, so
+        // one event stays queued meanwhile), then queue a 120-byte event
+        // that starts 80 bytes before the end.
+        let big = EVENT_SPACE - 96;
+        e.reserve(8, big).unwrap();
+        e.reserve(8, 16).unwrap();
+        assert_eq!(e.deliver(8, &ev(1, big, 0x11)), Delivery::Queued);
+        assert_eq!(e.deliver(8, &ev(2, 16, 0x22)), Delivery::Queued);
+        assert_eq!(read(&mut e, 8, big), [ev(1, big, 0x11)]);
+        let first = ev(3, 120, 0x33);
+        e.reserve(8, 120).unwrap();
+        assert_eq!(e.deliver(8, &first), Delivery::Queued);
+        assert_eq!(read(&mut e, 8, 16), [ev(2, 16, 0x22)]);
+        let ReadStep::Event(r) = e.begin_read(8, 4096) else { panic!("no event") };
+        assert_eq!((r.pieces[0].1, r.pieces[1].1), (80, 40), "the held event wraps");
+        assert_eq!(held(&r), first);
+        // Reserve and deliver the rest of the budget in odd sizes; the
+        // deliveries wrap around the end as well.
+        let mut sent = Vec::new();
+        let mut left = EVENT_SPACE - 120;
+        let mut i = 0usize;
+        while left > 0 {
+            let len = (HEADER + (i * 53) % 400).min(left);
+            let len = if left - len < HEADER { left } else { len };
+            e.reserve(8, len).unwrap();
+            let x = ev(100 + i as u32, len, i as u8);
+            assert_eq!(e.deliver(8, &x), Delivery::Queued);
+            sent.push(x);
+            left -= len;
+            i += 1;
+        }
+        assert_eq!(e.reserve(8, 1), Err(Errno::ENOMEM), "the budget is full");
+        assert_eq!(e.stats().charged, EVENT_SPACE);
+        // The held bytes are unchanged before end_read.
+        assert_eq!(held(&r), first);
+        e.end_read(8, Some(r.len));
+        assert_eq!(read(&mut e, 8, usize::MAX), sent);
+        assert_eq!(e.stats().charged, 0);
+    }
+
+    #[test]
+    fn held_event_survives_concurrent_deliveries() {
+        // A reader copies each held event without the lock while another
+        // thread reserves and delivers as fast as the budget allows (the
+        // kernel's lkms::dev: the copy-out runs outside the event lock).
+        use std::sync::{Arc, Mutex};
+        const EVENTS: u32 = 20_000;
+        let e = Arc::new(Mutex::new(opened(&[9])));
+        let writer = {
+            let e = Arc::clone(&e);
+            std::thread::spawn(move || {
+                let mut seq = 0u32;
+                while seq < EVENTS {
+                    let len = HEADER + (seq as usize * 37) % 300;
+                    let mut g = e.lock().unwrap();
+                    if g.reserve(9, len).is_err() {
+                        drop(g);
+                        std::thread::yield_now();
+                        continue;
+                    }
+                    assert_eq!(g.deliver(9, &ev(seq, len, seq as u8)), Delivery::Queued);
+                    seq += 1;
+                }
+            })
+        };
+        let mut want = 0u32;
+        while want < EVENTS {
+            let step = e.lock().unwrap().begin_read(9, usize::MAX);
+            let ReadStep::Event(r) = step else {
+                std::thread::yield_now();
+                continue;
+            };
+            // Copy slowly, piece by piece, so that deliveries interleave.
+            let mut b = Vec::with_capacity(r.len);
+            for (p, n) in r.pieces {
+                for k in 0..n {
+                    // SAFETY: the pieces are valid while the turn is held.
+                    b.push(unsafe { p.add(k).read_volatile() });
+                    if k % 64 == 0 {
+                        std::thread::yield_now();
+                    }
+                }
+            }
+            let len = HEADER + (want as usize * 37) % 300;
+            assert_eq!(b, ev(want, len, want as u8), "event {want}");
+            e.lock().unwrap().end_read(9, Some(r.len));
+            want += 1;
+        }
+        writer.join().unwrap();
+        let g = e.lock().unwrap();
+        assert_eq!(g.stats().charged, 0);
+        assert_eq!(g.stats().delivered, u64::from(EVENTS));
     }
 
     #[test]
