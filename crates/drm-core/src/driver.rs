@@ -53,6 +53,10 @@ impl Features {
     pub const fn union(self, other: Features) -> Features {
         Features(self.0 | other.0)
     }
+    /// The features without those of `other`.
+    pub const fn without(self, other: Features) -> Features {
+        Features(self.0 & !other.0)
+    }
     /// Reports whether every feature in `other` is present.
     pub const fn contains(self, other: Features) -> bool {
         self.0 & other.0 == other.0
@@ -80,13 +84,23 @@ pub struct ModeConfig {
     /// (`DRM_CAP_ADDFB2_MODIFIERS`); the planes' `IN_FORMATS` blobs list
     /// them.
     pub fb_modifiers: bool,
+    /// Whether page flips may be asynchronous (`DRM_CAP_ASYNC_PAGE_FLIP`,
+    /// Linux's `mode_config.async_page_flip`). Facade 2.0, for Linux-KMS
+    /// devices; the core's own mode setting (R3) has none.
+    pub async_page_flip: bool,
 }
 
 impl ModeConfig {
     /// The defaults: 64 by 64 cursors, no preferred depth, no shadow, no
-    /// modifiers.
-    pub const DEFAULT: ModeConfig =
-        ModeConfig { cursor_width: 0, cursor_height: 0, preferred_depth: 0, prefer_shadow: false, fb_modifiers: false };
+    /// modifiers, no asynchronous flips.
+    pub const DEFAULT: ModeConfig = ModeConfig {
+        cursor_width: 0,
+        cursor_height: 0,
+        preferred_depth: 0,
+        prefer_shadow: false,
+        fb_modifiers: false,
+        async_page_flip: false,
+    };
 }
 
 impl Default for ModeConfig {
@@ -324,6 +338,50 @@ pub trait Driver: Send + Sync + Sized + 'static {
     fn kms(&self) -> Option<&dyn crate::kms::KmsDriver<crate::gem::GemRef<Self::Object>>> {
         None
     }
+
+    /// Facade 2.0: the hooks of the driver's Linux KMS code
+    /// ([`crate::lkms`]), for a device whose mode setting that code does.
+    /// The core asks when the device attaches; if the answer is `Some`,
+    /// its files get event queues that `read(2)` and `chpoll(9E)` serve,
+    /// and once [`crate::Device::lkms_start`] has started mode setting,
+    /// the mode-setting ioctls of files opened afterwards go to
+    /// [`Driver::lkms_ioctl`] and their opens and closes run the hooks.
+    /// Never together with [`Driver::kms`]. The default, `None`, is every
+    /// other device.
+    #[cfg(not(test))]
+    fn lkms(&self) -> Option<&dyn crate::lkms::LkmsHooks> {
+        None
+    }
+
+    /// Facade 2.0: a mode-setting command of a Linux-KMS device, after the
+    /// core's permission check: the KMS code's handler of command number
+    /// `nr` with `data`, the kernel copy of the argument. `cmds` are the
+    /// table's and the caller's command values and `arg` the ioctl, for
+    /// the facade's copy functions during the handler. Returns 0 or a
+    /// negative errno (`-ENOTTY`, the default, for an unknown command).
+    #[cfg(not(test))]
+    #[allow(clippy::too_many_arguments, reason = "the parts of an ioctl")]
+    fn lkms_ioctl(
+        &self,
+        _dev: &crate::Device<Self>,
+        _file: crate::minor::CloneId,
+        _cmds: (u32, u32),
+        _nr: u32,
+        _data: &mut [u8],
+        _arg: &ddi::IoctlArg<'_>,
+        _ctx: &ddi::Sleepable,
+    ) -> i32 {
+        -Errno::ENOTTY.get()
+    }
+
+    /// Facade 2.0: the client capabilities and master status of open file
+    /// `file` changed (or the file was just opened): the driver mirrors
+    /// them into its own structure (`misc/drm_core`: the facade's
+    /// `drm_file`, [`crate::state::FileFlags::store`]). Called with the
+    /// device's state lock held: it must not block or call back into the
+    /// core.
+    #[cfg(not(test))]
+    fn file_flags(&self, _file: crate::minor::CloneId, _flags: &crate::state::FileFlags) {}
 
     /// The highest interrupt priority at which the driver signals fences
     /// (a soft interrupt's, say), with which the core creates every lock

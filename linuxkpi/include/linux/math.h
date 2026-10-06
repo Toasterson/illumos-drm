@@ -39,6 +39,21 @@ reciprocal_scale(u32 val, u32 ep_ro)
 	return ((u32)(((u64)val * ep_ro) >> 32));
 }
 
+/* Linux's int_pow(): base to the power exp (exponentiation by squaring). */
+static inline u64
+int_pow(u64 base, unsigned int exp)
+{
+	u64 result = 1;
+
+	while (exp != 0) {
+		if (exp & 1)
+			result *= base;
+		exp >>= 1;
+		base *= base;
+	}
+	return (result);
+}
+
 static inline unsigned long
 int_sqrt(unsigned long x)
 {

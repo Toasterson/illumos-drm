@@ -18,6 +18,23 @@
 #include <linux/compiler.h>
 #include <linux/container_of.h>
 #include <drm/drm_facade_types.h>
+#include <linux/const.h>
+
+/* Tags Linux headers name in prototypes without declaring them. */
+struct dentry;
+struct seq_file;
+
+#define	U8_C(x)		(x)
+#define	U16_C(x)	(x)
+#define	U32_C(x)	(x ## U)
+#define	U64_C(x)	(x ## ULL)
+#define	S64_C(x)	(x ## LL)
+
+/* The uAPI's mask macros (include/uapi/linux/bits.h), used by uAPI headers. */
+#define	__GENMASK(h, l) \
+	(((~0UL) - (1UL << (l)) + 1) & (~0UL >> (64 - 1 - (h))))
+#define	__GENMASK_ULL(h, l) \
+	(((~0ULL) - (1ULL << (l)) + 1) & (~0ULL >> (64 - 1 - (h))))
 
 typedef uint8_t		u8;
 typedef uint16_t	u16;

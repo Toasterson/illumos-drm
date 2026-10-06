@@ -26,8 +26,9 @@
 #      generic VGA console driver;
 #   3. runs bootadm update-archive, since both files are read from the
 #      boot archive.
-# It refuses while any module of either stack is loaded, and while another
-# drmadm holds its lock.
+# Loaded modules of either stack stay until the next boot (a console
+# driver cannot be unloaded); it refuses while another drmadm holds its
+# lock.
 #
 # "drmadm perms" keeps the device nodes of the new stack's drivers at their
 # /etc/minor_perm permissions (0666 root sys as packaged). ttymon(8) runs
@@ -75,7 +76,8 @@ LEGACY_MODULES="misc/drm drv/i915 drv/radeon"
 NEW_MODULES="misc/drm_core drv/i915n drv/virtio_gpu drv/cdrmnull drv/rdrmnull"
 LEGACY_PKGS="driver/graphics/drm driver/graphics/agpgart"
 NEW_PKGS="driver/graphics/drm-core driver/graphics/virtio-gpu driver/graphics/cdrmnull"
-NEW_PKGS="$NEW_PKGS driver/graphics/linuxkpi driver/graphics/drm-helpers driver/graphics/i915n"
+NEW_PKGS="$NEW_PKGS driver/graphics/linuxkpi driver/graphics/drm-helpers driver/graphics/drm-kms"
+NEW_PKGS="$NEW_PKGS driver/graphics/i915n"
 SHARED_PKGS="driver/graphics/drm-devlink driver/graphics/drmadm x11/library/libdrm"
 
 LOGINDEVPERM=etc/logindevperm
@@ -828,16 +830,18 @@ do_select() {
 	[ -f "$(under etc/driver_aliases)" ] || die "$(under etc/driver_aliases) does not exist"
 
 	if live; then
+		# A selection only edits files read at the next boot
+		# (update_drv -n attaches and detaches nothing; the core of the
+		# other stack is excluded from the next boot on), so loaded
+		# modules of either stack stay as they are until then. A display
+		# driver that is the system console (i915n with display, the
+		# legacy i915 with its gfx console) cannot be unloaded anyway.
 		lm=$(loaded_modules)
 		if [ -n "$lm" ]; then
-			echo "$PROG: DRM modules are loaded; select needs both stacks unloaded:" >&2
+			echo "$PROG: loaded DRM modules stay until the next boot:" >&2
 			echo "$lm" | while read -r id name; do
 				echo "  $(stack_of "$name") $name (id $id)" >&2
 			done
-			echo "Stop what uses them (the display manager, Xorg), unload the drivers" >&2
-			echo "and then the core with modunload -i ID, or select from another boot" >&2
-			echo "environment with -R (see drmadm(8))." >&2
-			exit 1
 		fi
 	fi
 

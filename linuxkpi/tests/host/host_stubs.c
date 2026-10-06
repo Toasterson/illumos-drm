@@ -214,6 +214,75 @@ mutex_owned(const kmutex_t *m)
 	return (m->hm_held && pthread_equal(m->hm_owner, pthread_self()));
 }
 
+/* Condition variables over pthreads, keeping the mutex's owner record. */
+__thread int lkpi_host_cv_signal_pending;
+
+static void
+host_cv_lazy(kcondvar_t *cv)
+{
+	if (__atomic_load_n(&cv->hc_init, __ATOMIC_ACQUIRE))
+		return;
+	pthread_mutex_lock(&lkpi_host_init_lock);
+	if (!cv->hc_init) {
+		pthread_cond_init(&cv->hc_cv, NULL);
+		__atomic_store_n(&cv->hc_init, 1, __ATOMIC_RELEASE);
+	}
+	pthread_mutex_unlock(&lkpi_host_init_lock);
+}
+
+void
+cv_init(kcondvar_t *cv, char *name, kcv_type_t type, void *arg)
+{
+	memset(cv, 0, sizeof (*cv));
+	host_cv_lazy(cv);
+}
+
+void
+cv_destroy(kcondvar_t *cv)
+{
+	if (cv->hc_init)
+		pthread_cond_destroy(&cv->hc_cv);
+	cv->hc_init = 0;
+}
+
+void
+cv_wait(kcondvar_t *cv, kmutex_t *m)
+{
+	if (!mutex_owned(m))
+		lkpi_host_assfail("cv_wait without the mutex", __FILE__,
+		    __LINE__);
+	host_cv_lazy(cv);
+	m->hm_held = 0;
+	pthread_cond_wait(&cv->hc_cv, &m->hm_mutex);
+	m->hm_owner = pthread_self();
+	m->hm_held = 1;
+}
+
+int
+cv_wait_sig(kcondvar_t *cv, kmutex_t *m)
+{
+	if (lkpi_host_cv_signal_pending) {
+		lkpi_host_cv_signal_pending = 0;
+		return (0);
+	}
+	cv_wait(cv, m);
+	return (1);
+}
+
+void
+cv_signal(kcondvar_t *cv)
+{
+	host_cv_lazy(cv);
+	pthread_cond_signal(&cv->hc_cv);
+}
+
+void
+cv_broadcast(kcondvar_t *cv)
+{
+	host_cv_lazy(cv);
+	pthread_cond_broadcast(&cv->hc_cv);
+}
+
 static void
 host_rw_lazy(krwlock_t *l)
 {

@@ -356,7 +356,7 @@ lkpi_hrtimer_fn(struct timer_list *tl)
 		if (!lkpi_tm_pending(&t->timer)) {
 			t->active = 1;
 			(void) lkpi_tm_arm_locked(&t->timer,
-			    lkpi_hrtimer_jiffies(t->clock, t->expires));
+			    lkpi_hrtimer_jiffies(t->clock, t->node.expires));
 		}
 		mutex_exit(&lkpi_tm_lock);
 	}
@@ -367,7 +367,7 @@ hrtimer_setup(struct hrtimer *t, enum hrtimer_restart (*fn)(struct hrtimer *),
     int clock, enum hrtimer_mode mode)
 {
 	lkpi_timer_setup(&t->timer, lkpi_hrtimer_fn, 0);
-	t->expires = 0;
+	t->node.expires = 0;
 	t->function = fn;
 	t->clock = clock;
 	t->active = 0;
@@ -380,7 +380,7 @@ hrtimer_start_range_ns(struct hrtimer *t, ktime_t tim, u64 delta_ns,
 	mutex_enter(&lkpi_tm_lock);
 	if (mode & HRTIMER_MODE_REL)
 		tim = ktime_add(lkpi_hrtimer_now(t->clock), tim);
-	t->expires = tim;
+	t->node.expires = tim;
 	t->active = 1;
 	(void) lkpi_tm_arm_locked(&t->timer,
 	    lkpi_hrtimer_jiffies(t->clock, tim));
@@ -488,7 +488,7 @@ schedule_hrtimeout(ktime_t *expires, const enum hrtimer_mode mode)
 u64
 hrtimer_forward(struct hrtimer *t, ktime_t now, ktime_t interval)
 {
-	s64 delta = now - t->expires;
+	s64 delta = now - t->node.expires;
 	u64 n;
 
 	if (delta < 0)
@@ -496,7 +496,7 @@ hrtimer_forward(struct hrtimer *t, ktime_t now, ktime_t interval)
 	if (interval <= 0)
 		interval = 1;
 	n = (u64)(delta / interval) + 1;
-	t->expires += (s64)n * interval;
+	t->node.expires += (s64)n * interval;
 	return (n);
 }
 

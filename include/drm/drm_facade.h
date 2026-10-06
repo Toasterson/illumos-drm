@@ -31,6 +31,7 @@
 #include <drm/drm_managed.h>
 #include <drm/drm_illumos.h>
 #include <drm/drm_rkms.h>
+#include <drm/drm_lkms.h>
 #include <sys/cmn_err.h>
 #include <sys/errno.h>
 

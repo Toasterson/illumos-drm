@@ -907,6 +907,12 @@ impl<O: GemObject> Kms<O> {
                 self.settle(&mut core);
                 r
             }
+            // CLOSEFB (Linux 6.8) leaves the planes that show the
+            // framebuffer on; R3's framebuffers have no such state apart
+            // from RMFB's, so the core does not offer it: ENOTTY, as a
+            // kernel before 6.8 answers (libdrm users fall back to RMFB).
+            // The Linux KMS code implements it (facade 2.0).
+            KmsOp::CloseFb => Err(Errno::ENOTTY),
             KmsOp::PageFlip => {
                 let a = UserArg::<uapi::drm_mode_crtc_page_flip>::read(arg)?;
                 let v = *a.get();

@@ -20,6 +20,7 @@
 #include <linux/slab.h>
 
 #include "lkpi_internal.h"
+#include "lkpi_ww_mutex.h"
 
 static void lkpi_resv_snaps_release(struct dma_resv *obj);
 
@@ -34,13 +35,10 @@ ww_acquire_init(struct ww_acquire_ctx *ctx, struct ww_class *ww_class)
 	ctx->ww_class = ww_class;
 	ctx->is_wait_die = 1;
 	/*
-	 * Every wound/wait lock a driver can take is a reservation lock of
-	 * the core, whose stamps come from the core's class.
+	 * Reservation locks are the core's and stand-alone locks the
+	 * layer's (below); both use the core's stamps, so one transaction
+	 * may take either kind and the die rule holds across them.
 	 */
-	WARN_ONCE(ww_class != &reservation_ww_class,
-	    "ww_acquire_init: class %s is not supported; using the "
-	    "reservation class", ww_class != NULL ? ww_class->acquire_name :
-	    "(null)");
 	ctx->stamp = drm_illumos_ww_stamp();
 }
 
@@ -128,77 +126,66 @@ lkpi_dma_resv_held(struct dma_resv *obj)
 	return (drm_illumos_resv_is_locked(obj));
 }
 
-/* --- ww_mutex: only the locks of reservation objects ------------------ */
+/* --- ww_mutex ------------------------------------------------------------ */
 
 /*
- * A stand-alone ww_mutex (ww_mutex_init()) has no core lock behind it: it
- * is marked with this class and every operation on it is refused, rather
- * than taken for the lock of a reservation that does not exist.
+ * Two kinds of wound/wait mutex reach these functions. The lock embedded
+ * in a reservation object (dma_resv.lock) is the core's: it is taken
+ * through the core's transactions above. Every other ww_mutex is
+ * stand-alone (marked by ww_mutex_init(): DRM's mode-setting locks) and
+ * implemented in src/lkpi_ww_mutex.c.
  */
-static struct ww_class lkpi_ww_standalone =
-    __WW_CLASS_INITIALIZER(lkpi_ww_standalone, 1);
 
 static struct dma_resv *
-ww_resv(struct ww_mutex *lock, const char *who)
+ww_resv(struct ww_mutex *lock)
 {
-	if (lock->ww_class == &lkpi_ww_standalone) {
-		WARN_ONCE(1, "%s: a stand-alone ww_mutex is not supported", who);
-		return (NULL);
-	}
 	return (container_of(lock, struct dma_resv, lock));
-}
-
-void
-lkpi_ww_mutex_init(struct ww_mutex *lock, struct ww_class *c)
-{
-	WARN(1, "ww_mutex_init: only reservation locks are supported");
-	memset(lock, 0, sizeof (*lock));
-	lock->ww_class = &lkpi_ww_standalone;
 }
 
 int
 ww_mutex_lock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
 {
-	struct dma_resv *obj = ww_resv(lock, "ww_mutex_lock");
-
-	return (obj == NULL ? -EINVAL : resv_lock(obj, ctx, false, false));
+	if (lkpi_ww_standalone(lock))
+		return (lkpi_ww_sa_lock(lock, ctx, false, false));
+	return (resv_lock(ww_resv(lock), ctx, false, false));
 }
 
 int
 ww_mutex_lock_interruptible(struct ww_mutex *lock,
     struct ww_acquire_ctx *ctx)
 {
-	struct dma_resv *obj = ww_resv(lock, "ww_mutex_lock_interruptible");
-
-	return (obj == NULL ? -EINVAL : resv_lock(obj, ctx, false, true));
+	if (lkpi_ww_standalone(lock))
+		return (lkpi_ww_sa_lock(lock, ctx, false, true));
+	return (resv_lock(ww_resv(lock), ctx, false, true));
 }
 
 void
 ww_mutex_lock_slow(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
 {
-	struct dma_resv *obj = ww_resv(lock, "ww_mutex_lock_slow");
-
-	if (obj != NULL)
-		(void) resv_lock(obj, ctx, ctx != NULL, false);
+	if (lkpi_ww_standalone(lock)) {
+		(void) lkpi_ww_sa_lock(lock, ctx, true, false);
+		return;
+	}
+	(void) resv_lock(ww_resv(lock), ctx, ctx != NULL, false);
 }
 
 int
 ww_mutex_lock_slow_interruptible(struct ww_mutex *lock,
     struct ww_acquire_ctx *ctx)
 {
-	struct dma_resv *obj = ww_resv(lock,
-	    "ww_mutex_lock_slow_interruptible");
-
-	return (obj == NULL ? -EINVAL : resv_lock(obj, ctx, ctx != NULL, true));
+	if (lkpi_ww_standalone(lock))
+		return (lkpi_ww_sa_lock(lock, ctx, true, true));
+	return (resv_lock(ww_resv(lock), ctx, ctx != NULL, true));
 }
 
 int
 ww_mutex_trylock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
 {
-	struct dma_resv *obj = ww_resv(lock, "ww_mutex_trylock");
+	struct dma_resv *obj;
 
-	if (obj == NULL)
-		return (0);
+	if (lkpi_ww_standalone(lock))
+		return (lkpi_ww_sa_trylock(lock, ctx));
+	obj = ww_resv(lock);
 	if (ctx == NULL) {
 		if (!dma_resv_trylock(obj))
 			return (0);
@@ -215,18 +202,19 @@ ww_mutex_trylock(struct ww_mutex *lock, struct ww_acquire_ctx *ctx)
 void
 ww_mutex_unlock(struct ww_mutex *lock)
 {
-	struct dma_resv *obj = ww_resv(lock, "ww_mutex_unlock");
-
-	if (obj != NULL)
-		lkpi_dma_resv_unlock(obj);
+	if (lkpi_ww_standalone(lock)) {
+		lkpi_ww_sa_unlock(lock);
+		return;
+	}
+	lkpi_dma_resv_unlock(ww_resv(lock));
 }
 
 bool
 ww_mutex_is_locked(struct ww_mutex *lock)
 {
-	struct dma_resv *obj = ww_resv(lock, "ww_mutex_is_locked");
-
-	return (obj != NULL && drm_illumos_resv_is_locked(obj));
+	if (lkpi_ww_standalone(lock))
+		return (lkpi_ww_sa_is_locked(lock));
+	return (drm_illumos_resv_is_locked(ww_resv(lock)));
 }
 
 /* --- fence snapshots ------------------------------------------------- */

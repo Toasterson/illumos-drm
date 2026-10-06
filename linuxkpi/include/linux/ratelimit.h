@@ -15,4 +15,6 @@ ratelimit_state_init(struct ratelimit_state *rs, int interval, int burst)
 #define	ratelimit_state_get_miss(rs)	((void)(rs), 0)
 #define	ratelimit_state_reset_miss(rs)	((void)(rs), 0)
 #define	RATELIMIT_MSG_ON_RELEASE	1
+/* WARN() under the rate limit, i.e. every time (see above); the condition. */
+#define	WARN_RATELIMIT(cond, fmt, ...)	WARN((cond), fmt, ##__VA_ARGS__)
 #endif

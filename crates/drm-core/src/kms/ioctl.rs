@@ -54,6 +54,7 @@ pub enum KmsOp {
     CreatePropBlob,
     DestroyPropBlob,
     GetFb2,
+    CloseFb,
 }
 
 const ANY: Perm = Perm { auth: false, master: false, root_only: false, render_allow: false };
@@ -109,6 +110,8 @@ pub const TABLE: &[KmsEntry] = &[
     e(uapi::DRM_IOCTL_MODE_CREATEPROPBLOB, KmsOp::CreatePropBlob, ANY),
     e(uapi::DRM_IOCTL_MODE_DESTROYPROPBLOB, KmsOp::DestroyPropBlob, ANY),
     e(uapi::DRM_IOCTL_MODE_GETFB2, KmsOp::GetFb2, ANY),
+    // Linux 6.8; implemented by the Linux KMS code only (R3: ENOTTY).
+    e(uapi::DRM_IOCTL_MODE_CLOSEFB, KmsOp::CloseFb, ANY),
 ];
 
 /// Finds a mode-setting ioctl by its group, number and direction, whatever
@@ -152,6 +155,7 @@ mod tests {
             KmsOp::GetFb | KmsOp::AddFb => size_of::<uapi::drm_mode_fb_cmd>(),
             KmsOp::GetFb2 | KmsOp::AddFb2 => size_of::<uapi::drm_mode_fb_cmd2>(),
             KmsOp::RmFb => size_of::<u32>(),
+            KmsOp::CloseFb => size_of::<uapi::drm_mode_closefb>(),
             KmsOp::PageFlip => size_of::<uapi::drm_mode_crtc_page_flip>(),
             KmsOp::DirtyFb => size_of::<uapi::drm_mode_fb_dirty_cmd>(),
             KmsOp::GetPlaneResources => size_of::<uapi::drm_mode_get_plane_res>(),
@@ -210,6 +214,8 @@ mod tests {
         }
         assert_eq!(lookup(uapi::DRM_IOCTL_MODE_ATOMIC).map(|x| x.op), Some(KmsOp::Atomic));
         assert!(lookup(uapi::DRM_IOCTL_MODE_CREATE_LEASE).is_none(), "leases are not implemented");
+        assert_eq!(lookup(uapi::DRM_IOCTL_MODE_CLOSEFB).map(|x| x.op), Some(KmsOp::CloseFb));
+        assert_eq!(ioc::ioc_nr(uapi::DRM_IOCTL_MODE_CLOSEFB), 0xd0);
         assert!(is_kms_nr(ioc::drm_iowr::<[u8; 20]>(0xbc)));
         assert!(!is_kms_nr(uapi::DRM_IOCTL_VERSION));
     }

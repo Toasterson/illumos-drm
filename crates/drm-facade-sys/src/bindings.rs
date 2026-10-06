@@ -64,9 +64,11 @@ pub const __GFP_DIRECT_RECLAIM: u32 = 1024;
 pub const GFP_KERNEL: u32 = 1024;
 pub const GFP_NOWAIT: u32 = 0;
 pub const GFP_ATOMIC: u32 = 0;
-pub const DRM_FACADE_MAJOR: u32 = 1;
-pub const DRM_FACADE_MINOR: u32 = 1;
+pub const DRM_FACADE_MAJOR: u32 = 2;
+pub const DRM_FACADE_MINOR: u32 = 0;
 pub const DRM_FACADE_MAX_SIZES: u32 = 64;
+pub const DRM_FACADE_KMS_DEVICE_WORDS: u32 = 1024;
+pub const DRM_FACADE_KMS_FILE_WORDS: u32 = 32;
 pub const DRM_ILLUMOS_RESV_SIGNALED: u32 = 1;
 pub const KERN_SOH: &[u8; 2] = b"\x01\0";
 pub const KERN_EMERG: &[u8; 3] = b"\x010\0";
@@ -268,13 +270,14 @@ pub const DRM_FACADE_SZ_drm_rkms_connector_state: drm_facade_struct = 25;
 pub const DRM_FACADE_SZ_drm_rkms_fb_info: drm_facade_struct = 26;
 pub const DRM_FACADE_SZ_drm_rkms_rect: drm_facade_struct = 27;
 pub const DRM_FACADE_SZ_drm_printer: drm_facade_struct = 28;
-pub const DRM_FACADE_TAIL_drm_device: drm_facade_struct = 29;
-pub const DRM_FACADE_TAIL_drm_file: drm_facade_struct = 30;
-pub const DRM_FACADE_TAIL_drm_gem_object: drm_facade_struct = 31;
-pub const DRM_FACADE_TAIL_dma_fence: drm_facade_struct = 32;
-pub const DRM_FACADE_TAIL_dma_resv: drm_facade_struct = 33;
-pub const DRM_FACADE_TAIL_dma_buf: drm_facade_struct = 34;
-pub const DRM_FACADE_NSIZES: drm_facade_struct = 35;
+pub const DRM_FACADE_SZ_drm_illumos_lkms_funcs: drm_facade_struct = 29;
+pub const DRM_FACADE_TAIL_drm_device: drm_facade_struct = 30;
+pub const DRM_FACADE_TAIL_drm_file: drm_facade_struct = 31;
+pub const DRM_FACADE_TAIL_drm_gem_object: drm_facade_struct = 32;
+pub const DRM_FACADE_TAIL_dma_fence: drm_facade_struct = 33;
+pub const DRM_FACADE_TAIL_dma_resv: drm_facade_struct = 34;
+pub const DRM_FACADE_TAIL_dma_buf: drm_facade_struct = 35;
+pub const DRM_FACADE_NSIZES: drm_facade_struct = 36;
 pub type drm_facade_struct = core::ffi::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -374,6 +377,7 @@ pub struct drm_device {
     pub vma_offset_manager: *mut drm_vma_offset_manager,
     pub switch_power_state: switch_power_state,
     pub debugfs_root: *mut core::ffi::c_void,
+    pub __bindgen_anon_1: drm_device__bindgen_ty_2,
     pub __core: [u64; 16usize],
 }
 #[repr(C)]
@@ -402,9 +406,30 @@ impl Default for drm_device__bindgen_ty_1 {
         }
     }
 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union drm_device__bindgen_ty_2 {
+    pub __kms: [u64; 1024usize],
+}
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of drm_device"][::core::mem::size_of::<drm_device>() - 336usize];
+    ["Size of drm_device__bindgen_ty_2"][::core::mem::size_of::<drm_device__bindgen_ty_2>() - 8192usize];
+    ["Alignment of drm_device__bindgen_ty_2"][::core::mem::align_of::<drm_device__bindgen_ty_2>() - 8usize];
+    ["Offset of field: drm_device__bindgen_ty_2::__kms"]
+        [::core::mem::offset_of!(drm_device__bindgen_ty_2, __kms) - 0usize];
+};
+impl Default for drm_device__bindgen_ty_2 {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of drm_device"][::core::mem::size_of::<drm_device>() - 8528usize];
     ["Alignment of drm_device"][::core::mem::align_of::<drm_device>() - 8usize];
     ["Offset of field: drm_device::if_version"][::core::mem::offset_of!(drm_device, if_version) - 0usize];
     ["Offset of field: drm_device::ref_"][::core::mem::offset_of!(drm_device, ref_) - 4usize];
@@ -433,7 +458,7 @@ const _: () = {
     ["Offset of field: drm_device::switch_power_state"]
         [::core::mem::offset_of!(drm_device, switch_power_state) - 192usize];
     ["Offset of field: drm_device::debugfs_root"][::core::mem::offset_of!(drm_device, debugfs_root) - 200usize];
-    ["Offset of field: drm_device::__core"][::core::mem::offset_of!(drm_device, __core) - 208usize];
+    ["Offset of field: drm_device::__core"][::core::mem::offset_of!(drm_device, __core) - 8400usize];
 };
 impl Default for drm_device {
     fn default() -> Self {
@@ -524,10 +549,11 @@ pub struct drm_driver {
     pub illumos_before_detach: ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device)>,
     pub illumos_before_teardown: ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device)>,
     pub illumos_rkms: *const drm_rkms_funcs,
+    pub illumos_lkms: *const drm_illumos_lkms_funcs,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of drm_driver"][::core::mem::size_of::<drm_driver>() - 160usize];
+    ["Size of drm_driver"][::core::mem::size_of::<drm_driver>() - 168usize];
     ["Alignment of drm_driver"][::core::mem::align_of::<drm_driver>() - 8usize];
     ["Offset of field: drm_driver::open"][::core::mem::offset_of!(drm_driver, open) - 0usize];
     ["Offset of field: drm_driver::postclose"][::core::mem::offset_of!(drm_driver, postclose) - 8usize];
@@ -557,6 +583,7 @@ const _: () = {
     ["Offset of field: drm_driver::illumos_before_teardown"]
         [::core::mem::offset_of!(drm_driver, illumos_before_teardown) - 144usize];
     ["Offset of field: drm_driver::illumos_rkms"][::core::mem::offset_of!(drm_driver, illumos_rkms) - 152usize];
+    ["Offset of field: drm_driver::illumos_lkms"][::core::mem::offset_of!(drm_driver, illumos_lkms) - 160usize];
 };
 impl Default for drm_driver {
     fn default() -> Self {
@@ -575,6 +602,7 @@ pub struct drm_illumos_mode_config {
     pub preferred_depth: u64,
     pub prefer_shadow: bool,
     pub fb_modifiers: bool,
+    pub async_page_flip: bool,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
@@ -590,6 +618,8 @@ const _: () = {
         [::core::mem::offset_of!(drm_illumos_mode_config, prefer_shadow) - 24usize];
     ["Offset of field: drm_illumos_mode_config::fb_modifiers"]
         [::core::mem::offset_of!(drm_illumos_mode_config, fb_modifiers) - 25usize];
+    ["Offset of field: drm_illumos_mode_config::async_page_flip"]
+        [::core::mem::offset_of!(drm_illumos_mode_config, async_page_flip) - 26usize];
 };
 unsafe extern "C" {
     pub fn drm_dev_illumos_set_dma_attr(dev: *mut drm_device, attr: *const ddi_dma_attr_t) -> core::ffi::c_int;
@@ -677,25 +707,68 @@ unsafe extern "C" {
 }
 #[repr(C)]
 pub struct drm_file {
+    pub stereo_allowed: bool,
+    pub universal_planes: bool,
+    pub atomic: bool,
+    pub aspect_ratio_allowed: bool,
+    pub writeback_connectors: bool,
+    pub plane_color_pipeline: bool,
+    pub was_master: bool,
+    pub is_master: bool,
+    pub supports_virtualized_cursor_plane: bool,
     pub pid: pid_t,
     pub client_id: u64,
     pub lhead: list_head,
     pub minor: *mut drm_minor,
     pub filp: *mut core::ffi::c_void,
     pub driver_priv: *mut core::ffi::c_void,
+    pub __bindgen_anon_1: drm_file__bindgen_ty_1,
     pub __core: [u64; 4usize],
+}
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union drm_file__bindgen_ty_1 {
+    pub __kms: [u64; 32usize],
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of drm_file"][::core::mem::size_of::<drm_file>() - 88usize];
+    ["Size of drm_file__bindgen_ty_1"][::core::mem::size_of::<drm_file__bindgen_ty_1>() - 256usize];
+    ["Alignment of drm_file__bindgen_ty_1"][::core::mem::align_of::<drm_file__bindgen_ty_1>() - 8usize];
+    ["Offset of field: drm_file__bindgen_ty_1::__kms"][::core::mem::offset_of!(drm_file__bindgen_ty_1, __kms) - 0usize];
+};
+impl Default for drm_file__bindgen_ty_1 {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of drm_file"][::core::mem::size_of::<drm_file>() - 352usize];
     ["Alignment of drm_file"][::core::mem::align_of::<drm_file>() - 8usize];
-    ["Offset of field: drm_file::pid"][::core::mem::offset_of!(drm_file, pid) - 0usize];
-    ["Offset of field: drm_file::client_id"][::core::mem::offset_of!(drm_file, client_id) - 8usize];
-    ["Offset of field: drm_file::lhead"][::core::mem::offset_of!(drm_file, lhead) - 16usize];
-    ["Offset of field: drm_file::minor"][::core::mem::offset_of!(drm_file, minor) - 32usize];
-    ["Offset of field: drm_file::filp"][::core::mem::offset_of!(drm_file, filp) - 40usize];
-    ["Offset of field: drm_file::driver_priv"][::core::mem::offset_of!(drm_file, driver_priv) - 48usize];
-    ["Offset of field: drm_file::__core"][::core::mem::offset_of!(drm_file, __core) - 56usize];
+    ["Offset of field: drm_file::stereo_allowed"][::core::mem::offset_of!(drm_file, stereo_allowed) - 0usize];
+    ["Offset of field: drm_file::universal_planes"][::core::mem::offset_of!(drm_file, universal_planes) - 1usize];
+    ["Offset of field: drm_file::atomic"][::core::mem::offset_of!(drm_file, atomic) - 2usize];
+    ["Offset of field: drm_file::aspect_ratio_allowed"]
+        [::core::mem::offset_of!(drm_file, aspect_ratio_allowed) - 3usize];
+    ["Offset of field: drm_file::writeback_connectors"]
+        [::core::mem::offset_of!(drm_file, writeback_connectors) - 4usize];
+    ["Offset of field: drm_file::plane_color_pipeline"]
+        [::core::mem::offset_of!(drm_file, plane_color_pipeline) - 5usize];
+    ["Offset of field: drm_file::was_master"][::core::mem::offset_of!(drm_file, was_master) - 6usize];
+    ["Offset of field: drm_file::is_master"][::core::mem::offset_of!(drm_file, is_master) - 7usize];
+    ["Offset of field: drm_file::supports_virtualized_cursor_plane"]
+        [::core::mem::offset_of!(drm_file, supports_virtualized_cursor_plane) - 8usize];
+    ["Offset of field: drm_file::pid"][::core::mem::offset_of!(drm_file, pid) - 12usize];
+    ["Offset of field: drm_file::client_id"][::core::mem::offset_of!(drm_file, client_id) - 16usize];
+    ["Offset of field: drm_file::lhead"][::core::mem::offset_of!(drm_file, lhead) - 24usize];
+    ["Offset of field: drm_file::minor"][::core::mem::offset_of!(drm_file, minor) - 40usize];
+    ["Offset of field: drm_file::filp"][::core::mem::offset_of!(drm_file, filp) - 48usize];
+    ["Offset of field: drm_file::driver_priv"][::core::mem::offset_of!(drm_file, driver_priv) - 56usize];
+    ["Offset of field: drm_file::__core"][::core::mem::offset_of!(drm_file, __core) - 320usize];
 };
 impl Default for drm_file {
     fn default() -> Self {
@@ -2106,4 +2179,59 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn drm_rkms_vblank(dev: *mut drm_device, crtc: u32, time_ns: i64);
+}
+#[repr(C)]
+#[derive(Debug)]
+pub struct drm_event {
+    _unused: [u8; 0],
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct drm_illumos_lkms_funcs {
+    pub ioctl: ::core::option::Option<
+        unsafe extern "C" fn(
+            dev: *mut drm_device,
+            nr: core::ffi::c_uint,
+            data: *mut core::ffi::c_void,
+            file: *mut drm_file,
+        ) -> core::ffi::c_int,
+    >,
+    pub file_open:
+        ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device, file: *mut drm_file) -> core::ffi::c_int>,
+    pub file_close: ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device, file: *mut drm_file)>,
+    pub lastclose: ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device)>,
+    pub register_dev: ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device) -> core::ffi::c_int>,
+    pub unregister_dev: ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device)>,
+    pub mode_config:
+        ::core::option::Option<unsafe extern "C" fn(dev: *mut drm_device, out: *mut drm_illumos_mode_config)>,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of drm_illumos_lkms_funcs"][::core::mem::size_of::<drm_illumos_lkms_funcs>() - 56usize];
+    ["Alignment of drm_illumos_lkms_funcs"][::core::mem::align_of::<drm_illumos_lkms_funcs>() - 8usize];
+    ["Offset of field: drm_illumos_lkms_funcs::ioctl"][::core::mem::offset_of!(drm_illumos_lkms_funcs, ioctl) - 0usize];
+    ["Offset of field: drm_illumos_lkms_funcs::file_open"]
+        [::core::mem::offset_of!(drm_illumos_lkms_funcs, file_open) - 8usize];
+    ["Offset of field: drm_illumos_lkms_funcs::file_close"]
+        [::core::mem::offset_of!(drm_illumos_lkms_funcs, file_close) - 16usize];
+    ["Offset of field: drm_illumos_lkms_funcs::lastclose"]
+        [::core::mem::offset_of!(drm_illumos_lkms_funcs, lastclose) - 24usize];
+    ["Offset of field: drm_illumos_lkms_funcs::register_dev"]
+        [::core::mem::offset_of!(drm_illumos_lkms_funcs, register_dev) - 32usize];
+    ["Offset of field: drm_illumos_lkms_funcs::unregister_dev"]
+        [::core::mem::offset_of!(drm_illumos_lkms_funcs, unregister_dev) - 40usize];
+    ["Offset of field: drm_illumos_lkms_funcs::mode_config"]
+        [::core::mem::offset_of!(drm_illumos_lkms_funcs, mode_config) - 48usize];
+};
+unsafe extern "C" {
+    pub fn drm_dev_illumos_lkms_register(dev: *mut drm_device) -> core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_event_reserve(file: *mut drm_file, size: usize) -> core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn drm_illumos_event_unreserve(file: *mut drm_file, size: usize);
+}
+unsafe extern "C" {
+    pub fn drm_illumos_event_deliver(file: *mut drm_file, event: *const drm_event);
 }

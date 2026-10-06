@@ -22,6 +22,8 @@
 #include <linux/atomic.h>
 #include <linux/cleanup.h>
 #include <linux/spinlock_types.h>
+#include <linux/list.h>
+#include <linux/bug.h>
 
 #define	DEFINE_MUTEX(name)	struct mutex name = { }
 #define	__MUTEX_INITIALIZER(name)	{ }

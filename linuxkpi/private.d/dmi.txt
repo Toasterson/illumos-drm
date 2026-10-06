@@ -1,0 +1,7 @@
+ksmbios	# non-DDI kernel interface (<sys/smbios.h>, the kernel's SMBIOS snapshot, uts/common/os/smb_subr.c): the system, board, BIOS and chassis strings of <linux/dmi.h> (src/lkpi_dmi.c), which display drivers match their quirk tables against
+smbios_info_bios	# non-DDI kernel interface (<sys/smbios.h>, common/smbios): BIOS vendor, version and date for dmi_get_system_info()
+smbios_info_system	# non-DDI kernel interface (<sys/smbios.h>): the system structure (its id, SKU and family) for dmi_get_system_info()
+smbios_info_common	# non-DDI kernel interface (<sys/smbios.h>): manufacturer, product, version, serial and asset strings of a structure
+smbios_lookup_type	# non-DDI kernel interface (<sys/smbios.h>): finds the base board and chassis structures
+smbios_info_chassis	# non-DDI kernel interface (<sys/smbios.h>): the chassis type for DMI_CHASSIS_TYPE
+strstr	# non-DDI kernel interface (common/util/string.c in genunix, declared by <sys/systm.h>): the substring test of DMI quirk matching (src/lkpi_dmi.c)

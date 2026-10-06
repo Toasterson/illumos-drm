@@ -26,6 +26,7 @@ use drm_core::driver::{BUS_ID_MAX, DEFAULT_MAX_MEMORY, DEFAULT_MAX_OBJECT_SIZE};
 use drm_core::ioctl::DriverIoctl;
 use drm_core::ksync::KMutex;
 use drm_core::kvec::KVec;
+use drm_core::lkms::Registration;
 use drm_core::minor::CloneId;
 use drm_core::published::{PubGuard, Published};
 use drm_core::state::Perm;
@@ -46,6 +47,11 @@ pub(crate) struct Setup {
     /// The bus ID (`drm_dev_set_unique`), NUL-terminated.
     pub(crate) unique: [u8; BUS_ID_MAX + 1],
     pub(crate) unique_len: usize,
+    /// Facade 2.0: whether the KMS code's `unregister_dev` is owed.
+    pub(crate) lkms_reg: Registration,
+    /// Facade 2.0: `drm_dev_illumos_lkms_register()` was called (a second
+    /// call is refused).
+    pub(crate) lkms_called: bool,
 }
 
 /// The state behind one `struct drm_device`.
@@ -74,6 +80,9 @@ pub(crate) struct DevCore {
     pub(crate) minors: UnsafeCell<[f::drm_minor; 2]>,
     /// The mode setting of a driver with `illumos_rkms`.
     pub(crate) kms: Option<CKms>,
+    /// Facade 2.0: the hooks of a driver with `illumos_lkms`, whose
+    /// mode setting `drm_dev_illumos_lkms_register()` starts.
+    pub(crate) lkms: Option<&'static f::drm_illumos_lkms_funcs>,
 }
 
 // SAFETY: the raw pointers are the device structure (whose fields the core
@@ -114,8 +123,13 @@ fn perm(flags: u32) -> Perm {
     }
 }
 
-/// The core's features of a driver table.
-fn features(t: &f::drm_driver) -> Features {
+/// The core's features of a driver table, with the `DRIVER_*` flags
+/// `driver_features` (the table's, or a device's at registration), masked
+/// with the table's own: a feature counts only if both have it (Linux's
+/// `drm_core_check_feature()`, so a device cannot add one its driver
+/// lacks).
+pub(crate) fn features(t: &f::drm_driver, driver_features: u32) -> Features {
+    let driver_features = driver_features & t.driver_features;
     let mut out = Features::NONE;
     let map = [
         (f::DRIVER_GEM, Features::GEM),
@@ -126,7 +140,7 @@ fn features(t: &f::drm_driver) -> Features {
         (f::DRIVER_SYNCOBJ_TIMELINE, Features::SYNCOBJ_TIMELINE),
     ];
     for (bit, feat) in map {
-        if t.driver_features & bit != 0 {
+        if driver_features & bit != 0 {
             out = out.union(feat);
         }
     }
@@ -183,7 +197,7 @@ impl DevCore {
             major: table.major,
             minor: table.minor,
             patchlevel: table.patchlevel,
-            features: features(table),
+            features: features(table, table.driver_features),
             mode_config: ModeConfig::DEFAULT,
             max_object_size: if table.illumos_max_object_size == 0 {
                 DEFAULT_MAX_OBJECT_SIZE
@@ -216,6 +230,25 @@ impl DevCore {
             ioctls.push(e, ctx)?;
             descs.push(d, ctx)?;
         }
+        // Facade 2.0: the core's mode setting or Linux's, never both; the
+        // KMS code's required hooks must be there.
+        if !table.illumos_rkms.is_null() && !table.illumos_lkms.is_null() {
+            dev.warn(format_args!("driver table has both illumos_rkms and illumos_lkms"));
+            return Err(Errno::EINVAL);
+        }
+        // SAFETY: as the table, the funcs live in the driver module.
+        let lkms = unsafe { table.illumos_lkms.as_ref() };
+        if let Some(l) = lkms
+            && (l.ioctl.is_none()
+                || l.file_open.is_none()
+                || l.file_close.is_none()
+                || l.register_dev.is_none()
+                || l.unregister_dev.is_none()
+                || l.mode_config.is_none())
+        {
+            dev.warn(format_args!("illumos_lkms lacks a required hook"));
+            return Err(Errno::EINVAL);
+        }
         let kms = if table.illumos_rkms.is_null() {
             None
         } else {
@@ -242,12 +275,15 @@ impl DevCore {
                 fence_pri: None,
                 unique: [0; BUS_ID_MAX + 1],
                 unique_len: 0,
+                lkms_reg: Registration::new(),
+                lkms_called: false,
             }),
             device: Published::new(),
             files: KMutex::new(KVec::new()),
             // SAFETY: drm_minor is plain data; zero is a valid value.
             minors: UnsafeCell::new(unsafe { core::mem::zeroed() }),
             kms,
+            lkms,
         });
         let core = Box::into_raw(core);
         // SAFETY: ddev points into the zeroed allocation.
@@ -324,6 +360,21 @@ impl DevCore {
     pub(crate) unsafe fn set_mode_config(&self, m: ModeConfig) {
         // SAFETY: the caller's contract.
         unsafe { (*self.info.get()).mode_config = m };
+    }
+
+    /// Sets the features (from the device's `driver_features` at
+    /// registration); before registration only.
+    ///
+    /// # Safety
+    /// As [`DevCore::set_mode_config`].
+    pub(crate) unsafe fn set_features(&self, features: Features) {
+        // SAFETY: the caller's contract.
+        unsafe { (*self.info.get()).features = features };
+    }
+
+    /// Facade 2.0: the KMS code's hooks of a Linux-KMS driver's device.
+    pub(crate) fn lkms_funcs(&self) -> Option<&'static f::drm_illumos_lkms_funcs> {
+        self.lkms
     }
 
     pub(crate) fn ddev(&self) -> *mut f::drm_device {

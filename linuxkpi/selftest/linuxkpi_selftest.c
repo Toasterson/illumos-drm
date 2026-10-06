@@ -9,8 +9,9 @@
  * ordered, delayed, cancel), timers, completions, wait queues, RCU,
  * idr/xarray, slab caches, pages, and DMA scatterlists and coherent
  * memory on the device.
- * The concurrency tests of the scheduling, memory and reservation parts
- * are in st_sched.c, st_mem.c and st_resv.c (st.h).
+ * The concurrency tests of the scheduling, memory and reservation parts,
+ * the stand-alone wound/wait mutexes and the kthread workers are in
+ * st_sched.c, st_mem.c, st_resv.c, st_ww.c and st_kthread.c (st.h).
  * Every check logs "linuxkpi_selftest: ok <name>" or "FAIL <name>"; the
  * last line is "linuxkpi_selftest: done <passed> passed <failed> failed",
  * which tools/test/run-r5c-test.sh greps from the system log. The result
@@ -511,6 +512,9 @@ st_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	st_sched_tests();
 	st_mem_tests(pdev);
 	st_resv_tests();
+	st_ww_tests();
+	st_kthread_tests();
+	st_i2c_tests(pdev);
 	pr_info("linuxkpi_selftest: done %d passed %d failed\n", st_passed,
 	    st_failed);
 	(void) ddi_prop_update_int(DDI_DEV_T_NONE, lkpi_dev_dip(&pdev->dev),

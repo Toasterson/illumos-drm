@@ -22,8 +22,9 @@
 #   guards         each core refuses to load while the other is loaded,
 #                  explicit paths and dependent drivers included, and
 #                  RACES pairs of concurrent loads never leave both loaded.
-#   select-new     drmadm refuses while a DRM module is loaded and while
-#                  its lock is held, then selects the new stack. Reboot.
+#   select-new     drmadm refuses while its lock is held and selects the
+#                  new stack, also with a DRM module loaded (which stays
+#                  loaded until the reboot). Reboot.
 #   after-new      the legacy modules are excluded; the packaged drivers
 #                  attach and libdrm lists only them.
 #   select-legacy  drmadm selects the legacy stack. Reboot.
@@ -399,17 +400,17 @@ phase_select_new() {
 	[ -f "$FRAG" ] && cp "$FRAG" frag.before
 	step cp /etc/driver_aliases driver_aliases.before-new
 	step modload -p misc/drm_core
-	if step "$DRMADM" select new; then
-		bad "drmadm select new ran while misc/drm_core was loaded"
-	else
-		pass "drmadm select refuses while a DRM module is loaded"
-	fi
-	if { [ -f frag.before ] && cmp -s frag.before "$FRAG"; } || { [ ! -f frag.before ] && [ ! -f "$FRAG" ]; }; then
-		cmp -s driver_aliases.before-new /etc/driver_aliases && pass "a refused select changes nothing" ||
-		    bad "a refused select changed /etc/driver_aliases"
-	else
-		bad "a refused select changed $FRAG"
-	fi
+	# A selection only edits files read at boot: a loaded module of
+	# either stack stays loaded (a console driver cannot be unloaded).
+	step "$DRMADM" select new > drmadm-select-loaded.out 2>&1
+	grep -q "stay until the next boot" drmadm-select-loaded.out &&
+	    pass "drmadm select with a DRM module loaded says it stays until the reboot" ||
+	    bad "drmadm select with a DRM module loaded gave no notice"
+	loaded drm_core && pass "the loaded misc/drm_core is left alone" ||
+	    bad "drmadm select unloaded misc/drm_core"
+	# Back to the state before, for the lock and selection checks below.
+	if [ -f frag.before ]; then step cp frag.before "$FRAG"; else step rm -f "$FRAG"; fi
+	step cp driver_aliases.before-new /etc/driver_aliases
 	unload_all || exit 1
 	step mkdir /etc/system.d/.drmadm.lock
 	if step "$DRMADM" select new; then

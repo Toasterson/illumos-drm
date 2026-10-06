@@ -21,8 +21,12 @@
  * One pointer variable per facade structure (eight bytes of BSS each),
  * which carries the structure's definition into the debug information.
  * They are not in drm_core.mapfile, so the link makes them local.
- * struct drm_illumos_mapping, struct drm_rkms_fb and the other incomplete
- * types have no layout of their own and are left out.
+ * struct drm_illumos_mapping, struct drm_rkms_fb, struct drm_event and
+ * the other incomplete types have no layout of their own and are left
+ * out. The mode-setting areas of facade 2.0 (drm_device.__kms,
+ * drm_file.__kms) appear as the core sees them, opaque words: the Linux
+ * fields a KMS module overlays there (DRM_FACADE_DEVICE_KMS,
+ * DRM_FACADE_FILE_KMS) are in that module's own CTF.
  */
 #define	DRM_FACADE_CTF_(s)	struct s *drm_facade_ctf_##s;
 DRM_FACADE_STRUCTS(DRM_FACADE_CTF_)

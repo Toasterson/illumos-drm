@@ -42,7 +42,6 @@ drm_core_check_feature(const struct drm_device *dev, u32 feature)
 
 #define	drm_drv_uses_atomic_modeset(dev) \
 	drm_core_check_feature((dev), DRIVER_ATOMIC)
-#define	drm_dev_has_vblank(dev)		((dev)->num_crtcs != 0)
 #define	drm_firmware_drivers_only()	false
 #define	DRIVER_COMPUTE_ACCEL		(1 << 7)
 #define	DRIVER_GEM_GPUVA		(1 << 8)

@@ -48,6 +48,7 @@ extern void (kernel_fpu_end)(kfpu_state_t *, uint_t);
 struct cpuinfo_x86 boot_cpu_data;
 
 static unsigned int lkpi_tsc_khz_val;
+static unsigned int lkpi_phys_bits_val;
 
 static inline void
 lkpi_cpuid(u32 leaf, u32 sub, u32 *a, u32 *b, u32 *c, u32 *d)
@@ -154,6 +155,19 @@ lkpi_cpu_init(void)
 		lkpi_cpuid(7, 0, &a, &b, &cx, &d);
 		c->x86_capability_lkpi[2] = b;
 	}
+	/*
+	 * The physical address width (MAXPHYADDR, CPUID 0x80000008 EAX
+	 * bits 7:0): page-table entries with frame bits above it fault
+	 * as reserved, so memremap() refuses such frames. 36 bits without
+	 * the leaf (the architectural minimum with PAE).
+	 */
+	lkpi_cpuid(0x80000000, 0, &a, &b, &cx, &d);
+	lkpi_phys_bits_val = 36;
+	if (a >= 0x80000008) {
+		lkpi_cpuid(0x80000008, 0, &a, &b, &cx, &d);
+		if ((a & 0xff) >= 32 && (a & 0xff) <= 52)
+			lkpi_phys_bits_val = a & 0xff;
+	}
 	if (c->x86_clflush_size == 0)
 		c->x86_clflush_size = 64;
 	c->x86_cache_alignment = c->x86_clflush_size;
@@ -197,6 +211,12 @@ unsigned int
 lkpi_tsc_khz(void)
 {
 	return (lkpi_tsc_khz_val);
+}
+
+unsigned int
+lkpi_phys_addr_bits(void)
+{
+	return (lkpi_phys_bits_val);
 }
 
 void

@@ -1,0 +1,28 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH kms 03] drmm_mode_config_init() initialises the vblank event list
+
+Linux initialises dev->vblank_event_list in drm_dev_init(). On illumos the
+device comes from the Rust core's drm_dev_alloc(), which zeroes the
+facade's KMS area but knows nothing of the Linux fields in it, so the list
+stayed zeroed: drm_crtc_vblank_reset() warned that it was not empty and
+the first armed vblank event (i915's initial commit at attach) dereferenced
+its NULL links (X230 panic, drm_crtc_arm_vblank_event). Every KMS driver
+calls drmm_mode_config_init() (directly or through drm_mode_config_init())
+before it creates CRTCs, so the list is initialised there. vbl_lock and
+vblank_time_lock are initialised by drm_vblank_init() as in Linux.
+Conditional on __illumos__.
+
+diff -ru a/drivers/gpu/drm/drm_mode_config.c b/drivers/gpu/drm/drm_mode_config.c
+--- a/drivers/gpu/drm/drm_mode_config.c	2026-10-06 10:23:40.628806489 +0000
++++ b/drivers/gpu/drm/drm_mode_config.c	2026-10-06 10:23:40.677813318 +0000
+@@ -436,6 +436,10 @@
+ {
+ 	int ret;
+ 
++#ifdef __illumos__
++	/* Linux: drm_dev_init(); the facade core does not know the KMS area. */
++	INIT_LIST_HEAD(&dev->vblank_event_list);
++#endif
+ 	mutex_init(&dev->mode_config.mutex);
+ 	drm_modeset_lock_init(&dev->mode_config.connection_mutex);
+ 	mutex_init(&dev->mode_config.idr_mutex);

@@ -103,6 +103,37 @@ self-test; `run-r5e-test.sh` with `misc/drm_helpers` on the layer passed
 `drm-core`: 160). i915n has not attached to an Intel GPU yet: that is the
 first step on the owner's ThinkPad X230 and MacBook Pro.
 
+Facade 2.0 (Linux KMS hooks, the core's part of the i915n display work;
+see *Facade 2.0 (Linux KMS hooks)* under *Decisions*): on 5 October 2026
+the core forwards the mode-setting ioctls, file events and registration
+of a Linux-KMS C driver to its KMS code, from the driver's
+`drm_dev_illumos_lkms_register()` on. Verified so far:
+the host tests (`drm-core`: 178, among them 17 for facade 2.0 with a mock
+KMS implementation), `cargo clippy -D warnings`, `cargo fmt`, the
+generated files regenerated with bindgen and current; on oibuild (gcc
+15.3.0) gcc's layout of the facade (41 sizes, 277 offsets) matched the
+Rust bindings, `misc/drm_core` linked with exactly the 145 symbols of its
+mapfile and the facade's CTF, `rdrmnull` and `virtio_gpu` linked without
+a symbol of the stateful core, and `cdrmnull` and `misc/linuxkpi` built
+against the 2.0 headers (log
+`logs/oibuild/illumos-drm/20261005-kms-core-*-build.log` in the
+workspace). Nothing has been loaded or run in a kernel yet; the C side of
+the hooks is `misc/drm_kms` (below), and i915n's display uses it (*i915n
+with display*).
+
+i915n with display (see *i915n with display* under *What is in the
+repository*): on 5 October 2026, at `f3a60ab`, on oibuild (gcc 15.3.0,
+job limit 2) every new-stack module was built from that one revision:
+`misc/linuxkpi` (ABI 3), `misc/drm_helpers`, `misc/drm_kms` and i915n
+with display (290 TUs; the 791 Linux files the compiler read all MIT or
+HPND), each linked with `-z defs` without an unresolved symbol, and the
+seven packages (`drmadm`, `drm-core`, `virtio-gpu`, `linuxkpi`,
+`drm-helpers`, `drm-kms`, `i915n`) published as one p5p (branch version
+`2026.0.0.6`). A krtld-style resolution of the six modules against an
+illumos `cda5b9a49f` kernel (unix, genunix and the modules' dependencies)
+left nothing unresolved. Nothing of the display has been loaded or run
+in a kernel yet: the first attach is on the ThinkPad X230.
+
 G7 (both DRM stacks on one machine): on 3 October 2026, on a fresh guest
 of `golden-20260930` (illumos `7e802e88a3`) with a virtio-gpu device,
 gfx-drm's `driver/graphics/drm` built with the reverse guard (gfx-drm
@@ -539,14 +570,152 @@ each (`linuxkpi/private.d/`), the kernel flags of everything built on it
 (`linuxkpi/kflags.sh`), `linuxkpi/build.sh`, the kernel self-test driver
 `linuxkpi_selftest` (`linuxkpi/selftest/`, run by
 `tools/test/run-r5c-test.sh`) and host tests (`linuxkpi/tests/host/`).
-`drivers/i915/` builds `i915n`, Linux v7.2's i915 without display, on
+`drivers/i915/` builds `i915n`, Linux v7.2's i915 (with display on Ivy
+Bridge since facade 2.0, see *i915n with display* below), on
 it: the pin (`PIN`), the configuration (`config/`), the translation units
-(`tus.txt`), the MIT Linux headers used unchanged (`mit-headers.txt`), the
+(`tus.txt`, and `display-tus.txt` for the display), the MIT Linux headers used unchanged (`mit-headers.txt`), the
 illumos patch series (`patches/`), `fetch-and-patch.sh` (no Linux source
 is in this repository), `build.sh`, the licence checks
 (`check-licences.py`, `gen-license.sh`) and the illumos glue
 (`illumos/`). `packaging/linuxkpi.p5m` and `packaging/i915n.p5m` package
 them.
+
+### misc/drm_kms
+
+`carried/drm_kms/` builds `misc/drm_kms`, Linux v7.2's DRM mode-setting
+code for the Linux display drivers of this stack (i915n's display; design:
+`notes/i915n-kms-design.md` of the workspace, decision K2). The Rust core
+keeps the ioctl entry, permissions, master, files and their event queues,
+GEM and PRIME; the module keeps the mode objects, properties, blobs,
+framebuffers, atomic state, vblank and the mode-setting ioctl handlers,
+reached through the facade 2.0 hooks (`include/drm/drm_lkms.h`).
+
+- **What it carries** (`tus.txt`, 36 Linux TUs): the KMS core of `drm.ko`
+  (atomic and its uAPI, blend, colour management and colorops,
+  connectors, CRTCs, DisplayID, EDID, encoders, fourcc, framebuffers,
+  mode config and objects, modes, modeset locks, planes, properties,
+  rects, vblank and vblank works), the `drm_kms_helper` libraries
+  (atomic and state helpers, CRTC, damage, modeset, plane, probe and
+  self-refresh helpers), the `drm_display_helper` libraries (DP, DP dual
+  mode, DP MST, DSC, HDMI, SCDC) and `drivers/video/hdmi.c` (HDMI
+  infoframes). Three patches (`patches/`, conditional on `__illumos__`):
+  `drm_mode_object.c` has no legacy load callback to read; the device's
+  `registered` means "KMS registered" (the layer registers the device
+  with the core before mode setting starts); the vblank event list is
+  initialised in `drmm_mode_config_init()`.
+- **Licences:** every carried file is MIT (SPDX MIT, `GPL-2.0 OR MIT`, or
+  the MIT/HPND notice); `drm_hdcp_helper.c` (GPL-2.0-only) is not carried.
+  `drivers/i915/fetch-and-patch.sh` prepares one Linux tree for i915n and
+  this module, refuses non-MIT TUs and headers, and replaces the GPL
+  `drm_dp_mst_topology_internal.h` and `drm_trace.h` by MIT files; the
+  build checks every Linux file the compiler read
+  (`drivers/i915/check-licences.py`). GPL Linux headers the code includes
+  are MIT reimplementations under `linuxkpi/include`. The package's
+  licence file lists the carried files' notices
+  (`MODULE=drm_kms drivers/i915/gen-license.sh`).
+- **illumos sources** (`illumos/`, MIT): the module linkage (facade and
+  LinuxKPI checks at `_init`), Linux's event functions over the core's
+  event queue (`drm_kms_event.c`), the hook table `drm_kms_illumos_funcs`
+  that a driver points `drm_driver.illumos_lkms` at (`drm_kms_lkms.c`:
+  ioctl dispatch by Linux's `drm_ioctls[]` rows, file open/close,
+  register/unregister, the GET_CAP limits), and documented stubs for what
+  is not carried: bridges, leases, sysfs, writeback, panels, panel
+  orientation quirks, the HDCP helper, plus GEM handle references and the
+  implicit-fence plane helper over the facade (`drm_kms_stubs.c`).
+- **Build:** `carried/drm_kms/build.sh all` with `LINUX` (the prepared
+  tree), `DDI_MAPFILE` and `LKPI_MAPFILE`, compiles with i915n's flags and
+  configuration (`linuxkpi/kflags.sh`, `drivers/i915/config.h`) and links
+  `ld -ztype=kmod -N misc/drm_core -N misc/linuxkpi -N misc/drm_helpers
+  -z defs -B reduce` against the DDI, facade, LinuxKPI, drm_helpers and
+  `private.mapfile` (genunix's `memcmp`, `memmove`, `strlcat`). The module
+  exports what its sources `EXPORT_SYMBOL` (`drm_kms.mapfile`, which
+  drivers link against with `-N misc/drm_kms`); the build regenerates the
+  list and fails if it differs from the committed file or from the
+  module's global symbols. `packaging/drm-kms.p5m` packages it
+  (`driver/graphics/drm-kms`).
+
+### i915n with display
+
+The display build of `i915n` (`drivers/i915/build.sh`, `I915_DISPLAY=1`,
+the default) carries i915's display code for Ivy Bridge (display version
+7; the ThinkPad X230's HD 4000) and uses Linux's mode-setting code in
+`misc/drm_kms` through the facade 2.0 hooks. Design: section 3 of
+`notes/i915n-kms-design.md` in the workspace.
+
+- **What is built:** the 158 entries of `tus.txt` (154 Linux TUs and the
+  illumos glue) plus `display-tus.txt`: 132 display TUs (Linux's display
+  objects in the R5c configuration minus the families below and the GPL
+  tracepoint TU) and two illumos sources; its `-` lines take the headless
+  stubs out (`illumos/i915_nodisplay.c`, and `illumos/i915_nokms.c`, the
+  four KMS helpers that `misc/drm_kms` provides and a local definition
+  would shadow). 290 TUs, compiled with `-DI915N_DISPLAY`, linked with
+  `-N misc/drm_core -N misc/linuxkpi -N misc/drm_helpers -N misc/drm_kms
+  -z defs` against the DDI, facade, LinuxKPI, drm_helpers and drm_kms
+  mapfiles and `private.mapfile`. `I915_DISPLAY=0` builds R5c's headless
+  i915n (158 TUs, no `misc/drm_kms`). Both lists are licence-checked
+  (`fetch-and-patch.sh` for the TUs, the build for every file the compiler
+  read).
+- **The platform gate** (patch 0011): `intel_display_device_probe()` takes
+  Linux's `no_display` path on every platform but Ivy Bridge and logs
+  `display on <platform> is not supported on illumos; running headless`;
+  i915's `intel_display_device_info_runtime_init()` then clears
+  `DRIVER_MODESET` and `DRIVER_ATOMIC`, so the core starts no mode setting
+  (`drm_dev_illumos_lkms_register()` does nothing) and the device behaves
+  as the headless build. Patch 0012 points `i915_drm_driver.illumos_lkms`
+  at `drm_kms_illumos_funcs`. Patch 0006's display-engine interrupt
+  helpers (`illumos/i915_illumos.c`) act only on a device without display
+  (the gen5-7 master enable lives in DEIER); with a display, Linux's
+  display code owns those registers. Only Ivy Bridge (the X230) has run
+  the display build on hardware: the headless path it takes on every
+  other platform is untested there (the MacBook Pro's gen9.5 GPU, the
+  other test machine, has not run this build).
+- **The stubs:** DSI (MIPI DSI bus), HDCP (MEI/GSC, the GPL
+  `drm_hdcp_helper`) and LPE audio (platform devices) are not built.
+  `illumos/gen-nodisplay.py --excluded` writes `illumos/i915_excluded.c`:
+  every function of those families the display objects call, with the
+  answer the real function gives on Ivy Bridge and the reason, read from
+  the callers, in a comment above it (no default answer: a new import
+  fails the link until it is added to the generator's table). Among
+  them: `is_hdcp_supported()` false (Ivy Bridge has no `has_hdcp`, so no
+  connector gets the Content Protection property or an HDCP shim, and
+  the HDCP hooks of the commit path return at once as Linux's do without
+  a shim); `intel_hdcp_disable()` -ENOENT as Linux without a shim;
+  `intel_dsi_dcs_init_backlight_funcs()` -ENODEV, so a caller would fall
+  back to the PWM backlight; `vlv_dsi_min_cdclk()` 0;
+  `intel_lpe_audio_init()` -ENODEV (the audio component is used instead);
+  `i915_display_hdcp_interface` empty (its only callers are in the HDCP
+  TUs). The panic screen (`i915_panic.c`) is left out too: drm_panic is
+  not carried and patch 0002 leaves its helpers out of
+  `i915_gem_pages.c`. Its interface is in `i915_excluded.c`, with an
+  `alloc` that must and does succeed (an empty placeholder):
+  `intel_framebuffer_init()` fails every framebuffer with -ENOMEM
+  without one. `setup` refuses (-EOPNOTSUPP) and `finish` does nothing;
+  only drm_panic calls them.
+- **The VBT** (patch 0013): without `CONFIG_ACPI` there is no
+  `intel_opregion.c`; `illumos/i915_illumos_vbt.c` reads the VBT out of
+  the ACPI OpRegion (PCI config `ASLS`; RVDA/RVDS of OpRegion 2.0+, else
+  mailbox 4; validated with `intel_bios_is_valid_vbt()`) as a copy, and
+  never writes to the OpRegion (no driver-ready flag, no ASLE requests).
+  It maps the OpRegion with the layer's `memremap(MEMREMAP_WB)`
+  (write-back only; frames beyond the CPU's physical address width are
+  refused). Without a VBT i915 runs on its "VBT missing" defaults.
+- **Layer fixes for the display paths** (`misc/linuxkpi`, ABI 3):
+  `outb()`/`outw()`/`outl()` take Linux's argument order (the
+  prologue's `<sys/sunddi.h>` has illumos' port-first functions, which
+  `intel_vga.c`'s VGA sequencer writes would otherwise have called with
+  the arguments swapped); `component_add_typed()` succeeds and leaves the
+  audio component unbound, as on Linux without the HDA driver;
+  `vga_switcheroo_register_client()` succeeds as on Linux without
+  switcheroo. As they were and correct for the X230: `pci_map_rom()` NULL
+  (no PCI ROM VBT on a UEFI boot), the host bridge's config space by bus
+  and devfn (`GGC`), `pdev->bus->self` NULL on the root bus, the VGA
+  arbiter calls (succeed, no arbiter), CPU latency QoS (no effect),
+  hrtimers, DMI quirk matching, kthread workers, `ktime_get_*()`. Not
+  provided: the backlight class device (brightness control) and ACPI
+  (lid, ASLE).
+- **Package:** `driver/graphics/i915n` requires and incorporates
+  `driver/graphics/drm-kms`; its licence file lists every Linux file the
+  compiler read, the display's included.
 
 ## Decisions
 
@@ -1350,7 +1519,8 @@ local after the link, so the CTF's object section does not describe the
 module's symbols; only its types matter.
 
 **R5a: deviations from Linux.** `struct drm_device` has no `mode_config`
-(R5i); the Rust drivers' KMS goes through the illumos `drm_rkms_*`
+of the core's (since facade 2.0 a Linux KMS implementation keeps Linux's
+in the device's mode-setting area); the Rust drivers' KMS goes through the illumos `drm_rkms_*`
 interface, and `cdrmnull` has no display yet (its port of `rdrmnull`'s
 virtual display is deferred to R5i). `struct mutex` is
 `struct lx_mutex`, because illumos has a `struct mutex` of its own.
@@ -1798,12 +1968,18 @@ first attach on hardware.
 
 **R5c: tests.** `linuxkpi/tests/host` runs the layer's pure-logic files
 (trees, xarray, IDR/IDA, bitmaps, lists, refcount, printf, strings,
-kobjects) as a userland program (`host-test.sh`, with clang's sanitizers
-where available). `linuxkpi_selftest` is a Linux PCI driver on the layer
-that binds QEMU's PCI test device and checks, from its probe(), locks,
-workqueues, timers, waits, RCU, idr/xarray, slab caches, pages and DMA,
-and the concurrency of the scheduling, memory and reservation parts
-(`st_sched.c`, `st_mem.c`, `st_resv.c`). The self-test also registers a DRM device the way i915 does (a GEM
+kobjects, the Linux-only error numbers, and with host threads the
+stand-alone wound/wait mutexes) as a userland program (`host-test.sh`,
+with clang's sanitizers where available). `linuxkpi_selftest` is a Linux
+PCI driver on the layer that binds QEMU's PCI test device and checks, from
+its probe(), locks, workqueues, timers, waits, RCU, idr/xarray, slab
+caches, pages and DMA, and the concurrency of the scheduling, memory and
+reservation parts (`st_sched.c`, `st_mem.c`, `st_resv.c`); the display
+build added the I2C core and bit-banging algorithm on a simulated bus
+(`st_i2c.c`), the stand-alone wound/wait mutexes alone and in cycles with
+reservation locks (`st_ww.c`) and the kthread workers (`st_kthread.c`).
+These three are built (CI, the serial builds) but have not yet run in a
+guest: no `run-r5c-test.sh` run since they were added. The self-test also registers a DRM device the way i915 does (a GEM
 object made before `drm_dev_register()` and freed in the driver's release).
 `tools/test/run-r5c-test.sh` checks that no module defines a kernel
 symbol, loads the layer, runs the self-test, holds a node of its DRM device
@@ -1812,6 +1988,93 @@ follows, loads `misc/drm_helpers` and `i915n` (without a device, twice),
 checks that `i915n` refuses a device outside its ID table, and that
 nothing in the layer warned outside the self-test. (No probe of i915
 itself has run: there is no Intel GPU in the guest.)
+
+**Facade 2.0 (Linux KMS hooks).** i915's display code needs Linux's KMS
+core (decision K2 of `notes/i915n-kms-design.md` in the workspace), which
+`misc/drm_kms` carries as C; the core keeps the ioctl entry, argument
+copies, permissions, master and authentication, client capabilities,
+`GET_CAP`, files, GEM, PRIME and sync objects. A driver table names the
+KMS code's hooks in `illumos_lkms` (`drm_lkms.h`); `drm_dev_alloc()`
+refuses a table with both `illumos_rkms` and `illumos_lkms`, or without a
+required hook (`-EINVAL`). The core takes every device's features from
+`drm_device.driver_features` at registration (the device's, not the
+table's). A Linux-KMS driver's device registers as any other and gets its
+files' event queues; `drm_dev_register()` never starts its mode setting,
+because the LinuxKPI layer registers i915's device already in
+`devm_drm_dev_alloc()` (i915 makes GEM objects long before its own
+`drm_dev_register()`), before i915's mode configuration exists and before
+it clears `DRIVER_MODESET` on hardware without a display. The driver
+starts it with `drm_dev_illumos_lkms_register()`, which the layer calls
+where i915 calls Linux's `drm_dev_register()`: with `DRIVER_MODESET` in
+the device's `driver_features` (read then) and `illumos_lkms` it calls
+`mode_config` (`GET_CAP`'s limits, `async_page_flip` for
+`DRM_CAP_ASYNC_PAGE_FLIP`; `drm_dev_illumos_set_mode_config()` keeps
+asynchronous flips off for R3 drivers) and `register_dev`; it returns 0
+(also, doing nothing, without `DRIVER_MODESET` or `illumos_lkms`),
+`-EINVAL` for a device that is not registered or unplugged, `-EBUSY` for
+a second call or while a file is open (files opened before the start
+would have no KMS state; that refusal does not count as the call), or
+`register_dev`'s error (mode setting stays off, the device registered).
+Until mode setting runs, the mode-setting ioctls fail with `EOPNOTSUPP`
+and `GET_CAP` and `SET_CLIENT_CAP` answer as for a device without
+`DRIVER_MODESET` (and `DRIVER_ATOMIC`): mode-setting capabilities
+`EOPNOTSUPP`, not default limits (`crates/drm-core/src/lkms/`). Afterwards
+every command of the core's mode-setting table from a file the KMS code
+opened goes, after the core's permission check, to the `ioctl` hook with
+the kernel copy of its argument (Linux's size rule, a 256-byte zeroed
+buffer of which the table's size is copied in and back; nothing is copied
+back after an error, whose negative errno, `-ENOTTY` included, is the
+ioctl's), inside an ioctl frame so that the KMS code's copies of the
+arrays an argument points to work. Opens (once mode setting runs) run
+`file_open` between the core's set-up and the driver's `open`
+(`file_close` undoes it if the driver's open fails); closes of those
+files run `file_close` before the core releases the file's GEM handles and sync
+objects and the driver's `postclose` runs, and `lastclose` after the last
+open file is gone, without a global lock (Linux's order for drivers
+without `lastclose` of their own; a concurrent open may overlap it).
+`unregister_dev` runs once, if `register_dev` succeeded: in a `drm_dev_unregister()` whose checks
+passed, after the device left the device table and before the minor nodes
+go, or in `drm_dev_illumos_unplug()` once user space has let go (as
+Linux's `drm_dev_unplug()` unregisters at once): the LinuxKPI layer's
+remove path (unplug, the driver's `remove()`, the last put running the
+release and the core's unregistration) thus calls it while the KMS state
+still exists, and the last put owes nothing more. For every C driver the
+core now mirrors the client capabilities and `is_master`/`was_master`
+into the facade `drm_file` (set at open, after `SET_CLIENT_CAP`,
+`SET_MASTER` and `DROP_MASTER`, with atomic byte stores; a closed file's
+structure is gone, so its close needs no update).
+
+**Facade 2.0: events.** The KMS code builds its events and hands the core
+the encoded `struct drm_event` (`drm_illumos_event_reserve`, `_unreserve`,
+`_deliver`), with its `dev->event_lock` held, in thread context and in
+i915's interrupt handler (an MSI handler at IPL 9, an interrupt thread).
+Each file of a Linux-KMS device has Linux's 4096-byte budget and a byte
+ring of 4096 bytes allocated at open: delivered plus reserved bytes never
+exceed the budget, so delivery only copies; `read(2)` returns whole events
+as Linux's `drm_read()` (blocking unless non-blocking, a buffer too small
+for the next event reads what came before it, an event that wraps around
+the ring is joined before its single copy-out), `chpoll(9E)` reports
+`POLLIN|POLLRDNORM` while events are queued. A closing file loses its
+queued events first; reservations fail and deliveries are dropped (their
+space given back) until the KMS code's `file_close` has run, and what it
+never gave back is released with the queue. Files that are not the
+current master may charge 256 KiB per device together, R3's bound. The
+queues' lock is an adaptive mutex (with the driver's fence priority when
+it set one, the DDI's rule for locks an interrupt handler takes), never
+held while calling C code, taken after the device mutex where both are
+held; the event functions find the file through its marks and the device
+through its publication and neither block, allocate nor call back, and
+readers and pollers are woken after the lock is released.
+
+**Facade 2.0: version and layouts.** Major version 2: `drm_device` gains
+a mode-setting area of 1024 words and `drm_file` one of 32 words (opaque,
+zeroed, never touched by the core; a KMS module overlays Linux's fields
+there) and Linux's nine client-capability booleans at its start;
+`drm_driver.illumos_lkms`, `drm_illumos_mode_config.async_page_flip`,
+`struct drm_illumos_lkms_funcs` (in the version's size list),
+`drm_dev_illumos_lkms_register()` and the three event functions are new. `drm_facade.h` includes `drm_lkms.h`. Drivers
+built for 1.x refuse to load; the Rust drivers fill in the new fields
+(no Linux KMS hooks, no asynchronous flips).
 
 **R4: the virtio framework.** The driver runs the device through the
 gate's virtio framework (`misc/virtio`), a private interface, through
@@ -1973,8 +2236,11 @@ drmadm select legacy|new    # for the next boot
 drmadm -R /mnt select legacy    # in a mounted boot environment
 ```
 
-`select` refuses while any module of either stack is loaded and while
-another `drmadm` holds its lock (`/etc/system.d/.drmadm.lock`), then:
+`select` only edits files read at boot, so it runs with modules of either
+stack loaded (they stay loaded until the reboot; a display driver that is
+the system console cannot be unloaded anyway) and lists them; it refuses
+while another `drmadm` holds its lock (`/etc/system.d/.drmadm.lock`). It
+then:
 
 1. writes `/etc/system.d/driver:graphics:drmadm` (named after the package,
    as `system(5)` recommends) with the selection, its time, the alias set
@@ -2082,9 +2348,11 @@ with it installed before a machine loads both stacks; OpenIndiana's
 current `misc/drm` loads beside `misc/drm_core`. (The `0600 root root`
 nodes the G7 guest found for the packaged drivers attached at boot are
 fixed since G10; see *Packaging*.)
-`drmadm select` refuses while a DRM module is loaded, so on a machine
-whose display uses `i915` the display manager must stop first (or select
-with `-R`). The busy part of the guard rule is tested deterministically
+`drmadm select` runs with DRM modules loaded (the selection takes effect
+at the next boot; nothing is loaded or unloaded), so a machine whose
+console driver is `i915n` or `i915` can switch stacks with a reboot. Both
+stacks are never loaded together: the in-kernel guards, not drmadm, keep
+that so. The busy part of the guard rule is tested deterministically
 only with DTrace (`overlap`); the 100 concurrent loads never overlapped
 their `_init` calls.
 

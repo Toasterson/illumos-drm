@@ -50,7 +50,9 @@ enum hrtimer_restart {
 
 struct hrtimer {
 	struct timer_list timer;
-	ktime_t expires;
+	struct {
+		ktime_t expires;	/* Linux's timerqueue_node.expires */
+	} node;
 	enum hrtimer_restart (*function)(struct hrtimer *);
 	int clock;
 	volatile int active;
@@ -80,11 +82,11 @@ extern u64 hrtimer_forward(struct hrtimer *t, ktime_t now, ktime_t interval);
 #define	hrtimer_start(t, tim, mode)	hrtimer_start_range_ns(t, tim, 0, mode)
 #define	schedule_hrtimeout_range(e, delta, mode) \
 	schedule_hrtimeout(e, mode)
-#define	hrtimer_get_expires(t)		((t)->expires)
-#define	hrtimer_get_expires_ns(t)	ktime_to_ns((t)->expires)
-#define	hrtimer_set_expires(t, tim)	((t)->expires = (tim))
-#define	hrtimer_add_expires_ns(t, ns)	((t)->expires += (ns))
-#define	hrtimer_get_remaining(t)	ktime_sub((t)->expires, ktime_get())
+#define	hrtimer_get_expires(t)		((t)->node.expires)
+#define	hrtimer_get_expires_ns(t)	ktime_to_ns((t)->node.expires)
+#define	hrtimer_set_expires(t, tim)	((t)->node.expires = (tim))
+#define	hrtimer_add_expires_ns(t, ns)	((t)->node.expires += (ns))
+#define	hrtimer_get_remaining(t)	ktime_sub((t)->node.expires, ktime_get())
 #define	hrtimer_forward_now(t, i)	hrtimer_forward(t, ktime_get(), i)
 #define	hrtimer_cb_get_time(t)		ktime_get()
 

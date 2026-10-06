@@ -39,6 +39,10 @@
 #define	clamp_val(val, lo, hi)	clamp_t(typeof (val), (val), (lo), (hi))
 #define	in_range(val, start, len) \
 	((u64)(val) - (u64)(start) < (u64)(len))
+#define	in_range64(val, start, len) \
+	((u64)(val) - (u64)(start) < (u64)(len))
+#define	in_range32(val, start, len) \
+	((u32)(val) - (u32)(start) < (u32)(len))
 #define	swap(a, b) do { \
 	typeof (a) __tmp = (a); (a) = (b); (b) = __tmp; \
 	} while (0)

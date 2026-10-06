@@ -29,6 +29,9 @@
 #include <linux/pm.h>
 #include <linux/gfp.h>
 #include <linux/printk.h>
+#include <linux/minmax.h>
+#include <linux/slab.h>
+#include <linux/uuid.h>
 #include <linux/device/bus.h>
 #include <linux/device/driver.h>
 #include <linux/device/devres.h>
@@ -46,6 +49,8 @@ struct device_type {
 };
 
 struct class;
+struct device_node;
+struct fwnode_handle;
 
 struct device {
 	struct kobject kobj;
@@ -63,6 +68,8 @@ struct device {
 	struct class *class;
 	void (*release)(struct device *dev);
 	int numa_node;
+	struct device_node *of_node;	/* always NULL: no device tree */
+	struct fwnode_handle *fwnode;	/* always NULL */
 	/* illumos */
 	dev_info_t *lkpi_dip;
 	char lkpi_name[32];
@@ -97,11 +104,26 @@ dev_set_drvdata(struct device *dev, void *data)
 #define	set_dev_node(dev, n)		((void)(dev))
 extern struct device *get_device(struct device *dev);
 extern void put_device(struct device *dev);
+
+/*
+ * The layer's own life cycle of a struct device it did not get from the
+ * PCI glue (src/lkpi_device.c), for illumos glue that makes devices of
+ * its own (misc/drm_kms' connector class devices): lkpi_device_init()
+ * sets one up on the node `dip` with the name (count 1, devres ready);
+ * lkpi_device_fini(), called from its release, runs its managed
+ * resources and tears it down. lkpi_dev_dip() (lkpi/prologue.h) is the
+ * node of a device.
+ */
+extern void lkpi_device_init(struct device *dev, dev_info_t *dip,
+    const char *name);
+extern void lkpi_device_fini(struct device *dev);
 #define	device_is_registered(dev)	true
 #define	dev_driver_string(dev)		((dev)->driver != NULL ? (dev)->driver->name : "")
 #define	dev_is_pci(dev)			((dev)->bus == &pci_bus_type)
 #define	device_link_add(c, s, f)	((struct device_link *)NULL)
 #define	device_link_del(l)		((void)(l))
+#define	device_link_remove(c, s)	((void)(c), (void)(s))
+#define	dev_fwnode(dev)			((dev)->fwnode)
 #define	device_property_read_u32(dev, n, v)	(-EINVAL)
 #define	device_property_present(dev, n)	false
 #define	device_iommu_mapped(dev)	false

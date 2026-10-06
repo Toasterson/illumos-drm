@@ -13,8 +13,12 @@
 #include <linux/types.h>
 #include <linux/pci.h>
 
-/* src/lkpi_cpu.c: boot_cpu_data (CPUID). */
+/*
+ * src/lkpi_cpu.c: boot_cpu_data (CPUID); the CPU's physical address
+ * width in bits (memremap()).
+ */
 extern int lkpi_cpu_init(void);
+extern unsigned int lkpi_phys_addr_bits(void);
 
 /* src/lkpi_slab.c, src/lkpi_page.c: allocation, the page cache. */
 extern int lkpi_slab_init(void);
@@ -84,6 +88,10 @@ extern void lkpi_work_flush_system(void);
 extern int lkpi_shrinker_init(void);
 extern void lkpi_shrinker_fini(void);
 
+/* src/lkpi_ww_mutex.c: the stand-alone wound/wait mutexes' wait buckets. */
+extern int lkpi_ww_init(void);
+extern void lkpi_ww_fini(void);
+
 /* src/lkpi_drm.c: the DRM driver-table copies, the unplug SRCU. */
 extern int lkpi_drm_init(void);
 extern void lkpi_drm_fini(void);
@@ -95,6 +103,10 @@ extern void lkpi_drm_fini(void);
 extern void lkpi_taskq_name(char *buf, size_t len, const char *base);
 /* src/lkpi_resv.c: snapshots of locked walks never unlocked again. */
 extern void lkpi_resv_fini(void);
+
+/* src/lkpi_dmi.c: the SMBIOS strings of <linux/dmi.h>. */
+extern int lkpi_dmi_init(void);
+extern void lkpi_dmi_fini(void);
 
 /* src/lkpi_pci.c: attached PCI devices. */
 extern int lkpi_pci_init(void);
@@ -139,9 +151,6 @@ extern int lkpi_pci_phys_lookup(resource_size_t phys, size_t size,
  */
 extern ddi_dma_attr_t *lkpi_dev_dma_attr(struct device *dev);
 
-/* src/lkpi_device.c: devres of a device at detach. */
-extern void lkpi_device_init(struct device *dev, dev_info_t *dip,
-    const char *name);
-extern void lkpi_device_fini(struct device *dev);
+/* src/lkpi_device.c: lkpi_device_init()/_fini() are in <linux/device.h>. */
 
 #endif

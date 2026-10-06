@@ -256,3 +256,306 @@ lkpi_taskq_name(char *buf, size_t len, const char *base)
 	(void) strlcpy(buf + i, suffix, len - i);
 }
 
+
+/* --- kthread workers ----------------------------------------------------- */
+
+/*
+ * Linux's kthread_worker API (<linux/kthread.h>), on the kthreads above;
+ * an independent implementation of Linux's documented semantics.
+ *
+ * The worker's kthread runs lkpi_kthread_worker_fn(): it takes the first
+ * work off work_list under worker->lock, records it in current_work and
+ * runs it with the lock dropped, with the worker's task as `current`.
+ * current_work keeps pointing at the work that ran last until the thread
+ * next takes the lock; it is only compared, never dereferenced (the
+ * function may free its work). A work is queued while its node is on
+ * the list; work->worker is the worker it was first queued on.
+ *
+ * Flushing uses a barrier work with a completion on the flusher's stack,
+ * as Linux does: it is queued right behind the work if that is queued, at
+ * the head of the list if the work is running, at the tail for
+ * kthread_flush_worker(). Works run in list order, so the barrier's
+ * completion means that everything ahead of it has run.
+ * kthread_cancel_work_sync() raises work->canceling while it waits for a
+ * running instance, so kthread_queue_work() refuses the work meanwhile
+ * (also when the work requeues itself).
+ *
+ * Deviations from Linux (which warns and goes on):
+ * - kthread_queue_work() refuses (WARN, false) a work that belongs to
+ *   another worker, rather than linking it under a lock that does not
+ *   protect the list it may still be on; kthread_init_work() frees it.
+ * - Flushing or cancelling a work from its own worker's thread, or
+ *   flushing the worker from it, would wait forever: it WARNs and
+ *   returns without waiting.
+ * - kthread_destroy_worker() WARNs about works still queued after its
+ *   flush (a work that requeued itself) and detaches them, so a later
+ *   flush or cancel of such a work finds no worker instead of freed
+ *   memory.
+ * flags (KTW_FREEZABLE) has no effect: illumos does not freeze threads.
+ */
+
+struct lkpi_kthread_flush {
+	struct kthread_work work;
+	struct completion done;
+};
+
+static void
+lkpi_kthread_flush_fn(struct kthread_work *work)
+{
+	struct lkpi_kthread_flush *f = container_of(work,
+	    struct lkpi_kthread_flush, work);
+
+	complete(&f->done);
+}
+
+static void
+lkpi_kthread_flush_init(struct lkpi_kthread_flush *f)
+{
+	kthread_init_work(&f->work, lkpi_kthread_flush_fn);
+	init_completion(&f->done);
+}
+
+static int
+lkpi_kthread_worker_fn(void *arg)
+{
+	struct kthread_worker *worker = arg;
+	struct kthread_work *work;
+
+	for (;;) {
+		/*
+		 * The state is set before the stop flag and the list are
+		 * tested: a kthread_stop() or a queueing after the tests
+		 * sets it back to TASK_RUNNING, so schedule() returns.
+		 */
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (kthread_should_stop()) {
+			__set_current_state(TASK_RUNNING);
+			spin_lock(&worker->lock);
+			worker->task = NULL;
+			worker->current_work = NULL;
+			spin_unlock(&worker->lock);
+			return (0);
+		}
+
+		work = NULL;
+		spin_lock(&worker->lock);
+		if (!list_empty(&worker->work_list)) {
+			work = list_first_entry(&worker->work_list,
+			    struct kthread_work, node);
+			list_del_init(&work->node);
+		}
+		worker->current_work = work;
+		spin_unlock(&worker->lock);
+
+		if (work != NULL) {
+			__set_current_state(TASK_RUNNING);
+			work->func(work);
+		} else {
+			schedule();
+		}
+		(void) cond_resched();
+	}
+}
+
+/*
+ * Links work in front of pos. The thread is woken only when it is not
+ * running a work: otherwise it looks at the list again when that work
+ * returns. Waking a created but never started worker starts it, as on
+ * Linux. Called with worker->lock held.
+ */
+static void
+lkpi_kthread_insert_work(struct kthread_worker *worker,
+    struct kthread_work *work, struct list_head *pos)
+{
+	assert_spin_locked(&worker->lock);
+	list_add_tail(&work->node, pos);
+	work->worker = worker;
+	if (worker->current_work == NULL && worker->task != NULL)
+		(void) wake_up_process(worker->task);
+}
+
+static struct kthread_worker *
+lkpi_kthread_create_worker(unsigned int flags, const char *namefmt,
+    va_list ap)
+{
+	struct kthread_worker *worker;
+	struct task_struct *task;
+	char name[32];
+
+	might_sleep();
+	(void) vsnprintf(name, sizeof (name), namefmt, ap);
+
+	worker = kmem_zalloc(sizeof (*worker), KM_SLEEP);
+	worker->flags = flags;
+	spin_lock_init(&worker->lock);
+	INIT_LIST_HEAD(&worker->work_list);
+	INIT_LIST_HEAD(&worker->delayed_work_list);
+
+	task = lkpi_kthread_create(lkpi_kthread_worker_fn, worker, "%s", name);
+	if (IS_ERR(task)) {
+		kmem_free(worker, sizeof (*worker));
+		return (ERR_CAST(task));
+	}
+	/* Nothing can queue before the worker is returned. */
+	worker->task = task;
+	return (worker);
+}
+
+struct kthread_worker *
+kthread_create_worker(unsigned int flags, const char *namefmt, ...)
+{
+	struct kthread_worker *worker;
+	va_list ap;
+
+	va_start(ap, namefmt);
+	worker = lkpi_kthread_create_worker(flags, namefmt, ap);
+	va_end(ap);
+	return (worker);
+}
+
+struct kthread_worker *
+kthread_run_worker(unsigned int flags, const char *namefmt, ...)
+{
+	struct kthread_worker *worker;
+	va_list ap;
+
+	va_start(ap, namefmt);
+	worker = lkpi_kthread_create_worker(flags, namefmt, ap);
+	va_end(ap);
+	if (!IS_ERR(worker))
+		(void) wake_up_process(worker->task);
+	return (worker);
+}
+
+bool
+kthread_queue_work(struct kthread_worker *worker, struct kthread_work *work)
+{
+	bool queued = false;
+
+	if (WARN_ON(worker == NULL || work == NULL))
+		return (false);
+	spin_lock(&worker->lock);
+	if (WARN_ON_ONCE(work->worker != NULL && work->worker != worker)) {
+		spin_unlock(&worker->lock);
+		return (false);
+	}
+	if (list_empty(&work->node) && work->canceling == 0) {
+		lkpi_kthread_insert_work(worker, work, &worker->work_list);
+		queued = true;
+	}
+	spin_unlock(&worker->lock);
+	return (queued);
+}
+
+void
+kthread_flush_work(struct kthread_work *work)
+{
+	struct lkpi_kthread_flush fwork;
+	struct kthread_worker *worker;
+	bool wait = true;
+
+	might_sleep();
+	if (WARN_ON(work == NULL))
+		return;
+	worker = READ_ONCE(work->worker);
+	if (worker == NULL)
+		return;
+
+	lkpi_kthread_flush_init(&fwork);
+	spin_lock(&worker->lock);
+	if (WARN_ON_ONCE(work->worker != worker)) {
+		wait = false;
+	} else if (!list_empty(&work->node)) {
+		if (WARN_ON(worker->task == current))
+			wait = false;
+		else
+			lkpi_kthread_insert_work(worker, &fwork.work,
+			    work->node.next);
+	} else if (worker->current_work == work) {
+		if (WARN_ON(worker->task == current))
+			wait = false;
+		else
+			lkpi_kthread_insert_work(worker, &fwork.work,
+			    worker->work_list.next);
+	} else {
+		wait = false;
+	}
+	spin_unlock(&worker->lock);
+
+	if (wait)
+		wait_for_completion(&fwork.done);
+}
+
+void
+kthread_flush_worker(struct kthread_worker *worker)
+{
+	struct lkpi_kthread_flush fwork;
+
+	might_sleep();
+	if (WARN_ON(worker == NULL) || WARN_ON(worker->task == current))
+		return;
+	lkpi_kthread_flush_init(&fwork);
+	(void) kthread_queue_work(worker, &fwork.work);
+	wait_for_completion(&fwork.done);
+}
+
+bool
+kthread_cancel_work_sync(struct kthread_work *work)
+{
+	struct kthread_worker *worker;
+	bool pending = false;
+
+	might_sleep();
+	if (WARN_ON(work == NULL))
+		return (false);
+	worker = READ_ONCE(work->worker);
+	if (worker == NULL)
+		return (false);
+
+	spin_lock(&worker->lock);
+	if (WARN_ON_ONCE(work->worker != worker)) {
+		spin_unlock(&worker->lock);
+		return (false);
+	}
+	if (!list_empty(&work->node)) {
+		list_del_init(&work->node);
+		pending = true;
+	}
+	if (worker->current_work == work) {
+		/* kthread_flush_work() refuses to wait on its own worker. */
+		work->canceling++;
+		spin_unlock(&worker->lock);
+		kthread_flush_work(work);
+		spin_lock(&worker->lock);
+		work->canceling--;
+	}
+	spin_unlock(&worker->lock);
+	return (pending);
+}
+
+void
+kthread_destroy_worker(struct kthread_worker *worker)
+{
+	struct kthread_work *work, *next;
+	struct task_struct *task;
+
+	if (WARN_ON(worker == NULL))
+		return;
+	task = worker->task;
+	if (WARN_ON(task == NULL) || WARN_ON(task == current))
+		return;
+
+	kthread_flush_worker(worker);
+	(void) kthread_stop(task);
+
+	/* The thread is gone; nothing else may use the worker now. */
+	(void) WARN_ON(!list_empty(&worker->delayed_work_list));
+	if (WARN_ON(!list_empty(&worker->work_list))) {
+		list_for_each_entry_safe(work, next, &worker->work_list,
+		    node) {
+			list_del_init(&work->node);
+			work->worker = NULL;
+		}
+	}
+	kmem_free(worker, sizeof (*worker));
+}

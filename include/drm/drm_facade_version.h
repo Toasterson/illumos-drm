@@ -26,7 +26,11 @@
  * core no longer reads drm_device.dev after drm_dev_alloc(); layouts
  * unchanged) and the reservation functions the layer builds on
  * (dma_resv_init/fini, dma_resv_get_fences, transactions in
- * dma_resv_lock). Expect a new major version with mode setting (R5i).
+ * dma_resv_lock); 2.0 (R5i, i915n display) Linux mode setting carried
+ * in C: the KMS areas of drm_device and drm_file, the client-capability
+ * booleans of drm_file, drm_driver.illumos_lkms and drm_lkms.h's hooks,
+ * drm_dev_illumos_lkms_register and the event functions,
+ * drm_illumos_mode_config.async_page_flip.
  */
 
 #ifndef _DRM_FACADE_VERSION_H
@@ -38,8 +42,8 @@
 extern "C" {
 #endif
 
-#define	DRM_FACADE_MAJOR	1
-#define	DRM_FACADE_MINOR	1
+#define	DRM_FACADE_MAJOR	2
+#define	DRM_FACADE_MINOR	0
 
 /*
  * The structures whose sizes are part of the version, in the order of
@@ -74,7 +78,8 @@ extern "C" {
 	X(drm_rkms_connector_state) \
 	X(drm_rkms_fb_info) \
 	X(drm_rkms_rect) \
-	X(drm_printer)
+	X(drm_printer) \
+	X(drm_illumos_lkms_funcs)
 
 /*
  * The structures with a private tail (__core), whose sizes follow the
@@ -118,6 +123,7 @@ enum drm_facade_struct {
 	DRM_FACADE_SZ_drm_rkms_fb_info,
 	DRM_FACADE_SZ_drm_rkms_rect,
 	DRM_FACADE_SZ_drm_printer,
+	DRM_FACADE_SZ_drm_illumos_lkms_funcs,
 	DRM_FACADE_TAIL_drm_device,
 	DRM_FACADE_TAIL_drm_file,
 	DRM_FACADE_TAIL_drm_gem_object,

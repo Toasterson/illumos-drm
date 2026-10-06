@@ -51,6 +51,7 @@
 #define	lock_release(l, i)			((void)0)
 #define	lock_acquire_exclusive(l, s, t, n, i)	((void)0)
 #define	lock_acquire_shared(l, s, t, n, i)	((void)0)
+#define	lock_acquire_shared_recursive(l, s, t, n, i)	((void)0)
 #define	lock_map_acquire(l)			((void)(l))
 #define	lock_map_acquire_try(l)			((void)(l))
 #define	lock_map_acquire_read(l)		((void)(l))

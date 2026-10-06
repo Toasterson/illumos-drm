@@ -14,9 +14,11 @@ use ddi::sys;
 use ddi::{DevInfo, Errno, IntrPriority, IoctlArg, Sleepable};
 use drm_core::gem::{GemDma, GemRef};
 use drm_core::ioctl::{DriverIoctl, SizePlan};
+use drm_core::lkms::LkmsHooks;
 use drm_core::minor::{CloneId, NodeKind};
+use drm_core::state::FileFlags;
 use drm_core::uaccess::{ArgIo, CoreArg};
-use drm_core::{BusId, Device, Driver, DriverInfo, DumbCreated};
+use drm_core::{BusId, Device, Driver, DriverInfo, DumbCreated, ModeConfig};
 use drm_facade_sys as f;
 use drm_uapi as uapi;
 
@@ -165,6 +167,49 @@ impl Driver for CDriver {
         self.core().kms.as_ref().map(|k| k as &dyn drm_core::kms::KmsDriver<GemRef<FObj>>)
     }
 
+    fn lkms(&self) -> Option<&dyn LkmsHooks> {
+        self.core().lkms_funcs().map(|_| self as &dyn LkmsHooks)
+    }
+
+    fn lkms_ioctl(
+        &self,
+        _dev: &Device<Self>,
+        file: CloneId,
+        cmds: (u32, u32),
+        nr: u32,
+        data: &mut [u8],
+        arg: &IoctlArg<'_>,
+        ctx: &Sleepable,
+    ) -> i32 {
+        let core = self.core();
+        let Some(ioctl) = core.lkms_funcs().and_then(|l| l.ioctl) else { return -Errno::ENOTTY.get() };
+        let Some(fp) = core.file(file) else { return -Errno::ENXIO.get() };
+        let ddev = core.ddev();
+        // The frame lets the KMS code's copies of the arrays an argument
+        // points to (copy_to_user and friends over drm_copy_to_user) find
+        // the ioctl's data model.
+        let r = crate::ctxt::with_frame(self.core, cmds, arg, ctx, || {
+            // SAFETY: the KMS code's handler with its device, the kernel
+            // copy of the argument (the table's size) and the file.
+            unsafe { ioctl(ddev, nr, data.as_mut_ptr().cast(), fp.as_ptr()) }
+        });
+        let r = r.unwrap_or_else(|e| -e.get());
+        if drm_core::lkms::is_linux_internal(r) {
+            // The KMS code maps these (lkpi_errno()); one that gets
+            // through fails the ioctl with EIO (lkms::from_neg).
+            core.dip.warn(format_args!("KMS ioctl {nr:#x} returned Linux-internal error {}; EIO", -r));
+        }
+        r
+    }
+
+    fn file_flags(&self, file: CloneId, flags: &FileFlags) {
+        if let Some(fp) = self.core().file(file) {
+            // SAFETY: the file's structure, alive while the file is open
+            // (the core calls this for open files only).
+            unsafe { flags.store(fp.as_ptr()) };
+        }
+    }
+
     fn fence_priority(&self) -> Option<IntrPriority> {
         self.core().setup.lock().fence_pri
     }
@@ -184,7 +229,12 @@ impl Driver for CDriver {
             NodeKind::Render => ptr::addr_of_mut!(minors[1]),
         };
         fp.__core[0] = u64::from(file.get());
+        // Facade 2.0: the master snapshot of the new file (a first open is
+        // master); its client capabilities start cleared.
+        let flags = dev.file_flags(file).unwrap_or_default();
         let fp = Box::into_raw(fp);
+        // SAFETY: just made, not shared yet.
+        unsafe { flags.store(fp) };
         fp_set_magic(fp);
         // SAFETY: just made.
         let fpn = unsafe { NonNull::new_unchecked(fp) };
@@ -194,13 +244,22 @@ impl Driver for CDriver {
             return Err(e);
         }
         link_file(core, fp);
-        if let Some(open) = core.table.open {
+        let driver_open = || match core.table.open {
             // SAFETY: the driver's callback with its device and new file.
-            let r = unsafe { open(core.ddev(), fp) };
-            if let Err(e) = from_neg(r) {
-                forget_file(core, file);
-                return Err(e);
-            }
+            Some(open) => from_neg(unsafe { open(core.ddev(), fp) }),
+            None => Ok(()),
+        };
+        // A Linux-KMS device whose mode setting runs: the KMS code's
+        // file_open first, undone if the driver's open fails.
+        let r = match (self.lkms(), dev.lkms_events().filter(|q| q.active())) {
+            (Some(h), Some(q)) => drm_core::lkms::open_file(h, file.get(), driver_open, ctx).map(|()| {
+                q.set_kms_open(file);
+            }),
+            _ => driver_open(),
+        };
+        if let Err(e) = r {
+            forget_file(core, file);
+            return Err(e);
         }
         Ok(())
     }
@@ -272,6 +331,73 @@ impl Driver for CDriver {
             // SAFETY: as above.
             unsafe { cb(core.ddev()) };
         }
+    }
+}
+
+/// Facade 2.0: the hooks of a Linux-KMS driver's KMS code (`struct
+/// drm_illumos_lkms_funcs`), which `drm_dev_alloc` checked for the
+/// required ones; the core calls them once mode setting runs
+/// (`drm_dev_illumos_lkms_register()`). Thread context, no core locks held.
+impl LkmsHooks for CDriver {
+    fn file_open(&self, file: u32, _ctx: &Sleepable) -> Result<(), Errno> {
+        let core = self.core();
+        let Some(open) = core.lkms_funcs().and_then(|l| l.file_open) else { return Ok(()) };
+        let fp = CloneId::new(file).and_then(|c| core.file(c)).ok_or(Errno::ENXIO)?;
+        // SAFETY: the KMS code's hook with its device and the new file.
+        from_neg(unsafe { open(core.ddev(), fp.as_ptr()) })
+    }
+
+    fn file_close(&self, file: u32, _ctx: &Sleepable) {
+        let core = self.core();
+        let Some(close) = core.lkms_funcs().and_then(|l| l.file_close) else { return };
+        let Some(fp) = CloneId::new(file).and_then(|c| core.file(c)) else { return };
+        // SAFETY: the KMS code's hook with its device and the closing file.
+        unsafe { close(core.ddev(), fp.as_ptr()) };
+    }
+
+    fn lastclose(&self, _ctx: &Sleepable) {
+        let core = self.core();
+        if let Some(last) = core.lkms_funcs().and_then(|l| l.lastclose) {
+            // SAFETY: the KMS code's hook with its device.
+            unsafe { last(core.ddev()) };
+        }
+    }
+
+    fn register_dev(&self, _ctx: &Sleepable) -> Result<(), Errno> {
+        let core = self.core();
+        let Some(reg) = core.lkms_funcs().and_then(|l| l.register_dev) else { return Ok(()) };
+        // SAFETY: the KMS code's hook with its device.
+        from_neg(unsafe { reg(core.ddev()) })
+    }
+
+    fn unregister_dev(&self, _ctx: &Sleepable) {
+        let core = self.core();
+        if let Some(unreg) = core.lkms_funcs().and_then(|l| l.unregister_dev) {
+            // SAFETY: the KMS code's hook with its device.
+            unsafe { unreg(core.ddev()) };
+        }
+    }
+
+    fn mode_config(&self, _ctx: &Sleepable) -> ModeConfig {
+        let core = self.core();
+        let Some(mc) = core.lkms_funcs().and_then(|l| l.mode_config) else { return ModeConfig::DEFAULT };
+        let mut out = f::drm_illumos_mode_config::default();
+        // SAFETY: the KMS code's hook with its device and a structure to
+        // fill in.
+        unsafe { mc(core.ddev(), &mut out) };
+        mode_config_of(&out)
+    }
+}
+
+/// The core's mode configuration of a facade one.
+pub(crate) fn mode_config_of(c: &f::drm_illumos_mode_config) -> ModeConfig {
+    ModeConfig {
+        cursor_width: c.cursor_width,
+        cursor_height: c.cursor_height,
+        preferred_depth: c.preferred_depth,
+        prefer_shadow: c.prefer_shadow,
+        fb_modifiers: c.fb_modifiers,
+        async_page_flip: c.async_page_flip,
     }
 }
 

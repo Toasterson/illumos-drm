@@ -2,17 +2,21 @@
  * SPDX-License-Identifier: MIT
  * Copyright 2026 The illumos-drm authors
  *
- * Linux's wound/wait mutexes (include/linux/ww_mutex.h, GPL-2.0).
+ * Linux's wound/wait mutexes (include/linux/ww_mutex.h, GPL-2.0;
+ * reimplemented).
  *
- * The only wound/wait mutexes drivers lock are the locks of reservation
- * objects, which live in the DRM core: struct ww_mutex is the facade's
- * public placeholder inside struct dma_resv. The layer's ww_mutex_*()
- * therefore operate on the dma_resv containing the mutex and go through
- * the facade's dma_resv_lock()/dma_resv_unlock(), which apply the core's
- * wait-die rule to the transaction (struct ww_acquire_ctx, stamped by
- * ww_acquire_init()). A ww_mutex that is not inside a dma_resv is not
- * supported (ww_mutex_init() of one panics in DEBUG kernels and its lock
- * functions return -EINVAL).
+ * Two kinds of lock share struct ww_mutex, the facade's public
+ * placeholder. The lock inside a struct dma_resv is the DRM core's: the
+ * layer's ww_mutex_*() on it go through the facade's reservation locks
+ * (src/lkpi_resv.c), which apply the core's wait-die rule to the
+ * transaction (struct ww_acquire_ctx, stamped by ww_acquire_init()).
+ * Every other ww_mutex is stand-alone: ww_mutex_init() marks it (DRM's
+ * mode-setting locks, struct drm_modeset_lock), and the layer implements
+ * it (src/lkpi_ww_mutex.c) with the same stamps and rule, so one
+ * transaction may take both kinds. Unlike Linux, a stand-alone lock has
+ * no ordered queue of waiters: an unlock wakes them all and the first to
+ * run takes it (see src/lkpi_ww_mutex.c). Wound-wait classes
+ * (DEFINE_WW_CLASS) behave as wait-die. ww_mutex_destroy() does nothing.
  */
 #ifndef _LINUX_WW_MUTEX_H
 #define	_LINUX_WW_MUTEX_H

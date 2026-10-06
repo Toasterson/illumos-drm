@@ -14,9 +14,10 @@
  *
  * Not carried (Linux fields left out): accel, master, huge_mnt,
  * master_mutex, filelist_internal, clientlist_mutex, clientlist,
- * client_sysrq_list, vblank, vbl_lock, max_vblank_count,
- * vblank_event_list, mode_config (with the C mode-setting core, R5i),
- * object_name_lock, object_name_idr, vram_mm, fb_helper, gem_lru_mutex.
+ * client_sysrq_list, object_name_lock, object_name_idr, vram_mm,
+ * fb_helper, gem_lru_mutex. Facade 2.0: the mode-setting fields vblank,
+ * vbl_lock, max_vblank_count, vblank_event_list and mode_config live in
+ * the KMS area (see DRM_FACADE_DEVICE_KMS below).
  */
 
 #ifndef _DRM_DEVICE_H
@@ -56,6 +57,18 @@ enum switch_power_state {
 };
 
 struct drm_vma_offset_manager;
+
+/*
+ * Facade 2.0: the mode-setting area of struct drm_device, DRM_FACADE_KMS_DEVICE_WORDS
+ * 64-bit words that the core zeroes at allocation and never reads or
+ * writes afterwards. A Linux KMS implementation (drm_lkms.h) keeps
+ * Linux's mode-setting fields of struct drm_device there: it defines
+ * DRM_FACADE_DEVICE_KMS, before including any facade header, as the
+ * member declarations (vblank, vbl_lock, max_vblank_count,
+ * vblank_event_list, mode_config), which then overlay the area under
+ * their Linux names, and checks at compile time that they fit.
+ */
+#define	DRM_FACADE_KMS_DEVICE_WORDS	1024
 
 /*
  * A DRM device. A driver allocates it with drm_dev_alloc() or embeds it in
@@ -107,6 +120,15 @@ struct drm_device {
 	struct drm_vma_offset_manager *vma_offset_manager;
 	enum switch_power_state switch_power_state;
 	void *debugfs_root;
+	/* facade 2.0: the mode-setting area */
+	union {
+#ifdef	DRM_FACADE_DEVICE_KMS
+		struct {
+			DRM_FACADE_DEVICE_KMS
+		};
+#endif
+		uint64_t __kms[DRM_FACADE_KMS_DEVICE_WORDS];
+	};
 	/* private: the core's state */
 	uint64_t __core[16];
 };
