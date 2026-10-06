@@ -75,7 +75,7 @@ struct i915n_boot_fb {
 	uint8_t		depth;		/* bits per pixel */
 	uint8_t		fg_color;
 	uint8_t		bg_color;
-	struct { uint8_t size, pos; } red, green, blue;
+	struct { uint8_t pos, size; } red, green, blue;	/* rgb_info_t */
 	struct { uint16_t x, y; } screen;
 };
 #define	I915N_FB_TYPE_RGB	3	/* FB_TYPE_RGB */
