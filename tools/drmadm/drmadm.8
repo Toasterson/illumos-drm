@@ -142,11 +142,9 @@ once: it removes the
 .Pa /dev/dri
 links of the devices of the stack that is no longer loaded.
 .Nm Cm select
-refuses while any module of either stack is loaded: stop what uses them
-(the display manager and Xorg), unload the drivers and then the core with
-.Nm modunload Fl i ,
-or select in another boot environment with
-.Fl R .
+only edits files read at boot: loaded modules of either stack stay as they
+are until the next boot (a display driver that is the system console cannot
+be unloaded).
 It also refuses while another
 .Nm
 runs.
