@@ -2236,8 +2236,11 @@ drmadm select legacy|new    # for the next boot
 drmadm -R /mnt select legacy    # in a mounted boot environment
 ```
 
-`select` refuses while any module of either stack is loaded and while
-another `drmadm` holds its lock (`/etc/system.d/.drmadm.lock`), then:
+`select` only edits files read at boot, so it runs with modules of either
+stack loaded (they stay loaded until the reboot; a display driver that is
+the system console cannot be unloaded anyway) and lists them; it refuses
+while another `drmadm` holds its lock (`/etc/system.d/.drmadm.lock`). It
+then:
 
 1. writes `/etc/system.d/driver:graphics:drmadm` (named after the package,
    as `system(5)` recommends) with the selection, its time, the alias set
@@ -2345,9 +2348,11 @@ with it installed before a machine loads both stacks; OpenIndiana's
 current `misc/drm` loads beside `misc/drm_core`. (The `0600 root root`
 nodes the G7 guest found for the packaged drivers attached at boot are
 fixed since G10; see *Packaging*.)
-`drmadm select` refuses while a DRM module is loaded, so on a machine
-whose display uses `i915` the display manager must stop first (or select
-with `-R`). The busy part of the guard rule is tested deterministically
+`drmadm select` runs with DRM modules loaded (the selection takes effect
+at the next boot; nothing is loaded or unloaded), so a machine whose
+console driver is `i915n` or `i915` can switch stacks with a reboot. Both
+stacks are never loaded together: the in-kernel guards, not drmadm, keep
+that so. The busy part of the guard rule is tested deterministically
 only with DTrace (`overlap`); the 100 concurrent loads never overlapped
 their `_init` calls.
 
