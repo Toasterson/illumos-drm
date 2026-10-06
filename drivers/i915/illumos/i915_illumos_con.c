@@ -107,6 +107,18 @@ static struct {
 	char			name[16];
 } i915n_con_st = { .kd_mode = KD_TEXT };
 
+/*
+ * What the panic callback did, for the crash dump: i915n has no CTF, so
+ * read it as "i915n_con_panic_log/4U" with mdb (runs, the KD mode found,
+ * whether the plane was written, the surface address written).
+ */
+struct {
+	uint32_t	runs;
+	uint32_t	kd_mode;
+	uint32_t	flipped;
+	uint32_t	surf;
+} i915n_con_panic_log;
+
 /* Ivy Bridge GPUs (Linux's INTEL_IVB_*_IDS): display on illumos. */
 static const uint16_t i915n_con_ids[] = {
 	0x0152, 0x0156, 0x015a, 0x0162, 0x0166, 0x016a
@@ -215,7 +227,10 @@ i915n_con_panic(void *arg, int code)
 	 * output reaches the console framebuffer; panicstr is set, so
 	 * gfx_private's lock is bypassed (mutex_vector_enter()).
 	 */
-	i915n_con_kms_panic();
+	i915n_con_panic_log.runs++;
+	i915n_con_panic_log.kd_mode = i915n_con_st.kd_mode;
+	i915n_con_panic_log.flipped =
+	    i915n_con_kms_panic(&i915n_con_panic_log.surf);
 	if (i915n_con_st.kd_mode != KD_TEXT)
 		con_kdsetmode(KD_TEXT);
 	return (B_TRUE);

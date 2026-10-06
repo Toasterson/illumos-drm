@@ -65,8 +65,11 @@ extern int i915n_con_kms_takeover(dev_info_t *dip,
     const struct i915n_con_fb *fb);
 /* Queues the restore of the console configuration (thread context). */
 extern void i915n_con_kms_restore(void);
-/* Panic: show the console framebuffer with register writes only. */
-extern void i915n_con_kms_panic(void);
+/*
+ * Panic: show the console framebuffer with register writes only. Returns
+ * whether the plane was written and stores the surface address it wrote.
+ */
+extern int i915n_con_kms_panic(uint32_t *surfp);
 /* Module load/unload of the KMS side (the hook table, the work item). */
 extern void i915n_con_kms_init(void);
 extern void i915n_con_kms_fini(void);

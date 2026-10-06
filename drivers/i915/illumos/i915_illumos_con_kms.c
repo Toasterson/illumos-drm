@@ -415,15 +415,15 @@ i915n_con_kms_restore(void)
 		(void) schedule_work(&i915n_con.restore_work);
 }
 
-void
-i915n_con_kms_panic(void)
+int
+i915n_con_kms_panic(uint32_t *surfp)
 {
 	struct intel_display *display;
 	enum i9xx_plane_id p;
 	u32 cntr;
 
 	if (!READ_ONCE(i915n_con.active))
-		return;
+		return (0);
 	display = to_i915(i915n_con.drm)->display;
 	p = to_intel_plane(i915n_con.crtc->primary)->i9xx_plane;
 	cntr = intel_de_read_fw(display, DSPCNTR(display, p));
@@ -435,8 +435,9 @@ i915n_con_kms_panic(void)
 	intel_de_write_fw(display, DSPTILEOFF(display, p), 0);
 	intel_de_write_fw(display, DSPCNTR(display, p), cntr);
 	/* The surface address last: it arms the update. */
-	intel_de_write_fw(display, DSPSURF(display, p),
-	    i915_ggtt_offset(i915n_con.vma));
+	*surfp = i915_ggtt_offset(i915n_con.vma);
+	intel_de_write_fw(display, DSPSURF(display, p), *surfp);
+	return (1);
 }
 
 void
