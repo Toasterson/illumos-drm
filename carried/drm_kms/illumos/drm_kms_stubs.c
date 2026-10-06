@@ -16,6 +16,9 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/err.h>
+#include <linux/kref.h>
+#include <linux/mutex.h>
+#include <linux/device.h>
 #include <linux/export.h>
 #include <linux/dma-fence.h>
 #include <linux/dma-resv.h>
@@ -276,17 +279,66 @@ EXPORT_SYMBOL(drm_writeback_get_out_fence);
 
 /*
  * --- Panels (drm_panel.c) ---------------------------------------------------
- * No panel drivers and no panel followers on illumos: allocating a panel
- * fails with -ENODEV (i915 then registers no drm_panel for its eDP/DSI
- * connector and drives the panel power itself, as before Linux's panel
- * followers existed); the other functions accept NULL and do nothing.
+ * No panel drivers and no panel followers on illumos. A panel can still be
+ * allocated: i915 allocates one for every eDP and DSI connector when the
+ * connector registers (intel_panel_register(), a late_register hook) and
+ * fails the registration, and with it the KMS start, if that fails. The
+ * allocation is Linux's: a zeroed structure of the caller's size with the
+ * drm_panel at `offset`, set up like drm_panel_init() (device, functions,
+ * connector type, lists, follower lock) with one reference, which a
+ * managed action on `dev` drops when `dev` is released (for i915 the
+ * connector's class device, at drm_sysfs_connector_remove()). Adding,
+ * removing, preparing and unpreparing notify panel followers in Linux;
+ * there are none, so they do nothing (and accept NULL).
  */
+
+static void
+drm_kms_panel_free(struct kref *ref)
+{
+	struct drm_panel *panel = container_of(ref, struct drm_panel,
+	    refcount);
+
+	mutex_destroy(&panel->follower_lock);
+	kfree(panel->container);
+}
+
+static void
+drm_kms_panel_put_action(void *arg)
+{
+	struct drm_panel *panel = arg;
+
+	(void) kref_put(&panel->refcount, drm_kms_panel_free);
+}
 
 void *
 __devm_drm_panel_alloc(struct device *dev, size_t size, size_t offset,
     const struct drm_panel_funcs *funcs, int connector_type)
 {
-	return (ERR_PTR(-ENODEV));
+	struct drm_panel *panel;
+	void *container;
+	int ret;
+
+	if (dev == NULL || funcs == NULL || offset > size ||
+	    size - offset < sizeof (*panel) ||
+	    offset % __alignof__(struct drm_panel) != 0)
+		return (ERR_PTR(-EINVAL));
+	container = kzalloc(size, GFP_KERNEL);
+	if (container == NULL)
+		return (ERR_PTR(-ENOMEM));
+	panel = (struct drm_panel *)((char *)container + offset);
+	panel->container = container;
+	panel->dev = dev;
+	panel->funcs = funcs;
+	panel->connector_type = connector_type;
+	INIT_LIST_HEAD(&panel->list);
+	INIT_LIST_HEAD(&panel->followers);
+	mutex_init(&panel->follower_lock);
+	kref_init(&panel->refcount);
+	/* On failure the action runs at once: the panel is freed. */
+	ret = devm_add_action_or_reset(dev, drm_kms_panel_put_action, panel);
+	if (ret != 0)
+		return (ERR_PTR(ret));
+	return (container);
 }
 EXPORT_SYMBOL(__devm_drm_panel_alloc);
 
