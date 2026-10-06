@@ -159,11 +159,10 @@ EXPORT_SYMBOL(drm_lease_filter_crtcs);
  * the connector holds its one reference until drm_sysfs_connector_remove().
  */
 
-/* linuxkpi/src/lkpi_internal.h: exported by misc/linuxkpi */
-extern void lkpi_device_init(struct device *dev, dev_info_t *dip,
-    const char *name);
-extern void lkpi_device_fini(struct device *dev);
-extern dev_info_t *lkpi_dev_dip(const struct device *dev);
+/*
+ * lkpi_device_init(), lkpi_device_fini() (<linux/device.h>) and
+ * lkpi_dev_dip() (lkpi/prologue.h) are misc/linuxkpi's.
+ */
 
 static void
 drm_kms_connector_kdev_release(struct device *kdev)

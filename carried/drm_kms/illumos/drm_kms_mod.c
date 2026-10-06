@@ -11,10 +11,13 @@
  * the core hands the device's mode-setting ioctls and file events to this
  * module (facade 2.0, drm_lkms.h).
  *
- * The module's only global state is Linux's connector name IDs. It depends on misc/drm_core (the
- * facade; _init refuses a core whose facade differs from the one this
- * module was compiled against, as the drivers do), misc/linuxkpi (the
- * Linux kernel interfaces; _init checks its ABI) and misc/drm_helpers.
+ * _init sets up the one piece of global state that Linux's
+ * drm_core_init() prepares for KMS, the connector name IDs; the rest of
+ * the module's state belongs to the devices. It depends on misc/drm_core
+ * (the facade; _init refuses a core whose facade differs from the one
+ * this module was compiled against, as the drivers do), misc/linuxkpi
+ * (the Linux kernel interfaces; _init checks its ABI) and
+ * misc/drm_helpers.
  * The kernel keeps it loaded while a driver that depends on it
  * (-N misc/drm_kms) is loaded; drmadm's exclusion of misc/drm_core under
  * `select legacy` keeps it out of the legacy stack.
