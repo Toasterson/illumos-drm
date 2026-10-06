@@ -71,7 +71,6 @@ die() {
 
 [ -f "$LINUX/.illumos/applied" ] ||
     die "$LINUX is not prepared: run drivers/i915/fetch-and-patch.sh $LINUX"
-rm -rf "$OUT/log"
 mkdir -p "$OUT/obj" "$OUT/log"
 OUT=$(cd "$OUT" && pwd)
 # shellcheck disable=SC1091
@@ -116,8 +115,9 @@ if [ "$mode" = compile ] || [ "$mode" = all ]; then
 	# The basenames must be unique: objects are named after them.
 	dup=$(tus | xargs -n1 basename | sort | uniq -d)
 	[ -z "$dup" ] || die "TUs with the same basename: $dup"
-	rm -rf "$OUT/obj"
-	mkdir -p "$OUT/obj"
+	# A new compile's logs and objects only; `link` keeps them.
+	rm -rf "$OUT/obj" "$OUT/log"
+	mkdir -p "$OUT/obj" "$OUT/log"
 	tus | xargs -P "$JOBS" -I{} bash -c 'compile_one {}' > "$OUT/results.txt"
 	ok=$(grep -c '^OK' "$OUT/results.txt")
 	fail=$(grep -c '^FAIL' "$OUT/results.txt")
