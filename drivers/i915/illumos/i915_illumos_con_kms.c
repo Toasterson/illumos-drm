@@ -94,7 +94,10 @@ static struct i915n_con_kms {
 	 * a file from drm->filelist only after the KMS close hook (and the
 	 * GEM release and postclose), so the restore work may still find it
 	 * there with is_master set. Compared, never dereferenced; cleared
-	 * by the work.
+	 * by the work. If the file is freed and a new X's file gets the same
+	 * address and the master before the work runs, the work takes the
+	 * new master for the closing one and commits the console once: one
+	 * flash, which the new X's own commit replaces.
 	 */
 	struct drm_file		*closing;
 } i915n_con;

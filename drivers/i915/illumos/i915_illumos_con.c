@@ -147,8 +147,11 @@ con_dev(void)
  * The console's KD mode. gfx_private's own (KDGETMODE) is the authority:
  * KD_RESETTEXT and this driver's own KDSETMODE change it without always
  * calling the mode hook, so the hook's copy (kd_mode) is only used where
- * gfx_private cannot be asked (panic). Thread context, without
- * gfx_private's lock held.
+ * gfx_private cannot be asked (panic) or must not be (the VIS_CONSCLEAR
+ * filter, under gfx_private's lock). The hook is the only writer of
+ * kd_mode: a store here, outside gfx_private's lock, could overwrite a
+ * newer KD_GRAPHICS of X's EnterVT with the KD_TEXT read before it
+ * (review round 2). Thread context, without gfx_private's lock held.
  */
 boolean_t
 i915n_con_text_mode(void)
@@ -157,8 +160,8 @@ i915n_con_text_mode(void)
 
 	if (i915n_con_st.devinit && panicstr == NULL &&
 	    gfxp_fb_ioctl(con_dev(), KDGETMODE, (intptr_t)&mode, FKIOCTL,
-	    kcred, &rval, i915n_con_st.gfxp) == 0)
-		i915n_con_st.kd_mode = mode;
+	    kcred, &rval, i915n_con_st.gfxp) != 0)
+		mode = i915n_con_st.kd_mode;
 	return (mode == KD_TEXT);
 }
 
@@ -225,14 +228,15 @@ i915n_con_panic(void *arg, int code)
 	 * switch), and rewriting the plane registers with what they hold is
 	 * harmless. Then gfx_private to KD_TEXT, so that tem's polled panic
 	 * output reaches the console framebuffer; panicstr is set, so
-	 * gfx_private's lock is bypassed (mutex_vector_enter()).
+	 * gfx_private's lock is bypassed (mutex_vector_enter()). Always, not
+	 * only when kd_mode says KD_GRAPHICS: kd_mode is the hook's copy and
+	 * gfx_private's KDSETMODE of the mode it is in already does nothing.
 	 */
 	i915n_con_panic_log.runs++;
 	i915n_con_panic_log.kd_mode = i915n_con_st.kd_mode;
 	i915n_con_panic_log.flipped =
 	    i915n_con_kms_panic(&i915n_con_panic_log.surf);
-	if (i915n_con_st.kd_mode != KD_TEXT)
-		con_kdsetmode(KD_TEXT);
+	con_kdsetmode(KD_TEXT);
 	return (B_TRUE);
 }
 

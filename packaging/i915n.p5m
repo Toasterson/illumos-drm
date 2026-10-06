@@ -42,7 +42,11 @@ dir  path=kernel owner=root group=sys mode=0755
 dir  path=kernel/drv owner=root group=sys mode=0755
 dir  path=kernel/drv/amd64 owner=root group=sys mode=0755
 file path=kernel/drv/amd64/i915n owner=root group=sys mode=0755 reboot-needed=true
-driver name=i915n perms="gfx* 0600 root sys" perms="* 0666 root sys" \
+# The DRM minors are 0666 (drmadm perms keeps them so); the console minor
+# gfx0 is 0600 and logindevperm gives it to the console user. devfsadm
+# applies the last matching minor_perm entry, and pkg hands the perms to
+# add_drv/update_drv -m in this order: the catch-all first, gfx* last.
+driver name=i915n perms="* 0666 root sys" perms="gfx* 0600 root sys" \
     devlink=type=ddi_display:drm;name=i915n\tdri/\M0
 depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=require
 depend fmri=pkg:/driver/graphics/linuxkpi@0.0.1 type=require
