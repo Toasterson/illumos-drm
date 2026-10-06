@@ -32,6 +32,8 @@ extern int i915n_con_attach_late(dev_info_t *dip);
 extern void i915n_con_attach_undo(dev_info_t *dip);
 /* B_TRUE while dip is the console (detach is refused then). */
 extern boolean_t i915n_con_is_console(dev_info_t *dip);
+/* The DRM master's file closed: give the display back to the console. */
+extern void i915n_con_master_gone(void);
 /* The console shows text (KD_TEXT): the KMS side may restore it. */
 extern boolean_t i915n_con_text_mode(void);
 

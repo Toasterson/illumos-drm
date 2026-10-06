@@ -80,6 +80,25 @@ static struct i915n_con_kms {
  */
 struct drm_illumos_lkms_funcs i915n_lkms_funcs;
 
+/*
+ * The DRM master's file closed (X exited or died). A clean X exit has
+ * switched the console to KD_TEXT already; X killed on its VT leaves the
+ * VT layer in graphics mode with nothing on the screen (illumos' VT
+ * driver, unlike Linux's, does not reset a VT whose controlling process
+ * died). Take the display back for the console: the illumos side
+ * switches gfx_private to KD_TEXT (which queues the restore) or, in
+ * KD_TEXT already, queues it directly.
+ */
+static void
+i915n_file_close(struct drm_device *dev, struct drm_file *file)
+{
+	bool master = READ_ONCE(file->is_master);
+
+	drm_kms_illumos_funcs.file_close(dev, file);
+	if (master && READ_ONCE(i915n_con.active) && i915n_con.drm == dev)
+		i915n_con_master_gone();
+}
+
 static void
 i915n_lastclose(struct drm_device *dev)
 {
@@ -351,6 +370,7 @@ i915n_con_kms_init(void)
 {
 	i915n_lkms_funcs = drm_kms_illumos_funcs;
 	i915n_lkms_funcs.lastclose = i915n_lastclose;
+	i915n_lkms_funcs.file_close = i915n_file_close;
 	INIT_WORK(&i915n_con.restore_work, con_restore_work);
 }
 

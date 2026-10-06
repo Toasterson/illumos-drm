@@ -35,6 +35,10 @@
  *	  dying) queues the KMS side's restore of the console configuration;
  *	  the hook itself never commits (it runs under tem's and gfx_private's
  *	  locks);
+ *	- when the DRM master's file closes in KD_GRAPHICS (X killed on its
+ *	  VT: illumos' VT driver leaves the dead process's VT in graphics
+ *	  mode), gfx_private is switched to KD_TEXT, which restores the
+ *	  console;
  *	- a CB_CL_PANIC callback (panicstr set, other CPUs stopped, before
  *	  the panic banner) points the console CRTC's plane back at the
  *	  console framebuffer and switches gfx_private to KD_TEXT, so the
@@ -142,6 +146,23 @@ static struct gfxp_blt_ops i915n_con_ops = {
 	.clear = NULL,
 	.setmode = i915n_con_setmode
 };
+
+void
+i915n_con_master_gone(void)
+{
+	int rval;
+
+	if (!i915n_con_st.console)
+		return;
+	if (i915n_con_st.kd_mode == KD_TEXT) {
+		i915n_con_kms_restore();
+		return;
+	}
+	/* gfx_private calls i915n_con_setmode(KD_TEXT), which restores. */
+	(void) gfxp_fb_ioctl(makedevice(ddi_driver_major(i915n_con_st.dip),
+	    I915N_CON_MINOR_BASE + ddi_get_instance(i915n_con_st.dip)),
+	    KDSETMODE, KD_TEXT, FKIOCTL, kcred, &rval, i915n_con_st.gfxp);
+}
 
 static boolean_t
 i915n_con_panic(void *arg, int code)
