@@ -145,14 +145,49 @@ EXPORT_SYMBOL(drm_lease_filter_crtcs);
 
 /*
  * --- sysfs (drm_sysfs.c) ----------------------------------------------------
- * illumos has no sysfs: connectors get no class device (connector->kdev
- * stays NULL) and hotplug and property events are not sent to user space
- * (Xorg on illumos has no udev and probes on its own).
+ * illumos has no sysfs: hotplug and property events are not sent to user
+ * space (Xorg on illumos has no udev and probes on its own). A connector
+ * still gets its class device, as on Linux (connector->kdev, named
+ * card<N>-<connector>, child of the DRM device's struct device), because
+ * drivers use it as the parent and name of what hangs off the connector:
+ * i915's DP connectors print kdev->kobj.name and register their AUX
+ * channel's I2C bus under it, panels and backlights take it as parent. It
+ * is a LinuxKPI device without a node of its own (the DRM device's node);
+ * the connector holds its one reference until drm_sysfs_connector_remove().
  */
+
+/* linuxkpi/src/lkpi_internal.h: exported by misc/linuxkpi */
+extern void lkpi_device_init(struct device *dev, dev_info_t *dip,
+    const char *name);
+extern void lkpi_device_fini(struct device *dev);
+extern dev_info_t *lkpi_dev_dip(const struct device *dev);
+
+static void
+drm_kms_connector_kdev_release(struct device *kdev)
+{
+	lkpi_device_fini(kdev);
+	kfree(kdev);
+}
 
 int
 drm_sysfs_connector_add(struct drm_connector *connector)
 {
+	struct drm_device *dev = connector->dev;
+	struct device *kdev;
+	char name[sizeof (kdev->lkpi_name)];
+
+	if (connector->kdev != NULL)
+		return (0);
+	(void) snprintf(name, sizeof (name), "card%d-%s",
+	    dev->primary != NULL ? dev->primary->index : 0, connector->name);
+	kdev = kzalloc(sizeof (*kdev), GFP_KERNEL);
+	if (kdev == NULL)
+		return (-ENOMEM);
+	lkpi_device_init(kdev, lkpi_dev_dip(dev->dev), name);
+	kdev->parent = dev->dev;
+	kdev->release = drm_kms_connector_kdev_release;
+	dev_set_drvdata(kdev, connector);
+	connector->kdev = kdev;
 	return (0);
 }
 
@@ -170,6 +205,12 @@ drm_sysfs_connector_remove_early(struct drm_connector *connector)
 void
 drm_sysfs_connector_remove(struct drm_connector *connector)
 {
+	struct device *kdev = connector->kdev;
+
+	if (kdev == NULL)
+		return;
+	connector->kdev = NULL;
+	put_device(kdev);
 }
 
 void
