@@ -20,9 +20,15 @@
  * console framebuffer on the CRTC's primary plane, every other plane and
  * CRTC off), from a work item so that the callers (gfx_private's
  * KD_TEXT hook under tem's locks, DRM lastclose) never commit themselves.
- * The work checks that the console still shows text with every modeset
- * lock held: X switches to KD_GRAPHICS before it sets its own mode, and
- * its commit waits for those locks, so a restore never overrides X.
+ * Triggers: gfx_private's KD_TEXT, tem's full-screen clear of a text
+ * VT (i915_illumos_con.c: a VT switch between two text VTs, which X's VT
+ * is to tem once X has switched it back, sends no KDSETMODE, only the
+ * repaint), the DRM master's file closing, lastclose. The work commits
+ * only with every modeset lock held, no file holding the DRM master (X
+ * drops it when it leaves its VT and takes it before its own commit,
+ * which then waits for these locks), the console in KD_TEXT and the
+ * console configuration not on the display already; so a restore never
+ * overrides X and a text console's own clears cost one lock round.
  *
  * Panic (i915n_con_kms_panic()): register writes only, no locks, no
  * allocation: the console CRTC's primary plane scans out the console
@@ -296,6 +302,40 @@ con_commit(struct drm_atomic_commit *state)
 	return (drm_atomic_commit(state));
 }
 
+/*
+ * Whether a file holds the device's master (the core mirrors it into
+ * drm_file.is_master): then that client owns the display and the console
+ * stays off it.
+ */
+static bool
+con_master_present(struct drm_device *drm)
+{
+	struct drm_file *file;
+	bool found = false;
+
+	mutex_lock(&drm->filelist_mutex);
+	list_for_each_entry(file, &drm->filelist, lhead) {
+		if (READ_ONCE(file->is_master)) {
+			found = true;
+			break;
+		}
+	}
+	mutex_unlock(&drm->filelist_mutex);
+	return (found);
+}
+
+/* Whether the console's configuration is on the display already. */
+static bool
+con_shown(void)
+{
+	struct drm_crtc *crtc = i915n_con.crtc;
+	struct drm_plane_state *ps = crtc->primary->state;
+
+	return (crtc->state != NULL && crtc->state->active &&
+	    ps != NULL && ps->fb == i915n_con.fb && ps->crtc == crtc &&
+	    drm_mode_equal(&crtc->state->mode, &i915n_con.mode));
+}
+
 static void
 con_restore_work(struct work_struct *work)
 {
@@ -316,8 +356,13 @@ con_restore_work(struct work_struct *work)
 retry:
 	ret = drm_modeset_lock_all_ctx(drm, &ctx);
 	if (ret == 0) {
-		/* With every modeset lock held: X's own commit waits. */
-		if (!i915n_con_text_mode())
+		/*
+		 * With every modeset lock held: X's own commit waits. Nothing
+		 * to do while a client is master (X in front of its VT) or the
+		 * console is in KD_GRAPHICS, or when the console is shown.
+		 */
+		if (!i915n_con_text_mode() || con_master_present(drm) ||
+		    con_shown())
 			ret = 0;
 		else
 			ret = con_commit(state);

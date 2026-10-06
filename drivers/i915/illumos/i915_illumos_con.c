@@ -57,6 +57,7 @@
 #include <sys/sunddi.h>
 #include <sys/stat.h>
 #include <sys/kd.h>
+#include <sys/visual_io.h>
 #include <sys/gfx_private.h>
 #include <drm/drm_drv.h>
 
@@ -170,9 +171,17 @@ i915n_con_panic(void *arg, int code)
 	int rval;
 
 	_NOTE(ARGUNUSED(arg, code));
-	if (!i915n_con_st.console || i915n_con_st.kd_mode == KD_TEXT)
+	if (!i915n_con_st.console)
 		return (B_TRUE);
+	/*
+	 * Always: the console may be in KD_TEXT while X scans out its own
+	 * framebuffer (tem has X's VT in text mode once X acknowledged a VT
+	 * switch), and rewriting the plane registers with what they hold is
+	 * harmless.
+	 */
 	i915n_con_kms_panic();
+	if (i915n_con_st.kd_mode == KD_TEXT)
+		return (B_TRUE);
 	/* panicstr is set: gfx_private's lock is bypassed. */
 	(void) gfxp_fb_ioctl(makedevice(ddi_driver_major(i915n_con_st.dip),
 	    I915N_CON_MINOR_BASE + ddi_get_instance(i915n_con_st.dip)),
@@ -330,6 +339,19 @@ i915n_con_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 		*rvalp = 0;
 		ret = gfxp_fb_ioctl(dev, cmd, arg, mode, credp, rvalp,
 		    i915n_con_st.gfxp);
+		/*
+		 * tem repaints a text VT that becomes active with a full
+		 * clear. A switch between two VTs that tem has in text mode
+		 * (X's own VT is in text mode again once X acknowledged a
+		 * switch) sends no KDSETMODE, so the clear is the signal that
+		 * a text VT is in front: queue the restore, which does
+		 * nothing while a DRM client is master or the console is
+		 * shown already.
+		 */
+		if (cmd == VIS_CONSCLEAR && ret == 0 &&
+		    i915n_con_st.console && i915n_con_st.kd_mode == KD_TEXT &&
+		    panicstr == NULL)
+			i915n_con_kms_restore();
 		return (ret);
 	}
 	return (drm_ioctl(dev, cmd, arg, mode, credp, rvalp));
