@@ -133,6 +133,17 @@ jobs:
           LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile OUT=target/i915 JOBS=4
           drivers/i915/build.sh all &&
           elfdump -d target/i915/i915n | grep NEEDED
+      # misc/drm_kms, Linux's KMS code (carried/drm_kms), from the tree the
+      # step above fetched and patched: its TUs licence-checked and
+      # compiled (any failure fails the step), the exports equal to the
+      # committed drm_kms.mapfile (which i915n links against), linked with
+      # -z defs against the core, layer, helpers and DDI, and the module's
+      # global symbols exactly the exports.
+      - run: >
+          LINUX=target/linux DDI_MAPFILE=target/ddi.mapfile
+          LKPI_MAPFILE=target/linuxkpi/linuxkpi.mapfile OUT=target/drm_kms JOBS=4
+          carried/drm_kms/build.sh all &&
+          elfdump -d target/drm_kms/drm_kms | grep NEEDED
       # The layer's host tests (trees, xarray/IDR, bitmaps, lists, refcount,
       # printf, strings) and the carried helpers' as userland programs.
       - run: CC=gcc linuxkpi/tests/host/host-test.sh
