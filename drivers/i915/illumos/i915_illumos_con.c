@@ -147,11 +147,14 @@ con_dev(void)
  * The console's KD mode. gfx_private's own (KDGETMODE) is the authority:
  * KD_RESETTEXT and this driver's own KDSETMODE change it without always
  * calling the mode hook, so the hook's copy (kd_mode) is only used where
- * gfx_private cannot be asked (panic) or must not be (the VIS_CONSCLEAR
- * filter, under gfx_private's lock). The hook is the only writer of
- * kd_mode: a store here, outside gfx_private's lock, could overwrite a
- * newer KD_GRAPHICS of X's EnterVT with the KD_TEXT read before it
- * (review round 2). Thread context, without gfx_private's lock held.
+ * gfx_private cannot be asked (panic) or need not be (the VIS_CONSCLEAR
+ * filter in the ioctl path reads it outside gfx_private's lock, after the
+ * ioctl returned: a stale value only affects whether a restore is
+ * queued; the work decides with the fresh mode). The hook is the only
+ * writer of kd_mode: a store here, outside gfx_private's lock, could
+ * overwrite a newer KD_GRAPHICS of X's EnterVT with the KD_TEXT read
+ * before it (review round 2). Thread context, without gfx_private's lock
+ * held.
  */
 boolean_t
 i915n_con_text_mode(void)
