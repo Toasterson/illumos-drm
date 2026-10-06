@@ -133,6 +133,10 @@ lkpi_outl(u32 v, unsigned long port)
 	(outl)((int)port, v);
 }
 
+/* Replaces the prologue's guard (lkpi/prologue.h). */
+#undef	outb
+#undef	outw
+#undef	outl
 #define	outb(v, p)	lkpi_outb((v), (p))
 #define	outw(v, p)	lkpi_outw((v), (p))
 #define	outl(v, p)	lkpi_outl((v), (p))

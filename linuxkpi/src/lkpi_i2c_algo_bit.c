@@ -191,7 +191,9 @@ lkpi_bb_send_ack(const struct lkpi_bb *bb, bool ack)
 
 /*
  * The address byte of msg, sent again (stop, start) up to retries times
- * while it is not acknowledged. 1 (ACK), 0 (NACK) or -ETIMEDOUT.
+ * while it is not acknowledged. 1 (ACK), 0 (NACK) or -ETIMEDOUT. The
+ * caller gives no retries for an I2C_M_IGNORE_NAK message, as Linux's
+ * bit_doAddress(): its NACK is accepted, not retried.
  */
 static int
 lkpi_bb_address(const struct lkpi_bb *bb, const struct i2c_msg *msg,
@@ -324,7 +326,9 @@ lkpi_bit_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 		if ((m->flags & I2C_M_NOSTART) == 0) {
 			if (i > 0 && (ret = lkpi_bb_restart(&bb)) != 0)
 				break;
-			ret = lkpi_bb_address(&bb, m, MAX(adap->retries, 0));
+			ret = lkpi_bb_address(&bb, m,
+			    (m->flags & I2C_M_IGNORE_NAK) != 0 ? 0 :
+			    MAX(adap->retries, 0));
 			if (ret < 0)
 				break;
 			if (ret == 0 && (m->flags & I2C_M_IGNORE_NAK) == 0) {
