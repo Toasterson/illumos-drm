@@ -601,6 +601,34 @@ mod tests {
         assert_eq!(c.set(f, u64::from(uapi::DRM_CLIENT_CAP_ATOMIC), 1), Ok(()));
     }
 
+    /// `carried/drm_kms/illumos/drm_kms_lkms.c` asserts at compile time
+    /// that Linux's structure of each command has the size listed in its
+    /// `DRM_KMS_ARG(DRM_IOCTL_..., size)` lines; here the list is checked
+    /// against the sizes the core copies: one line per command of the
+    /// core's table, each with the core's size.
+    #[test]
+    fn c_argument_sizes() {
+        let src = include_str!("../../../../carried/drm_kms/illumos/drm_kms_lkms.c");
+        let mut seen = Vec::new();
+        for line in src.lines().filter(|l| l.starts_with("DRM_KMS_ARG(")) {
+            let inner = line.trim_start_matches("DRM_KMS_ARG(").trim_end_matches(");");
+            let (name, size) = inner.split_once(", ").expect(line);
+            let size: usize = size.parse().expect(line);
+            let cmd = uapi::DRM_IOCTLS
+                .iter()
+                .chain([("DRM_IOCTL_MODE_CLOSEFB", uapi::DRM_IOCTL_MODE_CLOSEFB)].iter())
+                .find(|(n, _)| *n == name)
+                .map(|(_, c)| *c)
+                .unwrap_or_else(|| panic!("{name}: no such command"));
+            let e = lookup(cmd).unwrap_or_else(|| panic!("{name}: not in the core's table"));
+            assert_eq!(ioc::ioc_size(e.cmd), size, "{name}: the core copies another size");
+            seen.push(e.op);
+        }
+        for e in KMS_TABLE {
+            assert_eq!(seen.iter().filter(|op| **op == e.op).count(), 1, "{:?}: one DRM_KMS_ARG line", e.op);
+        }
+    }
+
     #[test]
     fn negative_results() {
         assert_eq!(from_neg(0), Ok(()));
