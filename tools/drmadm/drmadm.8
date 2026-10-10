@@ -3,7 +3,7 @@
 .\" License, v. 2.0. If a copy of the MPL was not distributed with this
 .\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
 .\"
-.Dd October 3, 2026
+.Dd October 10, 2026
 .Dt DRMADM 8
 .Os
 .Sh NAME
@@ -12,7 +12,7 @@
 .Sh SYNOPSIS
 .Nm
 .Op Fl R Ar root
-.Cm status
+.Op Cm status
 .Nm
 .Op Fl R Ar root
 .Cm select
@@ -273,7 +273,10 @@ the next boot, or
 .Nm Cm perms ,
 restricts its rule again.
 .Ss Status
-.Nm Cm status
+.Nm Cm status ,
+or
+.Nm
+without a subcommand,
 prints the selected stack and whether it is in effect since the last boot
 or from the next one, the installed packages of both stacks, the loaded
 modules of both stacks, how many Intel GPU aliases are bound to
