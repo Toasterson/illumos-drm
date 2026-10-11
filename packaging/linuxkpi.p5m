@@ -21,7 +21,7 @@
 # on it. The test driver linuxkpi_selftest is not packaged
 # (tools/test/run-r5c-test.sh installs and removes it).
 #
-set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/linuxkpi@0.0.1,5.11-2026.0.0.0
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/linuxkpi@0.0.2,5.11-2026.0.0.0
 set name=pkg.summary value="Linux kernel interfaces for DRM drivers (misc/linuxkpi)"
 set name=pkg.description value="misc/linuxkpi, the illumos LinuxKPI layer of illumos-drm: MIT-licensed implementations of the Linux kernel interfaces (memory, pages, DMA, locks, wait queues, RCU, timers, workqueues, PCI, interrupts, firmware) that Linux DRM drivers on the illumos-drm facade use, over the DDI."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
@@ -32,7 +32,7 @@ dir  path=kernel owner=root group=sys mode=0755
 dir  path=kernel/misc owner=root group=sys mode=0755
 dir  path=kernel/misc/amd64 owner=root group=sys mode=0755
 file path=kernel/misc/amd64/linuxkpi owner=root group=sys mode=0755 reboot-needed=true
-depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=require
+depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=require
 # Built against facade 1.1 of this version of the core (major version 0).
-depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=incorporate
+depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=incorporate
 license include/drm/LICENSE license=MIT

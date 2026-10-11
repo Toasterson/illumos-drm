@@ -31,7 +31,7 @@
 # through execlists, neither needs firmware; GuC/HuC firmware is optional
 # there and absent firmware is not an error (i915 logs it and continues).
 #
-set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/i915n@0.0.1,5.11-2026.0.0.0
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/i915n@0.0.2,5.11-2026.0.0.0
 set name=pkg.summary value="Intel GPU driver from Linux i915 (i915n)"
 set name=pkg.description value="i915n, the i915 driver of Linux v7.2 built for the illumos-drm DRM core, its Linux compatibility layer and Linux's mode-setting code (misc/drm_kms): GEM, execbuffer, contexts and render nodes for Intel integrated GPUs of gen6 to gen9.5 with a PCH (gen7 and gen9.5 targeted), and mode setting (KMS) on Ivy Bridge; other GPUs run without display. Ships no PCI aliases; select it with drmadm select new."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
@@ -48,14 +48,14 @@ file path=kernel/drv/amd64/i915n owner=root group=sys mode=0755 reboot-needed=tr
 # add_drv/update_drv -m in this order: the catch-all first, gfx* last.
 driver name=i915n perms="* 0666 root sys" perms="gfx* 0600 root sys" \
     devlink=type=ddi_display:drm;name=i915n\tdri/\M0
-depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=require
-depend fmri=pkg:/driver/graphics/linuxkpi@0.0.1 type=require
-depend fmri=pkg:/driver/graphics/drm-helpers@0.0.1 type=require
-depend fmri=pkg:/driver/graphics/drm-kms@0.0.1 type=require
-depend fmri=pkg:/driver/graphics/drmadm@0.0.1 type=require
+depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=require
+depend fmri=pkg:/driver/graphics/linuxkpi@0.0.2 type=require
+depend fmri=pkg:/driver/graphics/drm-helpers@0.0.2 type=require
+depend fmri=pkg:/driver/graphics/drm-kms@0.0.2 type=require
+depend fmri=pkg:/driver/graphics/drmadm@0.0.2 type=require
 # The facade and the layer are unstable (major version 0): built for these
 # versions only.
-depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=incorporate
-depend fmri=pkg:/driver/graphics/linuxkpi@0.0.1 type=incorporate
-depend fmri=pkg:/driver/graphics/drm-kms@0.0.1 type=incorporate
+depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=incorporate
+depend fmri=pkg:/driver/graphics/linuxkpi@0.0.2 type=incorporate
+depend fmri=pkg:/driver/graphics/drm-kms@0.0.2 type=incorporate
 license LICENSE.i915n license=MIT-i915

@@ -24,7 +24,7 @@
 # /dev/dri/renderD<128+N> where the SUNW_drm_link module of OpenIndiana's
 # DRM package is not installed (see devlink.tab).
 #
-set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/cdrmnull@0.0.1,5.11-2026.0.0.0
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/cdrmnull@0.0.2,5.11-2026.0.0.0
 set name=pkg.summary value="C DRM null driver for testing the DRM core (test driver)"
 set name=pkg.description value="cdrmnull, a test driver of illumos-drm without hardware, written in C against the DRM facade of misc/drm_core: one pseudo DRM device with card and render nodes, GEM objects and dumb buffers in system memory, sync objects, sync files, PRIME and a test fence timeline, for the kernel tests of the DRM core."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
@@ -40,8 +40,8 @@ file path=usr/kernel/drv/cdrmnull.conf owner=root group=sys mode=0644 \
     preserve=true
 driver name=cdrmnull perms="* 0666 root sys" \
     devlink=type=ddi_display:drm;name=cdrmnull\tdri/\M0
-depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=require
+depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=require
 # The facade is unstable (major version 0): the driver is built for this
 # version of the core only.
-depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=incorporate
+depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=incorporate
 license LICENSE license=MPL-2.0

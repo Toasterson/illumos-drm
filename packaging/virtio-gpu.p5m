@@ -28,7 +28,7 @@
 # /dev/dri/card<N> and /dev/dri/renderD<128+N> where the SUNW_drm_link
 # module of driver/graphics/drm is not installed (see devlink.tab).
 #
-set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/virtio-gpu@0.0.1,5.11-2026.0.0.0
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/virtio-gpu@0.0.2,5.11-2026.0.0.0
 set name=pkg.summary value="virtio-gpu DRM driver (Rust)"
 set name=pkg.description value="The illumos-drm Rust driver for the virtio GPU device of QEMU and other hypervisors: kernel mode setting with EDID and a cursor, and virgl 3D acceleration through the host's virglrenderer for Mesa's virtio_gpu driver."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
@@ -45,8 +45,8 @@ dir  path=kernel/drv/amd64 owner=root group=sys mode=0755
 file path=kernel/drv/amd64/virtio_gpu owner=root group=sys mode=0755 reboot-needed=true
 driver name=virtio_gpu perms="* 0666 root sys" \
     devlink=type=ddi_display:drm;name=virtio_gpu\tdri/\M0
-depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=require
+depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=require
 # The facade is unstable (major version 0): the driver is built for this
 # version of the core only.
-depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=incorporate
+depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=incorporate
 license LICENSE license=MPL-2.0

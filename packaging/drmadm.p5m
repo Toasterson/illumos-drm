@@ -41,7 +41,7 @@
 # selected (IPS refuses to install a driver action whose alias another
 # driver action in the image declares).
 #
-set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drmadm@0.0.1,5.11-2026.0.0.0
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drmadm@0.0.2,5.11-2026.0.0.0
 set name=pkg.summary value="Select the DRM driver stack (drmadm)"
 set name=pkg.description value="drmadm(8) shows which DRM driver stack is installed, loaded and selected, and selects the legacy stack (misc/drm, i915) or the illumos-drm stack (misc/drm_core and its drivers) for the next boot: it moves the Intel GPU aliases between the two Intel drivers, binds virtio GPU aliases only for the new stack, and excludes the other stack's kernel modules. Its service svc:/system/graphics/drm-perms keeps the device nodes of the illumos-drm drivers at their /etc/minor_perm permissions and reconciles its generic Xorg configuration at boot."
 set name=info.classification value="org.opensolaris.category.2008:System/Administration and Configuration"

@@ -27,7 +27,7 @@
 # resolve against each other. The test driver drm_helpers_test is not
 # packaged (tools/test/run-r5e-test.sh installs and removes it).
 #
-set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drm-helpers@0.0.1,5.11-2026.0.0.0
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drm-helpers@0.0.2,5.11-2026.0.0.0
 set name=pkg.summary value="Linux DRM helpers carried for C DRM drivers (misc/drm_helpers)"
 set name=pkg.description value="misc/drm_helpers, the Linux DRM helper code that C drivers on the illumos-drm facade link against: drm_mm (the range allocator of GPU address spaces) and drm_cache (CPU cache write-back) from Linux v7.2, unmodified, on misc/linuxkpi, the MIT-licensed Linux compatibility layer."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
@@ -38,8 +38,8 @@ dir  path=kernel owner=root group=sys mode=0755
 dir  path=kernel/misc owner=root group=sys mode=0755
 dir  path=kernel/misc/amd64 owner=root group=sys mode=0755
 file path=kernel/misc/amd64/drm_helpers owner=root group=sys mode=0755 reboot-needed=true
-depend fmri=pkg:/driver/graphics/linuxkpi@0.0.1 type=require
-depend fmri=pkg:/driver/graphics/linuxkpi@0.0.1 type=incorporate
+depend fmri=pkg:/driver/graphics/linuxkpi@0.0.2 type=require
+depend fmri=pkg:/driver/graphics/linuxkpi@0.0.2 type=incorporate
 license LICENSE license=MPL-2.0
 license carried/drm_mm/LICENSE license=MIT-drm_mm
 license carried/drm_cache/LICENSE license=MIT-drm_cache
