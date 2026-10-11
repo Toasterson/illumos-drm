@@ -3,7 +3,7 @@
 .\" License, v. 2.0. If a copy of the MPL was not distributed with this
 .\" file, You can obtain one at https://mozilla.org/MPL/2.0/.
 .\"
-.Dd October 10, 2026
+.Dd October 11, 2026
 .Dt DRMADM 8
 .Os
 .Sh NAME
@@ -37,9 +37,8 @@ the illumos-drm stack: the core module
 .Pq package Sy driver/graphics/drm-core
 and the drivers that depend on it, among them
 .Sy virtio_gpu ,
-and the Intel driver, whose name
-.Sy i915n
-is reserved.
+and the Intel driver
+.Sy i915n .
 .El
 .Pp
 Both stacks create their device nodes with the node type
@@ -59,7 +58,7 @@ driver depends on its core, so a driver of one stack cannot load while the
 other stack is loaded.
 .Nm
 decides which stack the system loads at boot and which driver binds an
-Intel GPU.
+Intel or virtio GPU.
 .Pp
 Installing a package of either stack selects nothing.
 Without a selection nothing is excluded: the aliases that
@@ -68,13 +67,17 @@ installs for
 .Sy i915
 make the legacy stack drive an Intel GPU, and whichever core loads first
 keeps the other one out.
-The packages of the new stack bind no Intel GPU:
+The packages of the new stack bind no Intel or virtio GPU:
 .Sy i915n
 is delivered without aliases, and
 .Nm
 moves the aliases of the Intel GPUs from
 .Sy i915
 to it.
+.Sy virtio_gpu
+also ships without driver-action aliases; its package delivers the alias
+list as data in
+.Pa /usr/share/drmadm/virtio-gpu.aliases .
 .Ss Selecting a stack
 .Nm Cm select Ar stack
 does the following and prints each change:
@@ -129,6 +132,13 @@ unbound, and an Intel GPU falls back to the generic VGA console driver,
 .Sy vgatext .
 Aliases of these devices bound to any other driver are left alone and
 reported.
+.Pp
+For virtio_gpu it binds the aliases from
+.Pa /usr/share/drmadm/virtio-gpu.aliases
+(one PCI alias per line, blank lines and comments beginning with # allowed)
+only for new and only with the virtio-gpu package and driver installed.
+For legacy it removes them. The fragment records this separate alias set
+before any moves; rollback restores both Intel and virtio bindings.
 .It
 It runs
 .Nm bootadm Cm update-archive ,
@@ -149,6 +159,37 @@ It also refuses while another
 .Nm
 runs.
 Selecting the stack that is already selected changes nothing.
+.Ss Xorg configuration
+The drmadm package delivers a generic modesetting template for
+.Pa /dev/dri/card0
+at
+.Pa /usr/share/drmadm/20-modesetting.conf ,
+outside Xorg's search paths. The boot service
+.Sy svc:/system/graphics/drm-perms
+runs
+.Nm Cm perms
+before the optional display managers lightdm, gdm, cde-login and xdm.
+It installs
+.Pa /etc/X11/xorg.conf.d/20-drmadm.conf
+only if new is selected and in effect since this boot (the recorded
+selection time precedes the kernel boot time). Otherwise it removes its
+own active copy. A selection pending reboot does not enable the template.
+.Nm Cm select
+does not change the running Xorg configuration.
+.Pp
+The saved copy
+.Pa /etc/X11/.drmadm.conf
+records the exact bytes installed. An unowned file, a changed file or a
+symlink at the active path is left alone, including across template
+updates. The old unconditional virtio-gpu configuration is no longer
+packaged; IPS removes the old packaged copy on upgrade.
+.Pp
+For the new stack use virtio-gpu-pci with a separate std VGA console
+(QEMU
+.Sy -vga std -device virtio-gpu-pci ) ,
+not virtio-vga. Binding virtio-vga with the new stack still loses the
+console: virtio_gpu has no console takeover like i915n. The legacy default
+leaves virtio-vga's stock VGA console intact.
 .Ss Device node permissions
 The packages of the new stack give the card and render nodes of their
 drivers the permissions
@@ -248,7 +289,8 @@ at every boot after
 .Sy svc:/system/device/local
 and before
 .Sy svc:/system/console-login ,
-and when the package is installed or updated.
+and when the package is installed or updated. It also reconciles Xorg
+configuration as described above.
 To give a new-stack driver's nodes other permissions, change its
 .Pa /etc/minor_perm
 entry with
@@ -283,7 +325,7 @@ modules of both stacks, how many Intel GPU aliases are bound to
 .Sy i915
 and to
 .Sy i915n
-and how many are unbound, the number of
+and how many are unbound, the virtio_gpu alias counts, the number of
 .Pa /dev/dri
 links, the
 .Pa /etc/logindevperm
@@ -320,7 +362,8 @@ edits only the
 .Pa /etc/logindevperm
 of
 .Ar root ;
-its nodes are reset by the service when it boots.
+its nodes are reset and its Xorg configuration is reconciled by the
+service when it boots.
 .El
 .Sh FILES
 .Bl -tag -width Ds
@@ -342,6 +385,14 @@ restricts to the legacy drivers.
 The permissions of the device nodes, which
 .Nm Cm perms
 restores.
+.It Pa /usr/share/drmadm/virtio-gpu.aliases
+Opt-in aliases owned by driver/graphics/virtio-gpu.
+.It Pa /usr/share/drmadm/20-modesetting.conf
+Inactive generic Xorg template owned by driver/graphics/drmadm.
+.It Pa /etc/X11/xorg.conf.d/20-drmadm.conf
+Active configuration installed by drmadm for the new stack at boot.
+.It Pa /etc/X11/.drmadm.conf
+Exact saved copy used to preserve administrator files and edits.
 .It Pa /lib/svc/manifest/system/drm-perms.xml
 The service
 .Sy svc:/system/graphics/drm-perms .
@@ -353,9 +404,6 @@ The exit status is 2 for a usage error.
 .Ss Example 1 Selecting the new stack for development
 .Bd -literal
 # drmadm status
-# svcadm disable -t lightdm
-# modinfo | egrep ' (drm|i915) '
-# modunload -i <i915 id>; modunload -i <drm id>
 # drmadm select new
 # reboot
 \&...

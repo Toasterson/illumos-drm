@@ -541,8 +541,10 @@ functions the run scripts share.
 ioctls), `kms` (the display), `proto` (the device protocol) and host
 tests of the pure logic (`cargo test -p virtio_gpu --no-default-features`).
 `tools/test/drm_r4_test.c` and `run-r4-test.sh` test it on a guest,
-`packaging/virtio-gpu.p5m` and `packaging/xorg.conf.d/20-virtio-gpu.conf`
-package it. `tools/uapi/include/virtgpu_drm.h` is the Linux v6.12 uAPI
+`packaging/virtio-gpu.p5m` packages it with opt-in alias data in
+`packaging/virtio-gpu.aliases`. The generic Xorg template is
+`packaging/20-modesetting.conf`, owned by drmadm.
+`tools/uapi/include/virtgpu_drm.h` is the Linux v6.12 uAPI
 header the bindings come from, `crates/drm-uapi/src/virtgpu_compat.rs`
 the older layouts, and `tools/uapi/virtgpu_compat_layout.c` their gcc
 check.
@@ -2180,7 +2182,7 @@ OpenIndiana's DRM drivers come from gfx-drm: the core `misc/drm` and the
 Intel driver `i915` in the package `driver/graphics/drm`, which also binds
 the Intel GPUs it supports. This repository's stack is `misc/drm_core`
 (`driver/graphics/drm-core`) and the drivers linked against it
-(`virtio_gpu`, `cdrmnull`, `rdrmnull`, and later an Intel driver). The two
+(`virtio_gpu`, `cdrmnull`, `rdrmnull`, and `i915n`). The two
 stacks install together on one machine; they must never be loaded at the
 same time, and loading both by accident must be impossible. Three things
 make it so.
@@ -2231,7 +2233,7 @@ script in the package `driver/graphics/drmadm` (required by
 with its manual page `tools/drmadm/drmadm.8`:
 
 ```sh
-drmadm status               # selection, packages, loaded modules, Intel aliases, excludes
+drmadm status               # selection, packages, loaded modules, Intel/virtio aliases, excludes
 drmadm                      # the same: no subcommand means status
 drmadm select legacy|new    # for the next boot
 drmadm -R /mnt select legacy    # in a mounted boot environment
@@ -2259,7 +2261,7 @@ then:
    loses no alias.
 2. moves the Intel GPU aliases to the driver of the selected stack: `i915`
    for the legacy stack, `i915n` for the new one. `i915n` is the name
-   reserved for this stack's Intel driver (work item G5); until it exists,
+   used by this stack's Intel driver; if it is not installed,
    `select new` takes the aliases from `i915` and leaves them unbound, says
    so, and an Intel GPU falls back to `vgatext` (through the GPU's
    compatible name `pciclass,030000`, an alias of `vgatext`). The set
@@ -2299,10 +2301,42 @@ adds with `update_drv`); and a package of
 this stack must not declare a legacy alias in its driver action: IPS
 refuses to install a driver action whose alias another driver action in
 the image declares, and the operation fails (`pkg5`'s `driver.py`).
-`i915n`'s package will therefore deliver its driver action without
-aliases, and no package of
-this repository binds an Intel GPU at installation (`virtio_gpu` binds only
-`pci1af4,1050`, `cdrmnull` and `rdrmnull` are pseudo devices).
+Both `i915n` and `virtio_gpu` deliver driver actions without aliases.
+`driver/graphics/virtio-gpu` owns `/usr/share/drmadm/virtio-gpu.aliases`
+(source `packaging/virtio-gpu.aliases`): one PCI alias per line, with blank
+lines and `#` comments allowed. `select new` binds this data only when the
+package and driver are installed; `select legacy` removes the bindings.
+The fragment records these as `* drmadm-virtio-alias:` before any alias
+moves, and both drivers' changes are rolled back together on failure.
+Aliases already bound to another driver are reported and left alone.
+`-R` uses the data and package inventory of the target root. `status`
+reports virtio's bound and unbound counts beside the Intel counts.
+Installation alone binds neither hardware driver. The pseudo test drivers
+`cdrmnull` and `rdrmnull` have no hardware aliases.
+
+**Xorg follows the selected stack.** The drmadm package owns the inactive
+`/usr/share/drmadm/20-modesetting.conf` template (modesetting on
+`/dev/dri/card0`, shared by i915n and virtio_gpu). The existing
+`svc:/system/graphics/drm-perms` boot service runs `drmadm perms` after
+device configuration and before console-login and the optional display
+managers lightdm, gdm, cde-login and xdm. It installs
+`/etc/X11/xorg.conf.d/20-drmadm.conf` only when new was selected before
+this boot, using the same selection time and boot time as `status`.
+A pending selection, legacy, or no selection removes its own active copy.
+`select` itself leaves the running Xorg configuration alone; `perms`
+reconciles it on the running system only, and `-R` defers this until boot.
+A private saved copy `/etc/X11/.drmadm.conf` records the exact installed
+bytes: a file that differs, an unowned file or a symlink is left alone.
+This also allows template upgrades without overwriting local edits.
+The former unconditional `/etc/X11/xorg.conf.d/20-virtio-gpu.conf` action
+is removed from virtio-gpu; IPS removes the old packaged file on upgrade
+(locally modified preserved files remain administrator-owned).
+
+With the new stack use QEMU `-vga std -device virtio-gpu-pci`: std VGA
+keeps the console and virtio-gpu supplies the DRM display. Do not use
+virtio-vga for the new stack: virtio_gpu has no console takeover like
+i915n, so binding virtio-vga still loses the console. With the legacy
+default and no `select new`, virtio-vga retains its stock VGA console.
 
 **Device links.** Both stacks create `ddi_display:drm` minor nodes, and
 the devfsadm link module `SUNW_drm_link` makes `/dev/dri/<minor name>`

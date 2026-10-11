@@ -6,7 +6,9 @@ License, v. 2.0. If a copy of the MPL was not distributed with this
 file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 svc:/system/graphics/drm-perms runs "drmadm perms" (drmadm(8)) at every
-boot, before console-login. ttymon(8) of console-login applies the
+boot, before console-login and the display managers. It also installs or
+removes drmadm's generic Xorg modesetting copy according to the stack
+selected since this boot. ttymon(8) of console-login applies the
 /etc/logindevperm rule for /dev/dri when it opens the console and would
 set the device nodes of the illumos-drm drivers to 0600 root root, which
 devfs then keeps across reboots; drmadm perms restricts that rule to the
@@ -39,6 +41,24 @@ Delivered by driver/graphics/drmadm (packaging/drmadm.p5m).
 	<dependent name='drm-perms_console-login' grouping='optional_all'
 	    restart_on='none'>
 		<service_fmri value='svc:/system/console-login' />
+	</dependent>
+
+	<!-- Absent/disabled display managers do not block boot. -->
+	<dependent name='drm-perms_lightdm' grouping='optional_all'
+	    restart_on='none'>
+		<service_fmri value='svc:/application/graphical-login/lightdm' />
+	</dependent>
+	<dependent name='drm-perms_gdm' grouping='optional_all'
+	    restart_on='none'>
+		<service_fmri value='svc:/application/graphical-login/gdm' />
+	</dependent>
+	<dependent name='drm-perms_cde-login' grouping='optional_all'
+	    restart_on='none'>
+		<service_fmri value='svc:/application/graphical-login/cde-login' />
+	</dependent>
+	<dependent name='drm-perms_xdm' grouping='optional_all'
+	    restart_on='none'>
+		<service_fmri value='svc:/application/graphical-login/xdm' />
 	</dependent>
 
 	<exec_method type='method' name='start' exec='/usr/sbin/drmadm perms'

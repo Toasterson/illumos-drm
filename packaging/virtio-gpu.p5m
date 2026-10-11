@@ -6,15 +6,19 @@
 # IPS manifest of the virtio-gpu DRM driver (drivers/virtio-gpu). Publish
 # from a directory holding the linked module as kernel/drv/amd64/virtio_gpu
 # (tools/test/run-r4-test.sh links it), this repository's LICENSE and
-# packaging/xorg.conf.d:
+# packaging/virtio-gpu.aliases (the opt-in alias data):
 #
 #   pkgsend publish -s <repo> -d <proto> -d . packaging/virtio-gpu.p5m
 #
 # The module is linked with -N misc/drm_core, so the package depends on the
 # package that delivers misc/drm_core (modules/drm_core).
 #
-# The driver action binds the module to the modern virtio-gpu PCI function
-# (1af4:1050) and gives the card and render nodes "* 0666 root sys": any
+# The driver action has no aliases. drmadm select new binds the aliases
+# in /usr/share/drmadm/virtio-gpu.aliases; select legacy removes them.
+# This keeps virtio-vga on the stock VGA console until explicitly selected.
+# The old unconditional etc/X11/xorg.conf.d/20-virtio-gpu.conf action
+# is removed: pkg removes the old packaged copy on upgrade.
+# The driver action gives the card and render nodes "* 0666 root sys": any
 # process may open a render node, and the DRM core decides which file of
 # the card node is the DRM master. ttymon's /etc/logindevperm rule for
 # /dev/dri would set them to 0600 root root at every boot; the service
@@ -31,17 +35,15 @@ set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
 set name=info.source-url value=https://code.aopc.cloud/illumos/illumos-drm
 set name=variant.arch value=i386
 set name=org.opensolaris.consolidation value=userland
-dir  path=etc owner=root group=sys mode=0755
-dir  path=etc/X11 owner=root group=bin mode=0755
-dir  path=etc/X11/xorg.conf.d owner=root group=bin mode=0755
-file path=etc/X11/xorg.conf.d/20-virtio-gpu.conf \
-    owner=root group=bin mode=0644 preserve=renamenew \
-    original_name=driver/graphics/virtio-gpu:etc/X11/xorg.conf.d/20-virtio-gpu.conf
+dir  path=usr owner=root group=sys mode=0755
+dir  path=usr/share owner=root group=sys mode=0755
+dir  path=usr/share/drmadm owner=root group=bin mode=0755
+file packaging/virtio-gpu.aliases path=usr/share/drmadm/virtio-gpu.aliases owner=root group=bin mode=0444
 dir  path=kernel owner=root group=sys mode=0755
 dir  path=kernel/drv owner=root group=sys mode=0755
 dir  path=kernel/drv/amd64 owner=root group=sys mode=0755
 file path=kernel/drv/amd64/virtio_gpu owner=root group=sys mode=0755 reboot-needed=true
-driver name=virtio_gpu alias=pci1af4,1050 perms="* 0666 root sys" \
+driver name=virtio_gpu perms="* 0666 root sys" \
     devlink=type=ddi_display:drm;name=virtio_gpu\tdri/\M0
 depend fmri=pkg:/driver/graphics/drm-core@0.0.1 type=require
 # The facade is unstable (major version 0): the driver is built for this

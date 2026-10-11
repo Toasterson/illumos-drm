@@ -26,7 +26,7 @@
 #      update_drv -n, which edits /etc/driver_aliases without attaching
 #      anything, and undoes both steps if that fails; without an
 #      installed i915n the GPU is left unbound and falls back to the
-#      generic VGA console driver;
+#      generic VGA console driver; it also binds/unbinds the packaged virtio GPU aliases;
 #   3. runs bootadm update-archive, since both files are read from the
 #      boot archive.
 # Loaded modules of either stack stay until the next boot (a console
@@ -53,7 +53,9 @@
 # Only devices under the literal /dev/dri are rewritten; a rule that
 # reaches /dev/dri through a pattern (/dev/*/*) is reported, not changed.
 # The service svc:/system/graphics/drm-perms runs it at every boot before
-# console-login (packaging/drm-perms.xml).
+# console-login and the display managers (packaging/drm-perms.xml). It
+# also reconciles the generic Xorg configuration for new only after the
+# selection has taken effect at boot; administrator files stay alone.
 
 PATH=/usr/bin:/usr/sbin:/sbin
 export PATH
@@ -71,6 +73,13 @@ LOCK=etc/system.d/.drmadm.lock
 LEGACY_PKG=driver/graphics/drm
 LEGACY_DRIVER=i915
 NEW_DRIVER=i915n
+VIRTIO_DRIVER=virtio_gpu
+VIRTIO_PKG=driver/graphics/virtio-gpu
+VIRTIO_ALIASES=usr/share/drmadm/virtio-gpu.aliases
+XORG_TEMPLATE=usr/share/drmadm/20-modesetting.conf
+XORG_ACTIVE=etc/X11/xorg.conf.d/20-drmadm.conf
+# A copy of exactly what we installed; changed/unowned files stay alone.
+XORG_SAVED=etc/X11/.drmadm.conf
 # class/name of each stack's kernel modules. Every driver of a stack
 # depends on its core (misc/drm or misc/drm_core), so the cores alone
 # decide whether a stack is loaded; the drivers are listed so that their
@@ -184,6 +193,19 @@ manifest_aliases() {
 	    }' | sort -u
 }
 
+# virtio_aliases: package data, never a binding in an IPS driver action.
+# Require the installed package as well as its file and driver registration.
+virtio_aliases() {
+	pkgcmd list -H "$VIRTIO_PKG" >/dev/null 2>&1 || return 0
+	f=$(under "$VIRTIO_ALIASES")
+	[ -f "$f" ] || die "installed $VIRTIO_PKG has no $f"
+	awk '
+	    /^[ \t]*(#|$)/ { next }
+	    NF != 1 || $1 !~ /^pci[0-9a-fA-F]+,[0-9a-fA-F]+$/ { exit 1 }
+	    { print }
+	' "$f" || die "invalid alias data in $f"
+}
+
 # recorded KEY: the values of "* drmadm-KEY: value" lines of the fragment.
 recorded() {
 	f=$(under "$FRAGMENT")
@@ -286,17 +308,25 @@ show() {
 # restores the previous fragment and exits.
 rollback() {
 	echo "$PROG: $1; undoing the selection" >&2
+	for a in $(minus "$(aliases_of "$VIRTIO_DRIVER")" "$bound_virtio"); do
+		udrv -d -i "$a" "$VIRTIO_DRIVER" >/dev/null 2>&1
+	done
+	back=$(minus "$bound_virtio" "$(aliases_of "$VIRTIO_DRIVER")")
+	[ -n "$back" ] && udrv -a -i "$(quoted "$back")" "$VIRTIO_DRIVER" >/dev/null 2>&1
+	vleft=$(minus "$bound_virtio" "$(aliases_of "$VIRTIO_DRIVER")")
+	vextra=$(minus "$(aliases_of "$VIRTIO_DRIVER")" "$bound_virtio")
 	for a in $(minus "$(aliases_of "$to")" "$bound_to"); do
 		udrv -d -i "$a" "$to" >/dev/null 2>&1
 	done
 	back=$(minus "$bound_from" "$(aliases_of "$from")")
 	[ -n "$back" ] && udrv -a -i "$(quoted "$back")" "$from" >/dev/null 2>&1
 	left=$(minus "$bound_from" "$(aliases_of "$from")")
-	if [ -n "$left" ]; then
+	extra=$(minus "$(aliases_of "$to")" "$bound_to")
+	if [ -n "$left$extra$vleft$vextra" ]; then
 		# The new fragment stays: it records every alias drmadm manages,
 		# these included, and the next select gives them to a driver.
 		rm -f "$prev"
-		echo "$PROG: could not give these aliases back to $from: $(words "$left")" >&2
+		echo "$PROG: alias rollback incomplete: $from missing $(words "$left"), $to extra $(words "$extra"); $VIRTIO_DRIVER missing $(words "$vleft"), extra $(words "$vextra")" >&2
 		echo "$PROG: $frag (the new selection, not yet in the boot archive) records them; run drmadm select again" >&2
 	elif [ -f "$prev" ]; then
 		mv -f "$prev" "$frag"
@@ -305,11 +335,71 @@ rollback() {
 		rm -f "$frag"
 		echo "$PROG: the aliases are as before; $frag is removed again" >&2
 	fi
+	if [ "$archiving" = yes ]; then
+		if live; then
+			bootadm update-archive
+		else
+			bootadm update-archive -R "$ROOT"
+		fi || echo "$PROG: could not restore the boot archive; run bootadm update-archive before booting" >&2
+	fi
 	exit 1
 }
 
 boot_time() {
 	kstat -p unix:0:system_misc:boot_time 2>/dev/null | awk '{ print $2 }'
+}
+
+# selected_since_boot: fail closed if the selection or boot time is unknown.
+selected_since_boot() {
+	live || return 1
+	[ "$(recorded selected)" = new ] || return 1
+	at=$(recorded time)
+	bt=$(boot_time)
+	case $at:$bt in
+	*[!0-9:]* | :* | *:) return 1 ;;
+	esac
+	[ "$at" -lt "$bt" ]
+}
+
+# reconcile_xorg: boot service (also on package refresh), under select's lock.
+# Never follow symlinks or replace/remove an administrator's file. The saved
+# copy survives template upgrades and proves which bytes drmadm installed.
+reconcile_xorg() {
+	live || { echo "Xorg configuration is reconciled when $ROOT boots."; return 0; }
+	mkdir "$(under "$LOCK")" 2>/dev/null || die "another drmadm is running (lock $(under "$LOCK"))"
+	trap unlock EXIT
+	trap 'exit 1' HUP INT TERM
+	active=$(under "$XORG_ACTIVE")
+	saved=$(under "$XORG_SAVED")
+	template=$(under "$XORG_TEMPLATE")
+	if [ -e "$active" ] || [ -h "$active" ]; then
+		if [ -h "$active" ] || [ -h "$saved" ] || [ ! -f "$saved" ] ||
+		    ! cmp -s "$active" "$saved"; then
+			echo "Left alone: $active was not written by drmadm or has been changed."
+			return 0
+		fi
+	fi
+	if selected_since_boot; then
+		[ -f "$template" ] || die "no Xorg template $template"
+		mkdir -p "${active%/*}" || die "cannot create ${active%/*}"
+		if cmp -s "$active" "$template"; then
+			echo "$active is unchanged (new stack since this boot)."
+			return 0
+		fi
+		tmp="${saved}.$$"
+		cp "$template" "$tmp" && chmod 644 "$tmp" &&
+		    mv -f "$tmp" "$saved" || die "cannot save $template"
+		tmp="${active}.$$"
+		cp "$saved" "$tmp" && chmod 644 "$tmp" &&
+		    mv -f "$tmp" "$active" || die "cannot install $active"
+		echo "Installed $active (new stack since this boot)."
+	else
+		if [ -f "$active" ]; then
+			rm -f "$active" || die "cannot remove $active"
+			echo "Removed $active (new stack not selected since this boot)."
+		fi
+		rm -f "$saved" || die "cannot remove $saved"
+	fi
 }
 
 # LDP_AWK: awk functions that read an /etc/logindevperm line as libdevinfo's
@@ -681,7 +771,7 @@ do_perms() {
 		echo "Node permissions are reset on the running system only (the service"
 		echo "svc:/system/graphics/drm-perms does it when $ROOT boots)."
 	fi
-	return 0
+	reconcile_xorg
 }
 
 do_status() {
@@ -765,6 +855,23 @@ do_status() {
 	printf '  %-7s %s of the %s aliases drmadm manages\n' unbound "$unbound" "$(count "$all")"
 	[ -n "$other" ] && echo "  bound to other drivers:$other"
 	[ -n "$man" ] && echo "  ($LEGACY_PKG declares $(count "$man") aliases for $LEGACY_DRIVER)"
+
+	echo
+	echo "Virtio GPU aliases ($(under etc/driver_aliases)):"
+	vdata=$(virtio_aliases) || die "cannot read virtio alias data"
+	va=$(words "$vdata $(aliases_of "$VIRTIO_DRIVER") $(recorded virtio-alias)" |
+	    tr ' ' '\n' | sort -u)
+	printf '  %-10s %s aliases\n' "$VIRTIO_DRIVER" "$(count "$(aliases_of "$VIRTIO_DRIVER")")"
+	vu=0
+	for a in $va; do
+		d=$(driver_of "$a")
+		case $d in
+		"") vu=$((vu + 1)) ;;
+		"$VIRTIO_DRIVER") ;;
+		*) echo "  left alone: $a ($d)" ;;
+		esac
+	done
+	printf '  %-10s %s of the %s aliases drmadm manages\n' unbound "$vu" "$(count "$va")"
 
 	echo
 	n=$(ls "$(under dev/dri)" 2>/dev/null | wc -l | tr -d ' ')
@@ -855,6 +962,7 @@ do_select() {
 	# From the fragment write to the end of the alias moves, a signal
 	# undoes the selection; before and after, it only drops the lock.
 	moving=no
+	archiving=no
 	trap 'if [ $moving = yes ]; then rollback "interrupted"; fi; exit 1' HUP INT TERM
 
 	changed=0
@@ -891,6 +999,26 @@ do_select() {
 		unbound=""
 	fi
 
+	bound_virtio=$(aliases_of "$VIRTIO_DRIVER")
+	vdata=$(virtio_aliases) || die "cannot read virtio alias data"
+	virtio_all=$(words "$vdata $bound_virtio $(recorded virtio-alias)" |
+	    tr ' ' '\n' | sort -u)
+	virtio_add=""
+	virtio_remove=""
+	if [ "$target" = new ] && installed "$VIRTIO_DRIVER" &&
+	    pkgcmd list -H "$VIRTIO_PKG" >/dev/null 2>&1; then
+		for a in $virtio_all; do
+			d=$(driver_of "$a")
+			case $d in
+			"") virtio_add="$virtio_add $a" ;;
+			"$VIRTIO_DRIVER") ;;
+			*) conflict="$conflict $a($d)" ;;
+			esac
+		done
+	else
+		virtio_remove=$bound_virtio
+	fi
+
 	# 1. The fragment, first: it records the alias set, so a failure in
 	# the alias moves below loses no alias. Rewritten (with a new time)
 	# when its content changes or aliases move; the previous one is kept
@@ -906,6 +1034,9 @@ do_select() {
 		for a in $all; do
 			echo "* drmadm-alias: $a"
 		done
+		for a in $virtio_all; do
+			echo "* drmadm-virtio-alias: $a"
+		done
 		for m in $other_modules; do
 			echo "exclude: $m"
 			echo "exclude: ${m#*/}"
@@ -913,16 +1044,16 @@ do_select() {
 	} > "$tmp" || die "cannot write $tmp"
 	chmod 644 "$tmp"
 	rm -f "$prev"
-	if [ -f "$frag" ] && [ -z "$bound_from" ] && [ -z "$add" ] &&
+	if [ -f "$frag" ] && [ -z "$bound_from$virtio_remove" ] && [ -z "$add$virtio_add" ] &&
 	    [ "$(grep -v '^\* drmadm-time:' "$frag")" = "$(grep -v '^\* drmadm-time:' "$tmp")" ]; then
 		rm -f "$tmp"
 		echo "$frag is unchanged ($target)."
 	else
 		[ -f "$frag" ] && { cp -p "$frag" "$prev" || die "cannot save $frag"; }
-		mv -f "$tmp" "$frag" || die "cannot replace $frag"
+		moving=yes
+		mv -f "$tmp" "$frag" || rollback "cannot replace $frag"
 		echo "Wrote $frag: selects $target, excludes $(names "$other_modules" | tr '\n' ' ')"
 		changed=1
-		moving=yes
 	fi
 
 	# 2. The Intel GPU aliases, with update_drv -n: the files only, for the
@@ -944,15 +1075,27 @@ do_select() {
 		missing=$(minus "$add" "$(aliases_of "$to")")
 		[ -z "$missing" ] || rollback "update_drv -a did not bind $(count "$missing") aliases to $to"
 	fi
+	for a in $virtio_remove; do
+		echo "Removing $a from $VIRTIO_DRIVER (update_drv -n)."
+		udrv -d -i "$a" "$VIRTIO_DRIVER" >/dev/null 2>&1
+	done
+	if [ -n "$virtio_remove" ]; then
+		left=$(aliases_of "$VIRTIO_DRIVER")
+		[ -z "$left" ] || rollback "update_drv -d left virtio aliases: $(words "$left")"
+	fi
+	if [ -n "$virtio_add" ]; then
+		echo "Adding $(words "$virtio_add") to $VIRTIO_DRIVER (update_drv -n)."
+		udrv -a -i "$(quoted "$virtio_add")" "$VIRTIO_DRIVER" || rollback "virtio update_drv -a failed"
+		missing=$(minus "$virtio_add" "$(aliases_of "$VIRTIO_DRIVER")")
+		[ -z "$missing" ] || rollback "update_drv -a did not bind virtio aliases"
+	fi
+
 	if [ -n "$unbound" ]; then
 		echo "$to is not installed: these $(count "$unbound") Intel GPU aliases stay unbound, and"
 		echo "an Intel GPU falls back to the generic VGA console driver (vgatext):"
 		show "$unbound"
 	fi
 	[ -n "$conflict" ] && echo "Left alone, bound to other drivers:$conflict"
-	moving=no
-	rm -f "$prev"
-
 	# Excludes elsewhere that would keep the selected stack from loading.
 	own=$(names "$other_modules" | tr '\n' ' ')
 	excludes | grep -v "^$frag:" | while IFS= read -r line; do
@@ -966,18 +1109,21 @@ do_select() {
 
 	# 3. The boot archive.
 	if [ $changed = 1 ]; then
+		archiving=yes
 		if live; then
 			echo "Updating the boot archive (bootadm update-archive)."
-			bootadm update-archive || die "bootadm update-archive failed; run it before rebooting"
+			bootadm update-archive || rollback "bootadm update-archive failed"
 		else
 			echo "Updating the boot archive (bootadm update-archive -R $ROOT)."
-			bootadm update-archive -R "$ROOT" || die "bootadm update-archive -R $ROOT failed; run it before booting it"
+			bootadm update-archive -R "$ROOT" || rollback "bootadm update-archive -R $ROOT failed"
 		fi
 		echo "The $target stack is selected from the next boot. After that boot,"
 		echo "devfsadm -C removes the /dev/dri links of the other stack's devices."
 	else
 		echo "Nothing changed: the $target stack was selected already."
 	fi
+	moving=no
+	rm -f "$prev"
 	return 0
 }
 
