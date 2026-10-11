@@ -33,7 +33,7 @@
 # with the first driver that needs it and refuses to unload it while a
 # driver depends on it or a DRM device is registered.
 #
-set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drm-core@0.0.1,5.11-2026.0.0.0
+set name=pkg.fmri value=pkg://illumos-drm/driver/graphics/drm-core@0.0.2,5.11-2026.0.0.0
 set name=pkg.summary value="DRM core and facade of illumos-drm (misc/drm_core)"
 set name=pkg.description value="misc/drm_core, the DRM core of illumos-drm as a kernel module: card and render nodes, per-file state, GEM objects, PRIME, fences, sync objects and mode setting for every DRM driver, which uses it through its C interface, the DRM facade, whether written in C or in Rust."
 set name=info.classification value=org.opensolaris.category.2008:Drivers/Display
@@ -44,5 +44,5 @@ dir  path=kernel owner=root group=sys mode=0755
 dir  path=kernel/misc owner=root group=sys mode=0755
 dir  path=kernel/misc/amd64 owner=root group=sys mode=0755
 file path=kernel/misc/amd64/drm_core owner=root group=sys mode=0755 reboot-needed=true
-depend fmri=pkg:/driver/graphics/drmadm@0.0.1 type=require
+depend fmri=pkg:/driver/graphics/drmadm@0.0.2 type=require
 license LICENSE license=MPL-2.0
