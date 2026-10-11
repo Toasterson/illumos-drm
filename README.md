@@ -2232,6 +2232,7 @@ with its manual page `tools/drmadm/drmadm.8`:
 
 ```sh
 drmadm status               # selection, packages, loaded modules, Intel aliases, excludes
+drmadm                      # the same: no subcommand means status
 drmadm select legacy|new    # for the next boot
 drmadm -R /mnt select legacy    # in a mounted boot environment
 ```

@@ -10,9 +10,12 @@
 # loaded, and the selection decides which one the system loads at boot.
 # See drmadm(8) (tools/drmadm/drmadm.8).
 #
-#   drmadm [-R root] status
+#   drmadm [-R root] [status]
 #   drmadm [-R root] select legacy|new
 #   drmadm [-R root] perms
+#
+# Without a subcommand drmadm runs status, as ipadm(8) runs show-addr and
+# dladm(8) runs show-link.
 #
 # A selection does three things and takes effect at the next boot:
 #   1. writes /etc/system.d/driver:graphics:drmadm with exclude: lines for
@@ -97,7 +100,7 @@ LDP_MARK="drmadm(8): the next rule applies to the legacy DRM drivers only"
 
 usage() {
 	cat >&2 <<EOT
-Usage: $PROG [-R root] status
+Usage: $PROG [-R root] [status]
        $PROG [-R root] select legacy|new
        $PROG [-R root] perms
 EOT
@@ -991,7 +994,9 @@ case $ROOT in
 esac
 [ -d "$ROOT" ] || die "root $ROOT is not a directory"
 
-case "${1:-}" in
+[ $# -gt 0 ] || set -- status
+
+case "$1" in
 status)
 	[ $# -eq 1 ] || usage
 	do_status ;;
