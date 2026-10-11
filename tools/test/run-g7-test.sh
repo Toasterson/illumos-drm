@@ -52,7 +52,8 @@
 # drm_core.mapfile, drm_facade_ctf.o (optional), virtio_gpu.a, the cdrmnull
 # module (drivers/cdrmnull/build.sh) and cdrmnull.conf, drmadm and drmadm.8
 # (tools/drmadm), packaging/*.p5m as *.p5m, packaging/drm-perms.xml,
-# packaging/xorg.conf.d and LICENSE. The machine needs a virtio-gpu device (pci1af4,1050), gcc and,
+# packaging/20-modesetting.conf, packaging/virtio-gpu.aliases and LICENSE.
+# The machine needs a virtio-gpu device (pci1af4,1050), gcc and,
 # from the install phase on, libdrm 2.4.134 with its tests
 # (/opt/drm-tests/amd64). Use a disposable VM.
 set -u
@@ -80,6 +81,37 @@ T=/opt/drm-tests/amd64
 LEGACY_MSG='drm: the DRM core misc/drm_core is loaded'
 NEW_MSG='drm_core: .*misc/drm.* is loaded'
 DRMADM=${DRMADM:-/usr/sbin/drmadm}
+XORG=/etc/X11/xorg.conf.d/20-drmadm.conf
+VIRTIO_DATA=/usr/share/drmadm/virtio-gpu.aliases
+
+virtio_bound() {
+	awk '$1 == "virtio_gpu"' /etc/driver_aliases | wc -l | tr -d ' '
+}
+
+virtio_state() {
+	want=$1
+	aliases=$(sed '/^[ 	]*#/d; /^[ 	]*$/d' "$VIRTIO_DATA")
+	n=$(echo "$aliases" | wc -w | tr -d ' ')
+	[ "$want" = unbound ] && n=0
+	[ "$(virtio_bound)" -eq "$n" ] && pass "virtio_gpu: $n aliases ($want)" ||
+	    bad "virtio_gpu: $(virtio_bound) aliases, expected $n ($want)"
+	for a in $aliases; do
+		d=$(awk -v a="$a" '{ x = $2; gsub(/"/, "", x); if (x == a) print $1 }' /etc/driver_aliases)
+		case $want:$d in
+		bound:virtio_gpu | unbound:) pass "virtio alias $a is $want" ;;
+		*) bad "virtio alias $a has driver $d, expected $want" ;;
+		esac
+		grep -q "^\* drmadm-virtio-alias: $a$" "$FRAG" &&
+		    pass "fragment records virtio alias $a" || bad "fragment lost virtio alias $a"
+	done
+	grep -q "^  virtio_gpu  *$n aliases" drmadm-status.out &&
+	    pass "status reports $n bound virtio aliases" || bad "status virtio count differs"
+}
+
+xorg_absent() {
+	[ ! -e "$XORG" ] && [ ! -h "$XORG" ] && pass "no drmadm Xorg configuration" ||
+	    bad "drmadm Xorg configuration is active"
+}
 
 modid() {
 	modinfo | awk -v m="$1" '$6 == m {print $1}'
@@ -254,7 +286,7 @@ phase_install() {
 	R=$PWD/repo
 	rm -rf "$P" "$R"
 	mkdir -p "$P/kernel/misc/amd64" "$P/kernel/drv/amd64" "$P/usr/kernel/drv/amd64" \
-	    "$P/usr/sbin" "$P/usr/share/man/man8" "$P/etc/X11/xorg.conf.d" \
+	    "$P/usr/sbin" "$P/usr/share/man/man8" "$P/usr/share/drmadm" \
 	    "$P/lib/svc/manifest/system"
 	ctf=
 	[ -f drm_facade_ctf.o ] && ctf="-z defaultextract drm_facade_ctf.o"
@@ -268,7 +300,8 @@ phase_install() {
 	step cp drmadm "$P/usr/sbin/drmadm" || exit 1
 	step cp drmadm.8 "$P/usr/share/man/man8/drmadm.8" || exit 1
 	step cp drm-perms.xml "$P/lib/svc/manifest/system/drm-perms.xml" || exit 1
-	step cp xorg.conf.d/20-virtio-gpu.conf "$P/etc/X11/xorg.conf.d/" || exit 1
+	# Data files are read from packaging/ through pkgsend's -d . below.
+	step svccfg validate drm-perms.xml || exit 1
 	step pkgrepo create "$R" || exit 1
 	step pkgrepo -s "$R" set publisher/prefix=illumos-drm || exit 1
 	for m in drmadm drm-core virtio-gpu cdrmnull; do
@@ -295,6 +328,10 @@ phase_guards() {
 	status
 	grep -q '^Selected stack: none' drmadm-status.out && pass "drmadm status: nothing selected" ||
 	    bad "drmadm status: a stack is selected after the installation"
+	[ "$(virtio_bound)" -eq 0 ] && pass "installation binds no virtio GPU" || bad "installation bound virtio GPU"
+	xorg_absent
+	[ ! -f /etc/X11/xorg.conf.d/20-virtio-gpu.conf ] && pass "no unconditional old Xorg configuration" ||
+	    bad "old unconditional Xorg configuration delivered"
 	unload_all || exit 1
 	echo
 	echo "--- legacy first"
@@ -343,6 +380,10 @@ phase_guards() {
 	unload_all || exit 1
 	echo
 	echo "--- the drivers bring their core, and the other core refuses"
+	# Guard test alone explicitly binds the package data; undo before select.
+	for a in $(sed '/^#/d; /^$/d' "$VIRTIO_DATA"); do
+		step update_drv -a -i "\"$a\"" virtio_gpu || exit 1
+	done
 	step devfsadm -i virtio_gpu
 	step devfsadm -i cdrmnull
 	step sh -c 'modinfo | grep -E " (drm|drm_core|virtio_gpu|cdrmnull|i915) "'
@@ -391,6 +432,9 @@ phase_guards() {
 	[ $legacy -gt 0 ] && [ $new -gt 0 ] && pass "races were won by both cores ($legacy legacy, $new new)" ||
 	    bad "the races were not exercised: $legacy won by the legacy core, $new by the new one"
 	unload_all
+	for a in $(sed '/^#/d; /^$/d' "$VIRTIO_DATA"); do
+		step update_drv -d -i "$a" virtio_gpu || bad "cannot undo guard-test alias $a"
+	done
 }
 
 phase_select_new() {
@@ -419,6 +463,8 @@ phase_select_new() {
 		pass "drmadm select refuses while another drmadm holds the lock"
 	fi
 	step rmdir /etc/system.d/.drmadm.lock
+	xorg_absent
+	[ "$(virtio_bound)" -eq 0 ] && pass "virtio aliases absent before select new" || bad "virtio aliases bound before selection"
 	before=$(i915_aliases)
 	echo "i915 has $before aliases"
 	[ "$before" -gt 0 ] && pass "i915 has its $before aliases before the selection" ||
@@ -432,9 +478,9 @@ phase_select_new() {
 	    bad "drmadm does not say that the GPU stays unbound"
 	gone=$(diff driver_aliases.before-new /etc/driver_aliases | grep -c '^<')
 	added=$(diff driver_aliases.before-new /etc/driver_aliases | grep -c '^>')
-	[ "$gone" -eq "$before" ] && [ "$added" -eq 0 ] &&
-	    pass "exactly the $before i915 aliases left driver_aliases" ||
-	    bad "$gone lines left driver_aliases and $added came, not $before and 0"
+	[ "$gone" -eq "$before" ] && [ "$added" -eq "$(virtio_bound)" ] &&
+	    pass "exactly the $before i915 aliases left and virtio aliases entered driver_aliases" ||
+	    bad "$gone lines left driver_aliases and $added came, not $before and $(virtio_bound)"
 	step cat "$FRAG"
 	fragment_excludes "$LEGACY"
 	[ "$(grep -c '^\* drmadm-alias: ' "$FRAG")" -eq "$before" ] &&
@@ -446,6 +492,9 @@ phase_select_new() {
 	fi
 	status
 	selected new "from the next boot"
+	virtio_state bound
+	step "$DRMADM" perms || bad "drmadm perms failed before new boot"
+	xorg_absent
 	step cp "$FRAG" frag.first
 	step "$DRMADM" select new | tee drmadm-select-new2.out
 	grep -q 'Nothing changed' drmadm-select-new2.out && cmp -s frag.first "$FRAG" &&
@@ -458,6 +507,18 @@ phase_after_new() {
 	echo "=== after-new: the boot with the new stack selected"
 	status
 	selected new "since the last boot"
+	virtio_state bound
+	cmp -s "$XORG" /usr/share/drmadm/20-modesetting.conf &&
+	    pass "boot service installed generic modesetting configuration" || bad "boot service did not install Xorg configuration"
+	step "$DRMADM" perms || bad "drmadm perms failed"
+	cmp -s "$XORG" /usr/share/drmadm/20-modesetting.conf &&
+	    pass "Xorg reconciliation is idempotent" || bad "Xorg reconciliation changed the configuration"
+	cp "$XORG" xorg.owned
+	echo '# local edit' >> "$XORG"
+	cp "$XORG" xorg.edited
+	step "$DRMADM" perms || bad "perms failed with edited configuration"
+	cmp -s "$XORG" xorg.edited && pass "edited drmadm configuration preserved" || bad "local edit overwritten"
+	cp xorg.owned "$XORG"
 	loaded drm || loaded i915 && bad "a legacy module is loaded" || pass "no legacy module is loaded"
 	excluded "misc/drm" -- modload -p misc/drm
 	excluded "/kernel/misc/amd64/drm" -- modload /kernel/misc/amd64/drm
@@ -486,12 +547,28 @@ phase_select_legacy() {
 	fragment_excludes "$NEW"
 	status
 	selected legacy "from the next boot"
+	virtio_state unbound
+	[ -f "$XORG" ] && pass "select legacy leaves current Xorg configuration until reconciliation" ||
+	    bad "select legacy changed current Xorg configuration"
 }
 
 phase_after_legacy() {
 	echo "=== after-legacy: the boot with the legacy stack selected"
 	status
 	selected legacy "since the last boot"
+	virtio_state unbound
+	xorg_absent
+	# An administrator's file and symlink must survive reconciliation.
+	mkdir -p "${XORG%/*}"
+	echo '# administrator configuration' > "$XORG"
+	cp "$XORG" xorg.admin
+	step "$DRMADM" perms || bad "perms failed with administrator configuration"
+	cmp -s "$XORG" xorg.admin && pass "administrator Xorg file preserved" || bad "administrator Xorg file changed"
+	rm -f "$XORG"
+	ln -s "$PWD/xorg.admin" "$XORG"
+	step "$DRMADM" perms || bad "perms failed with Xorg symlink"
+	[ -h "$XORG" ] && pass "administrator Xorg symlink preserved" || bad "administrator Xorg symlink changed"
+	rm -f "$XORG"
 	for m in drm_core virtio_gpu cdrmnull; do
 		loaded $m && bad "$m is loaded" || pass "$m is not loaded"
 	done
@@ -620,7 +697,7 @@ phase_rollback() {
 	echo "=== rollback: a failing alias move is undone (scratch root)"
 	R=/var/tmp/g7-rollback-root
 	rm -rf "$R"
-	mkdir -p "$R/etc/security" "$R/etc/system.d" || exit 1
+	mkdir -p "$R/etc/security" "$R/etc/system.d" "$R/var/run" || exit 1
 	for f in name_to_major minor_perm driver_aliases driver_classes; do
 		cp -p "/etc/$f" "$R/etc/$f" || exit 1
 	done
@@ -643,7 +720,8 @@ phase_rollback() {
 	[ ! -f "$R/$FRAG" ] && pass "the new fragment is removed again" || bad "a fragment is left"
 	step rm -f "$R/etc/driver_aliases.hold"
 	# Now with a previous fragment: select legacy, then a failing select new.
-	step "$DRMADM" -R "$R" select legacy > /dev/null 2>&1
+	# A scratch root has no boot archive. Seed its previous selection.
+	echo '* drmadm-selected: legacy' > "$R/$FRAG"
 	cp -p "$R/$FRAG" frag.rollback-before
 	cp -p "$R/etc/driver_aliases" driver_aliases.rollback-before
 	step touch "$R/etc/driver_aliases.hold"
@@ -654,6 +732,36 @@ phase_rollback() {
 	    cmp -s driver_aliases.rollback-before "$R/etc/driver_aliases" &&
 	    pass "a failing select restores the previous fragment and the aliases" ||
 	    bad "a failing select left the previous fragment or the aliases changed"
+	step rm -f "$R/etc/driver_aliases.hold"
+	# Virtio removal failure, without Intel moves masking it. A package is
+	# not required to remove previously managed bindings from a scratch root.
+	aliases=$(sed '/^#/d; /^$/d' "$VIRTIO_DATA")
+	for a in $aliases; do
+		step update_drv -n -b "$R" -a -i "\"$a\"" virtio_gpu || exit 1
+	done
+	echo '* drmadm-selected: new' > "$R/$FRAG"
+	for a in $aliases; do echo "* drmadm-virtio-alias: $a" >> "$R/$FRAG"; done
+	cp -p "$R/$FRAG" frag.rollback-virtio
+	cp -p "$R/etc/driver_aliases" driver_aliases.rollback-virtio
+	step touch "$R/etc/driver_aliases.hold"
+	step "$DRMADM" -R "$R" select legacy > drmadm-rollback-virtio.out 2>&1
+	rc=$?
+	cat drmadm-rollback-virtio.out
+	[ $rc -eq 1 ] && cmp -s frag.rollback-virtio "$R/$FRAG" &&
+	    cmp -s driver_aliases.rollback-virtio "$R/etc/driver_aliases" &&
+	    pass "failed virtio removal restores the fragment and all bindings" ||
+	    bad "failed virtio removal changed the fragment or bindings"
+	step rm -f "$R/etc/driver_aliases.hold"
+	# Removal now succeeds, but this scratch root has no boot archive.
+	# A failed bootadm must restore the already removed virtio binding too.
+	step "$DRMADM" -R "$R" select legacy > drmadm-rollback-archive.out 2>&1
+	rc=$?
+	cat drmadm-rollback-archive.out
+	[ $rc -eq 1 ] && grep -q 'bootadm.*failed' drmadm-rollback-archive.out &&
+	    cmp -s frag.rollback-virtio "$R/$FRAG" &&
+	    cmp -s driver_aliases.rollback-virtio "$R/etc/driver_aliases" &&
+	    pass "failed boot archive restores removed virtio binding and previous fragment" ||
+	    bad "boot archive failure did not restore the selection"
 	step rm -rf "$R"
 }
 
@@ -674,6 +782,18 @@ phase_select_root() {
 	    bad "drmadm -R changed the running root"
 	cmp -s /etc/driver_aliases /mnt/etc/driver_aliases && bad "the aliases of /mnt did not change" ||
 	    pass "drmadm -R moved the aliases in /mnt only"
+	v=$(awk '$1 == "virtio_gpu"' /mnt/etc/driver_aliases | wc -l | tr -d ' ')
+	case $other in
+	new) [ "$v" -gt 0 ] && pass "-R binds virtio aliases in clone" || bad "-R did not bind virtio aliases" ;;
+	legacy) [ "$v" -eq 0 ] && pass "-R removes virtio aliases in clone" || bad "-R kept virtio aliases" ;;
+	esac
+	[ -f "/mnt$XORG" ] && cp "/mnt$XORG" xorg.root-before
+	step "$DRMADM" -R /mnt perms || bad "-R perms failed"
+	if [ -f xorg.root-before ]; then
+		cmp -s xorg.root-before "/mnt$XORG" && pass "-R leaves Xorg for boot reconciliation" || bad "-R changed Xorg"
+	else
+		[ ! -f "/mnt$XORG" ] && pass "-R installs no active Xorg configuration" || bad "-R installed active Xorg configuration"
+	fi
 	step "$DRMADM" -R /mnt status
 	step beadm umount g7-root
 	step beadm destroy -F g7-root

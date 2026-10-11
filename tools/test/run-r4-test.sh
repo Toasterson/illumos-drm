@@ -210,7 +210,11 @@ step gcc -m64 -Wall -I drm -I /usr/include/libdrm -o drm_r4_test drm_r4_test.c \
 
 msgs=$(wc -l < /var/adm/messages)
 step cp virtio_gpu /kernel/drv/amd64/virtio_gpu || exit 1
-step add_drv -i '"pci1af4,1050"' -m '* 0666 root sys' virtio_gpu || fail=1
+# This isolated harness explicitly binds its test device; installing the
+# virtio-gpu package no longer binds it. Package users select new and reboot.
+step add_drv -m '* 0666 root sys' virtio_gpu || fail=1
+step update_drv -a -i '"pci1af4,1050"' virtio_gpu || fail=1
+step devfsadm -i virtio_gpu || fail=1
 sleep 2
 step sh -c "tail -n +$((msgs + 1)) /var/adm/messages | grep -i -E 'virtio|drm'"
 step sh -c 'modinfo | grep -E "virtio|drm"'
