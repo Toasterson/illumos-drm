@@ -15,13 +15,24 @@ import subprocess
 import sys
 
 header = Path(sys.argv[1]).resolve() / "include/drm/intel/pciids.h"
-groups = ("SNB", "IVB", "HSW", "BDW", "SKL", "KBL", "CFL", "CML")
+groups = ("SNB", "IVB", "HSW", "BDW", "SKL", "KBL", "CFL", "WHL", "CML")
 source = '#include "' + str(header) + '"\n#define ALIAS(id, ...) id\n'
 source += "\n".join(f"INTEL_{group}_IDS(ALIAS)" for group in groups)
 result = subprocess.run(shlex.split(os.environ.get("CC", "cc")) +
                         ["-E", "-P", "-x", "c", "-"], input=source,
                         text=True, capture_output=True, check=True)
 ids = sorted(set(int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]+", result.stdout)))
+# Cross-check the native stolen-memory inventory too. Patch 0009 excludes
+# Valleyview (the only SoC in those four tables); every other listed ID
+# must receive binding data. This catches separate groups such as WHL.
+repo = Path(__file__).resolve().parents[2]
+pci = (repo / "linuxkpi/src/lkpi_pci.c").read_text()
+known = set()
+for body in re.findall(r"static const uint16_t lkpi_intel_gen[6789]\[\] = \{(.*?)\};", pci, re.S):
+    known.update(int(x, 16) for x in re.findall(r"0x[0-9a-fA-F]+", body))
+known.difference_update((0x0f30, 0x0f31, 0x0f32, 0x0f33))
+if set(ids) != known:
+    sys.exit("alias groups and admitted stolen-memory inventory disagree")
 if not ids or 0x1916 not in ids:
     sys.exit("Skylake 1916 missing from alias expansion")
 print("# SPDX-License-Identifier: MIT")

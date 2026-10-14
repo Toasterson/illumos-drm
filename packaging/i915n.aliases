@@ -135,6 +135,11 @@ pci8086,3e99
 pci8086,3e9a
 pci8086,3e9b
 pci8086,3e9c
+pci8086,3ea0
+pci8086,3ea1
+pci8086,3ea2
+pci8086,3ea3
+pci8086,3ea4
 pci8086,3ea5
 pci8086,3ea6
 pci8086,3ea7
