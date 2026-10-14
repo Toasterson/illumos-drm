@@ -322,6 +322,20 @@ i915n_con_attach_undo(dev_info_t *dip)
 	i915n_con_st.dip = NULL;
 }
 
+boolean_t
+i915n_con_boot_fb(dev_info_t *dip, struct i915n_con_fb *fb)
+{
+	if (i915n_con_st.dip != dip)
+		return (B_FALSE);
+	fb->paddr = fb_info.paddr;
+	fb->size = fb_info.fb_size;
+	fb->pitch = fb_info.pitch;
+	fb->width = fb_info.screen.x;
+	fb->height = fb_info.screen.y;
+	fb->bpp = fb_info.bpp;
+	return (B_TRUE);
+}
+
 int
 i915n_con_attach_late(dev_info_t *dip)
 {

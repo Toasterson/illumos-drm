@@ -25,6 +25,9 @@ struct i915n_con_fb {
 
 /* --- the illumos side (i915_illumos_con.c) --- */
 
+/* Loader framebuffer for the device selected as the boot console. */
+extern boolean_t i915n_con_boot_fb(dev_info_t *, struct i915n_con_fb *);
+
 /* attach(9E), before the DRM device exists: the console minor first. */
 extern int i915n_con_attach_early(dev_info_t *dip);
 /* attach(9E), after i915's probe: take the console over, or undo. */

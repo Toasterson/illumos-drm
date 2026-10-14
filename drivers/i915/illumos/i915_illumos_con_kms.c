@@ -64,6 +64,7 @@
 
 #include "i915_drv.h"
 #include "i915_vma.h"
+#include "intel_memory_region.h"
 #include "gt/intel_gt.h"
 #include "gt/intel_gtt.h"
 #include "display/intel_de.h"
@@ -139,6 +140,95 @@ i915n_lastclose(struct drm_device *dev)
 		i915n_con_kms_restore();
 }
 
+/*
+ * Headless does not reconstruct initial planes, but firmware scanout may
+ * still be active. Keep both its PTEs and stolen pages out of GEM's allocators.
+ * One boot console is selected by the illumos half. These are reservations,
+ * not a new binding: never rewrite firmware PTEs or touch display registers.
+ */
+static struct {
+	struct drm_i915_private *i915;
+	struct drm_mm_node ggtt, stolen;
+} boot_fb;
+
+void
+i915n_headless_fb_release(struct drm_i915_private *i915)
+{
+	if (boot_fb.i915 != i915)
+		return;
+	mutex_lock(&to_gt(i915)->ggtt->vm.mutex);
+	if (drm_mm_node_allocated(&boot_fb.ggtt))
+		drm_mm_remove_node(&boot_fb.ggtt);
+	mutex_unlock(&to_gt(i915)->ggtt->vm.mutex);
+	mutex_lock(&i915->mm.stolen_lock);
+	if (drm_mm_node_allocated(&boot_fb.stolen))
+		drm_mm_remove_node(&boot_fb.stolen);
+	mutex_unlock(&i915->mm.stolen_lock);
+	memset(&boot_fb, 0, sizeof (boot_fb));
+}
+
+int
+i915n_headless_fb_reserve(struct drm_i915_private *i915)
+{
+	struct i915_ggtt *ggtt = to_gt(i915)->ggtt;
+	struct intel_memory_region *mem = i915->mm.stolen_region;
+	struct i915n_con_fb fb;
+	dev_info_t *dip = lkpi_dev_dip(i915->drm.dev);
+	u64 start, size, phys, off;
+	bool present, local;
+	int ret;
+
+	if (HAS_DISPLAY(i915->display) || !i915n_con_boot_fb(dip, &fb))
+		return (0);
+	/* Refuse before GEM clears the mapping if it cannot be protected. */
+	if (boot_fb.i915 || !mem || !drm_mm_initialized(&i915->mm.stolen) ||
+	    fb.paddr < ggtt->gmadr.start || !fb.size || !fb.pitch ||
+	    !fb.height || fb.size < (u64)fb.pitch * fb.height)
+		return (-EINVAL);
+	start = fb.paddr - ggtt->gmadr.start;
+	if (!IS_ALIGNED(start, PAGE_SIZE) || !IS_ALIGNED(fb.size, PAGE_SIZE) ||
+	    start >= resource_size(&ggtt->gmadr) ||
+	    fb.size > resource_size(&ggtt->gmadr) - start ||
+	    start >= ggtt->vm.total - PAGE_SIZE ||
+	    fb.size > ggtt->vm.total - PAGE_SIZE - start)
+		return (-EINVAL);
+	size = fb.size;
+	phys = intel_ggtt_read_entry(&ggtt->vm, start, &present, &local);
+	if (!present || local || phys < mem->region.start ||
+	    phys > mem->region.end || size - 1 > mem->region.end - phys)
+		return (-EINVAL);
+	/* Validate every page, not just the first: no invented contiguous backing. */
+	for (off = 0; off < size; off += PAGE_SIZE) {
+		u64 addr = intel_ggtt_read_entry(&ggtt->vm, start + off,
+		    &present, &local);
+		if (!present || local || addr != phys + off)
+			return (-EINVAL);
+	}
+	boot_fb.i915 = i915;
+	boot_fb.stolen.start = phys - mem->region.start;
+	boot_fb.stolen.size = size;
+	mutex_lock(&i915->mm.stolen_lock);
+	ret = drm_mm_reserve_node(&i915->mm.stolen, &boot_fb.stolen);
+	mutex_unlock(&i915->mm.stolen_lock);
+	if (ret)
+		goto fail;
+	boot_fb.ggtt.start = start;
+	boot_fb.ggtt.size = size;
+	boot_fb.ggtt.color = I915_COLOR_UNEVICTABLE;
+	mutex_lock(&ggtt->vm.mutex);
+	ret = drm_mm_reserve_node(&ggtt->vm.mm, &boot_fb.ggtt);
+	mutex_unlock(&ggtt->vm.mutex);
+	if (ret)
+		goto fail;
+	drm_info(&i915->drm, "headless console: reserved firmware FB "
+	    "GGTT [0x%llx,0x%llx), stolen [0x%llx,0x%llx)\n",
+	    start, start + size, phys, phys + size);
+	return (0);
+fail:
+	i915n_headless_fb_release(i915);
+	return (ret);
+}
+
 /* Does the console framebuffer match what gfx_private draws into? */
 static bool
 con_fb_matches(struct drm_device *drm, struct drm_framebuffer *fb,
@@ -187,7 +277,7 @@ i915n_con_kms_takeover(dev_info_t *dip, const struct i915n_con_fb *want)
 		return (-EINVAL);
 	i915 = to_i915(drm);
 	if (i915->display == NULL || !HAS_DISPLAY(i915->display))
-		return (-ENODEV);
+		return (boot_fb.i915 == i915 ? 0 : -ENODEV);
 	aperture = to_gt(i915)->ggtt->gmadr.start;
 
 	drm_modeset_lock_all(drm);

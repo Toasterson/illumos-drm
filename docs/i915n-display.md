@@ -88,3 +88,13 @@ also excluded from legacy fallback when the manifests/data are later absent.
 Conflicting bindings to another driver remain untouched. The host regression
 suite `tools/test/test-drmadm-aliases.py` exercises these cases with mocked
 system commands; it does not establish native driver binding.
+
+Headless firmware console preservation: before GEM initializes the GGTT, the
+boot-console device validates the loader framebuffer's complete aperture range
+and every backing PTE. For a page-aligned, contiguous framebuffer in initialized
+stolen system memory, it reserves both ranges without changing their mappings.
+The gfx_private console remains available, but no KMS outputs or modesetting
+are enabled. Unsupported backing or reservation failure rejects attach before
+GEM clears the boot framebuffer; other devices without the boot console need
+no reservation. Reservations are removed on probe failure and driver release.
+This does not implement suspend, quiesce, or restoration after a GT reset.
