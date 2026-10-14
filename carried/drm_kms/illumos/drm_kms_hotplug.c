@@ -36,10 +36,11 @@ uint64_t drm_hotplug_sent, drm_hotplug_failed, drm_hotplug_coalesced;
 static void
 hotplug_queue(struct drm_hotplug *hp)
 {
+	unsigned long now = jiffies;
 	unsigned long delay = msecs_to_jiffies(250);
 
-	if (time_before(jiffies, hp->next))
-		delay = max(delay, hp->next - jiffies);
+	if (time_before(now, hp->next))
+		delay = max(delay, hp->next - now);
 	/* Do not move an already scheduled deadline during a storm. */
 	queue_delayed_work(system_wq, &hp->work, delay);
 }
