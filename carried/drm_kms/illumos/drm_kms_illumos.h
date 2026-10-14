@@ -24,4 +24,9 @@ extern const struct drm_illumos_lkms_funcs drm_kms_illumos_funcs;
 extern void drm_kms_events_release(struct drm_device *dev,
     struct drm_file *file);
 
+/* Internal sysevent bridge: reason bits HPD=1, topology=2, property=4. */
+extern int drm_kms_hotplug_register(struct drm_device *);
+extern void drm_kms_hotplug_unregister(struct drm_device *);
+extern void drm_kms_hotplug_notify(struct drm_device *, uint32_t, uint32_t);
+
 #endif

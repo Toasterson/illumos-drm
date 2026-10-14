@@ -217,9 +217,15 @@ drm_kms_register_dev(struct drm_device *dev)
 	 * the device counts as registered, then its objects register.
 	 */
 	drm_mode_config_validate(dev);
+	if ((ret = drm_kms_hotplug_register(dev)) != 0)
+		return (ret);
 	WRITE_ONCE(dev->illumos_kms_registered, true);
-	if ((ret = drm_modeset_register_all(dev)) != 0)
+	if ((ret = drm_modeset_register_all(dev)) != 0) {
 		WRITE_ONCE(dev->illumos_kms_registered, false);
+		drm_kms_hotplug_unregister(dev);
+	} else {
+		drm_kms_hotplug_notify(dev, 0, 2);
+	}
 	return (ret);
 }
 
@@ -228,6 +234,7 @@ drm_kms_unregister_dev(struct drm_device *dev)
 {
 	/* Linux's drm_dev_unregister(): unregistered, then the objects. */
 	WRITE_ONCE(dev->illumos_kms_registered, false);
+	drm_kms_hotplug_unregister(dev);
 	drm_modeset_unregister_all(dev);
 }
 
