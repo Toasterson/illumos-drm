@@ -13,6 +13,7 @@ $mapfile_version 2
 SYMBOL_SCOPE {
 	global:
 		ddi_log_sysevent		{ FLAGS = EXTERN };
+		ddi_pathname		{ FLAGS = EXTERN };
 		#
 		# The kernel's C memory and string functions
 		# (common/util/memstr.c, common/util/string.c), which the
