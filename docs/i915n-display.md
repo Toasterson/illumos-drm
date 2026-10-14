@@ -27,8 +27,8 @@ when `HAS_DISPLAY` is false and preserves GT interrupts on that path.
 
 Use a disposable boot environment and preserve the known-good boot entry.
 Update the alternate root's boot archive after editing configuration, then
-boot it. Headless is not a framebuffer-preservation mode: it also disables
-the i915n console. Have SSH/serial recovery access before testing it.
+boot it. Headless keeps a validated firmware framebuffer reservation and the
+gfx_private console; it provides no KMS outputs. Have SSH recovery access.
 
 ## Audited boundaries
 
@@ -40,9 +40,9 @@ the i915n console. Have SSH/serial recovery access before testing it.
 * The DMC worker calls `request_firmware`; LinuxKPI loads through illumos
   `firmware_open/read/close`, using `firmware/i915/<basename>` in the module
   search path. Missing DMC retains the display INIT power reference and logs
-  that runtime power management is disabled. The package does not supply the
-  firmware blobs. This is functional display without DMC power saving, not
-  validation of Skylake power behavior. GuC/HuC are not needed for display on
+  that runtime power management is disabled. The package supplies unmodified
+  SKL 1.27 and KBL 1.04 DMC blobs with their Intel license (see firmware/README.md).
+  This is not validation of Skylake power behavior. GuC/HuC are not needed for display on
   these admitted devices.
 * The runtime-PM shim keeps devices active. PCI attach/detach currently reject
   DDI_RESUME/DDI_SUSPEND; this pilot makes no suspend/resume claim.
@@ -89,7 +89,12 @@ Conflicting bindings to another driver remain untouched. The host regression
 suite `tools/test/test-drmadm-aliases.py` exercises these cases with mocked
 system commands; it does not establish native driver binding.
 
-Headless firmware console preservation (currently the Ivy Bridge console path):
+The console selects the Intel device whose BAR2 aperture contains the complete
+loader RGB framebuffer, rather than using a generation whitelist. Display
+takeover preserves its original GGTT address for gfx_private. This still
+requires a supported loader framebuffer format; VGA text is not converted.
+
+Headless firmware console preservation:
 before GEM initializes the GGTT, the boot-console device validates the loader framebuffer's complete aperture range
 and every backing PTE. For a page-aligned, contiguous framebuffer in initialized
 stolen system memory, it reserves both ranges without changing their mappings.

@@ -46,7 +46,7 @@
  *	- a console device refuses detach (consconfig holds its node for the
  *	  system's life anyway).
  *
- * One console per system: the first Ivy Bridge device that takes it.
+ * One console per system: the device whose aperture contains the loader framebuffer.
  */
 
 #include <sys/types.h>
@@ -56,6 +56,7 @@
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
 #include <sys/stat.h>
+#include <sys/pci.h>
 #include <sys/kd.h>
 #include <sys/visual_io.h>
 #include <sys/gfx_private.h>
@@ -118,11 +119,6 @@ struct {
 	uint32_t	flipped;
 	uint32_t	surf;
 } i915n_con_panic_log;
-
-/* Ivy Bridge GPUs (Linux's INTEL_IVB_*_IDS): display on illumos. */
-static const uint16_t i915n_con_ids[] = {
-	0x0152, 0x0156, 0x015a, 0x0162, 0x0166, 0x016a
-};
 
 static boolean_t
 con_minor(dev_t dev)
@@ -246,8 +242,10 @@ i915n_con_panic(void *arg, int code)
 static boolean_t
 con_wanted(dev_info_t *dip)
 {
-	int vendor, device, inst;
-	uint_t i;
+	int vendor, inst, *data;
+	uint_t i, count;
+	boolean_t match = B_FALSE;
+	pci_regspec_t *regs;
 
 	if (i915n_con_st.dip != NULL)
 		return (B_FALSE);
@@ -256,16 +254,26 @@ con_wanted(dev_info_t *dip)
 		return (B_FALSE);
 	vendor = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
 	    "vendor-id", -1);
-	device = ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
-	    "device-id", -1);
 	if (vendor != 0x8086)
 		return (B_FALSE);
-	for (i = 0; i < sizeof (i915n_con_ids) / sizeof (i915n_con_ids[0]);
-	    i++) {
-		if (device == i915n_con_ids[i])
-			break;
+	/* Gen6-Gen9.5 use BAR2 for the mappable GGTT aperture. Never
+	 * claim another GPU's boot framebuffer merely because it is Intel. */
+	if (ddi_prop_lookup_int_array(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+	    "assigned-addresses", &data, &count) != DDI_PROP_SUCCESS)
+		return (B_FALSE);
+	regs = (pci_regspec_t *)(void *)data;
+	for (i = 0; count % 5 == 0 && i < count / 5; i++) {
+		uint64_t base, size;
+		if (PCI_REG_REG_G(regs[i].pci_phys_hi) != PCI_CONF_BASE2)
+			continue;
+		base = ((uint64_t)regs[i].pci_phys_mid << 32) | regs[i].pci_phys_low;
+		size = ((uint64_t)regs[i].pci_size_hi << 32) | regs[i].pci_size_low;
+		if (fb_info.paddr >= base && fb_info.paddr - base < size &&
+		    fb_info.fb_size && fb_info.fb_size <= size - (fb_info.paddr - base))
+			match = B_TRUE;
 	}
-	if (i == sizeof (i915n_con_ids) / sizeof (i915n_con_ids[0]))
+	ddi_prop_free(data);
+	if (!match)
 		return (B_FALSE);
 	/* A 32-bit RGB framebuffer from the loader (not VGA text). */
 	if (fb_info.fb_type != I915N_FB_TYPE_RGB || fb_info.paddr == 0 ||
