@@ -428,6 +428,14 @@ i915n_con_kms_panic(uint32_t *surfp)
 	if (!READ_ONCE(i915n_con.active))
 		return (0);
 	display = to_i915(i915n_con.drm)->display;
+	/*
+	 * This emergency path programs the Ivy Bridge plane directly,
+	 * outside the normal atomic modeset. Never apply that register
+	 * sequence to a newly enabled platform (SKL uses universal planes).
+	 * Normal console/VT restoration uses the platform's atomic hooks.
+	 */
+	if (!display->platform.ivybridge)
+		return (0);
 	p = to_intel_plane(i915n_con.crtc->primary)->i9xx_plane;
 	cntr = intel_de_read_fw(display, DSPCNTR(display, p));
 	cntr &= ~(DISP_FORMAT_MASK | DISP_TILED);

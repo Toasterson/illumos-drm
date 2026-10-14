@@ -5,7 +5,7 @@
  * The illumos module of Linux's i915 driver: the kernel module "i915n"
  * (the name G7 reserved for this stack's Intel driver; its package ships
  * the driver without PCI aliases and `drmadm select new` moves the Intel
- * GPU aliases to it), with display on Ivy Bridge (the display build:
+ * GPU aliases to it), with display on admitted GPUs (the display build:
  * compiled with -DI915N_DISPLAY, build.sh's default I915_DISPLAY=1) or
  * headless (build.sh I915_DISPLAY=0: no I915N_DISPLAY).
  *
@@ -42,6 +42,46 @@ extern int lkpi_module_init(void);
 extern void lkpi_module_exit(void);
 
 static struct pci_driver *i915n_pci_driver;
+
+/*
+ * Attach-time policy, before display register access. The driver's create
+ * path has populated i915's device/runtime info before display probe.
+ * DDI_PROP_DONTPASS permits per-node and driver.conf defaults but never
+ * inherits policy from a parent PCI bridge. Lists are owned by DDI.
+ */
+static bool
+i915n_prop_contains(dev_info_t *dip, const char *name, int value)
+{
+	int *values;
+	uint_t count, n;
+	bool found = false;
+
+	if (ddi_prop_lookup_int_array(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+	    (char *)name, &values, &count) != DDI_PROP_SUCCESS)
+		return (false);
+	for (n = 0; n < count; n++) {
+		if (values[n] == value) {
+			found = true;
+			break;
+		}
+	}
+	ddi_prop_free(values);
+	return (found);
+}
+
+bool
+i915_illumos_force_no_display(struct pci_dev *pdev)
+{
+	dev_info_t *dip = lkpi_dev_dip(&pdev->dev);
+	struct drm_i915_private *i915 = to_i915(pci_get_drvdata(pdev));
+
+	return (ddi_prop_get_int(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+	    "i915n-force-no-display", 0) != 0 ||
+	    i915n_prop_contains(dip, "i915n-no-display-device-ids",
+	    pdev->device) ||
+	    i915n_prop_contains(dip, "i915n-no-display-generations",
+	    GRAPHICS_VER(i915)));
+}
 
 static int
 i915n_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
@@ -476,7 +516,7 @@ i915_illumos_de_master_enable(struct drm_i915_private *i915, u32 de_ier,
  * gen8_irq_reset(): the gen8+ display interrupt registers quiet, so that
  * nothing the firmware left armed reaches the master interrupt. Pipe A
  * is in the always-on power well; the other pipes' registers are only
- * reachable with their power wells on (display code, not built), and the
+ * reachable with their power wells on (absent on this headless path), and the
  * firmware does not arm their interrupts.
  */
 void

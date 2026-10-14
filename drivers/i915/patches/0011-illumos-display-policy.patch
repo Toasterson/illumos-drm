@@ -1,0 +1,35 @@
+From: illumos-drm <illumos-drm@code.aopc.cloud>
+Subject: [PATCH 11] i915: allow display unless driver.conf requests headless
+
+Use the native display description on every GPU admitted by the port's
+probe guard (0009). Keep Linux's no_display handling as an explicit,
+per-device / per-generation recovery option. Patch 0006 continues to
+supply headless GT interrupt plumbing only when HAS_DISPLAY is false;
+it must not be removed while the headless option remains supported.
+
+--- a/drivers/gpu/drm/i915/display/intel_display_device.c
++++ b/drivers/gpu/drm/i915/display/intel_display_device.c
+@@ -1707,8 +1707,21 @@
+ 		drm_dbg_kms(display->drm,
+ 			    "Unknown device ID %04x; disabling display.\n",
+ 			    pdev->device);
++		goto no_display;
++	}
++
++#ifdef __illumos__
++	{
++		extern bool i915_illumos_force_no_display(struct pci_dev *);
++
++		if (i915_illumos_force_no_display(pdev)) {
++			drm_info(display->drm,
++				 "display on %s disabled by driver.conf; running headless\n",
++				 desc->name);
++			goto no_display;
++		}
++	}
++#endif
+-		goto no_display;
+-	}
+ 
+ 	info = desc->info;
+ 	if (!info)
