@@ -126,7 +126,14 @@ or
 .Sy i915n ,
 and those
 .Nm
-recorded before.
+recorded before. For new it also includes the admitted GPU IDs from
+.Pa /usr/share/drmadm/i915n.aliases
+when delivered by the installed i915n package. This covers devices such as
+Skylake that the legacy driver does not list. Selection records that set
+separately; selecting legacy removes new-only bindings instead of handing
+them to the old driver. Older i915n packages without this file retain the
+legacy-derived behavior. After upgrading, run select new again in the test
+boot environment and reboot to add these bindings.
 When the driver of the selected stack is not installed, the aliases stay
 unbound, and an Intel GPU falls back to the generic VGA console driver,
 .Sy vgatext .

@@ -61,3 +61,9 @@ depend fmri=pkg:/driver/graphics/drm-core@0.0.2 type=incorporate
 depend fmri=pkg:/driver/graphics/linuxkpi@0.0.2 type=incorporate
 depend fmri=pkg:/driver/graphics/drm-kms@0.0.2 type=incorporate
 license LICENSE.i915n license=MIT-i915
+
+# Inactive PCI data; installing this package never binds a GPU.
+dir path=usr owner=root group=sys mode=0755
+dir path=usr/share owner=root group=sys mode=0755
+dir path=usr/share/drmadm owner=root group=bin mode=0755
+file packaging/i915n.aliases path=usr/share/drmadm/i915n.aliases owner=root group=bin mode=0444

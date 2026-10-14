@@ -73,6 +73,8 @@ LOCK=etc/system.d/.drmadm.lock
 LEGACY_PKG=driver/graphics/drm
 LEGACY_DRIVER=i915
 NEW_DRIVER=i915n
+NEW_PKG=driver/graphics/i915n
+NEW_ALIASES=usr/share/drmadm/i915n.aliases
 VIRTIO_DRIVER=virtio_gpu
 VIRTIO_PKG=driver/graphics/virtio-gpu
 VIRTIO_ALIASES=usr/share/drmadm/virtio-gpu.aliases
@@ -191,6 +193,21 @@ manifest_aliases() {
 				print a
 			}
 	    }' | sort -u
+}
+
+# New Intel IDs are independent of gfx-drm's older PCI table. Missing data
+# is allowed for older i915n packages. Record this set separately so a
+# later legacy selection never hands new-only aliases to the old driver,
+# even after i915n is uninstalled and its data file disappears.
+intel_aliases() {
+	pkgcmd list -H "$NEW_PKG" >/dev/null 2>&1 || return 0
+	f=$(under "$NEW_ALIASES")
+	[ -f "$f" ] || return 0
+	awk '
+	    /^[ \t]*(#|$)/ { next }
+	    NF != 1 || $1 !~ /^pci8086,[0-9a-f]+$/ { exit 1 }
+	    { print }
+	' "$f" || die "invalid alias data in $f"
 }
 
 # virtio_aliases: package data, never a binding in an IPS driver action.
@@ -840,7 +857,8 @@ do_status() {
 		fi
 		printf '  %-7s %s aliases%s\n' "$d" "$n" "$s"
 	done
-	all=$(words "$man $(aliases_of "$LEGACY_DRIVER") $(aliases_of "$NEW_DRIVER") $(recorded alias)" |
+	idata=$(intel_aliases) || die "cannot read Intel alias data"
+	all=$(words "$man $idata $(aliases_of "$LEGACY_DRIVER") $(aliases_of "$NEW_DRIVER") $(recorded alias)" |
 	    tr ' ' '\n' | sort -u)
 	unbound=0
 	other=""
@@ -976,9 +994,16 @@ do_select() {
 	man=$(manifest_aliases)
 	bound_to=$(aliases_of "$to")
 	bound_from=$(aliases_of "$from")
-	all=$(words "$man $bound_to $bound_from $(recorded alias)" | tr ' ' '\n' | sort -u)
-	if [ "$target" = legacy ] && [ -n "$man" ]; then
-		want=$man
+	idata=$(intel_aliases) || die "cannot read Intel alias data"
+	intel_all=$(words "$idata $(recorded i915n-alias)" | tr ' ' '\n' | sort -u)
+	all=$(words "$man $intel_all $bound_to $bound_from $(recorded alias)" | tr ' ' '\n' | sort -u)
+	if [ "$target" = legacy ]; then
+		if [ -n "$man" ]; then
+			want=$man
+		else
+			# Without a legacy manifest, never assume new IDs work there.
+			want=$(minus "$all" "$intel_all")
+		fi
 	else
 		want=$all
 	fi
@@ -1028,11 +1053,14 @@ do_select() {
 		echo "* The $target DRM stack is selected: the modules of the other stack"
 		echo "* are excluded from loading. To change it, run drmadm select."
 		echo "* To undo by hand, remove this file, run bootadm update-archive and"
-		echo "* give the Intel GPU aliases below back to i915 (update_drv -a -i)."
+		echo "* restore only the aliases declared by the installed legacy i915 package."
 		echo "* drmadm-selected: $target"
 		echo "* drmadm-time: $(date +%s)"
 		for a in $all; do
 			echo "* drmadm-alias: $a"
+		done
+		for a in $intel_all; do
+			echo "* drmadm-i915n-alias: $a"
 		done
 		for a in $virtio_all; do
 			echo "* drmadm-virtio-alias: $a"
