@@ -149,8 +149,8 @@ EXPORT_SYMBOL(drm_lease_filter_crtcs);
 
 /*
  * --- sysfs (drm_sysfs.c) ----------------------------------------------------
- * illumos has no sysfs: hotplug and property events are not sent to user
- * space (Xorg on illumos has no udev and probes on its own). A connector
+ * illumos has no sysfs: hotplug/property notifications use the bounded
+ * sysevent bridge in drm_kms_hotplug.c. A connector
  * still gets its class device, as on Linux (connector->kdev, named
  * card<N>-<connector>, child of the DRM device's struct device), because
  * drivers use it as the parent and name of what hangs off the connector:
